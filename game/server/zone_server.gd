@@ -12,6 +12,9 @@ const SAVE_INTERVAL := 30.0
 const STATS_INTERVAL := 10.0
 const AVATAR_CHANGE_COOLDOWN := 2.0
 const REPORTS_PER_MINUTE := 5
+# How far an input's world tick may lag behind (or run ahead of) the server.
+const MAX_INPUT_LAG_TICKS := 45
+const MAX_INPUT_LEAD_TICKS := 3
 
 
 class Player:
@@ -37,6 +40,7 @@ class Player:
 	var report_times: Array = []
 	var riding := {}  # {line, vehicle, slot, boarded_at, stop_request}
 	var board_times: Array = []
+	var tram_hit_at := -INF
 
 
 var zone: ZoneData
@@ -44,6 +48,8 @@ var store: ServerStore
 var social: SocialRules
 var spawner: SpawnPicker
 var transit: TransitNetwork
+var props: PropWorld
+var weather: WeatherService
 var options := {}
 var players := {}  # peer id -> Player
 var pending := {}  # peer id -> connect time, until c_hello arrives
@@ -51,7 +57,7 @@ var tick := 0
 
 var _grid := {}  # Vector2i -> Array[int]
 var _last_save := 0.0
-var _stats := {"ticks": 0, "tick_us": 0, "tick_us_max": 0, "sim_us": 0, "sim_steps": 0, "idle_steps": 0, "dropped": 0, "gap_filled": 0, "snap_us": 0, "snap_bytes": 0, "snap_entities": 0, "snaps": 0, "at": 0.0}
+var _stats := {"ticks": 0, "tick_us": 0, "tick_us_max": 0, "sim_us": 0, "sim_steps": 0, "idle_steps": 0, "dropped": 0, "gap_filled": 0, "snap_us": 0, "snap_bytes": 0, "snap_entities": 0, "snaps": 0, "trams_us": 0, "motor_us": 0, "props_us": 0, "at": 0.0}
 var _started_at := 0.0
 
 
@@ -76,6 +82,18 @@ func setup(opts: Dictionary) -> Error:
 	social = SocialRules.new(_blocked_either, _players_near.bind(Protocol.EMOTE_RANGE))
 	spawner = SpawnPicker.new(zone)
 	transit = zone.transit
+	props = PropWorld.new()
+	props.name = "Props"
+	add_child(props)
+	props.setup(zone)
+	weather = WeatherService.new()
+	weather.name = "Weather"
+	add_child(weather)
+	weather.setup(zone, str(opts.get("weather", "live")))
+	weather.changed.connect(func(info: Dictionary):
+		for pl in players.values():
+			if Net.is_open(pl.id):
+				Net.s_weather.rpc_id(pl.id, info))
 	var err := Net.start_server(int(opts.port), str(opts.get("transport", "enet")))
 	if err != OK:
 		return err
@@ -85,6 +103,10 @@ func setup(opts: Dictionary) -> Error:
 	_started_at = now()
 	_last_save = now()
 	_stats.at = now()
+	var layout := StreetLayout.for_zone(zone)
+	log_line("street furniture: %d lamps, %d parked cars, %d benches, %d bollards, %d stops; %d loose props" % [
+		layout.lamps.size(), layout.cars.size(), layout.benches.size(), layout.bollards.size(), layout.stops.size(),
+		props.bodies.size()])
 	log_line("zone %s v%d (%d buildings, %d spawn points, %s) listening on %s/%d, data in %s" % [
 		zone.zone_id, zone.version, zone.buildings.size(), zone.spawn_points.size(),
 		ProjectSettings.get_setting("physics/3d/physics_engine"),
@@ -114,7 +136,7 @@ func _on_peer_disconnected(peer: int) -> void:
 	players.erase(peer)
 	_dispatch(social.on_disconnect(peer))
 	for other in players.values():
-		if other.known.erase(peer):
+		if other.known.erase(peer) and Net.is_open(other.id):
 			Net.s_entity_leave.rpc_id(other.id, peer)
 	pl.body.queue_free()
 	store.audit("leave", {"account": pl.account_id, "peer": peer})
@@ -155,6 +177,7 @@ func on_hello(peer: int, payload: Dictionary) -> void:
 
 	var mode := str(payload.get("spawn_mode", "social"))
 	var spawn := _choose_spawn(pl, mode)
+	spawn.pos = free_spot(pl.body, spawn.pos)
 	pl.body.global_position = spawn.pos
 	pl.yaw = spawn.yaw
 	pending.erase(peer)
@@ -167,6 +190,10 @@ func on_hello(peer: int, payload: Dictionary) -> void:
 		"tick_rate": Protocol.TICK_RATE, "tick": tick, "server_time": server_time(),
 		"spawn": spawn.pos, "yaw": spawn.yaw, "name": display_name, "avatar": pl.avatar,
 	})
+	var moved := props.displaced_poses()
+	if not moved.is_empty():
+		Net.s_props.rpc_id(peer, SnapshotCodec.encode_props(moved))
+	Net.s_weather.rpc_id(peer, weather.current)
 	log_line("%s joined at %s via %s (%d online)" % [display_name, spawn.pos.snapped(Vector3.ONE * 0.1), spawn.how, players.size()])
 
 
@@ -193,6 +220,34 @@ func _choose_spawn(pl: Player, mode: String) -> Dictionary:
 	return {"pos": pos, "yaw": spawner.rng.randf() * TAU, "how": mode}
 
 
+## [feet position] if a player fits standing at EN point `en` (on the
+## ground or a platform, not in a car, bench or wall), else [].
+func standing_spot(body: CharacterBody3D, en: Vector2) -> Array:
+	var space := get_world_3d().direct_space_state
+	var top := Vector3(en.x, 3.0, -en.y)
+	var hit := space.intersect_ray(PhysicsRayQueryParameters3D.create(top, top - Vector3(0, 4.5, 0), Protocol.LAYER_WORLD))
+	if hit.is_empty() or hit.position.y > 0.5 or hit.normal.y < 0.7:
+		return []
+	var spot := Vector3(en.x, hit.position.y + 0.03, -en.y)
+	if body.test_move(Transform3D(Basis(), spot), Vector3.ZERO):
+		return []
+	return [spot]
+
+
+## `pos` if someone can stand there, otherwise the nearest spot that fits
+## (searched in rings up to `search` metres).
+func free_spot(body: CharacterBody3D, pos: Vector3, search := 5.0) -> Vector3:
+	var centre := ZoneData.to_en(pos)
+	for ring in int(search / 0.8) + 1:
+		var count := 1 if ring == 0 else 8 * ring
+		for k in count:
+			var a := TAU * k / count
+			var spot := standing_spot(body, centre + Vector2(cos(a), sin(a)) * ring * 0.8)
+			if not spot.is_empty():
+				return spot[0]
+	return pos
+
+
 func _reject(peer: int, reason: String) -> void:
 	log_line("rejecting peer %d: %s" % [peer, reason])
 	Net.s_reject.rpc_id(peer, reason)
@@ -209,6 +264,7 @@ func on_inputs(peer: int, data: PackedByteArray) -> void:
 	for inp in SnapshotCodec.decode_inputs(data):
 		if inp.seq <= pl.last_received_seq or inp.seq > pl.last_received_seq + 120:
 			continue
+		inp.wt = clampi(SnapshotCodec.unwrap_tick(int(inp.wt), tick), tick - MAX_INPUT_LAG_TICKS, tick + MAX_INPUT_LEAD_TICKS)
 		# Inputs that never arrived are replaced by the one before them, which
 		# is what the player was most likely still doing.
 		var missing: int = inp.seq - pl.last_received_seq - 1
@@ -216,6 +272,7 @@ func on_inputs(peer: int, data: PackedByteArray) -> void:
 			for i in missing:
 				var copy := pl.last_input.duplicate()
 				copy.seq = pl.last_received_seq + 1 + i
+				copy.wt = int(pl.last_input.wt) + 1 + i
 				pl.queue.append(copy)
 			_stats.gap_filled += missing
 		pl.queue.append(inp)
@@ -229,9 +286,18 @@ func on_inputs(peer: int, data: PackedByteArray) -> void:
 func _physics_process(_delta: float) -> void:
 	var t0 := Time.get_ticks_usec()
 	tick += 1
-	for pl in players.values():
+	props.update_trams(server_time())
+	var t_trams := Time.get_ticks_usec()
+	var everyone := players.values()
+	for pl in everyone:
 		_simulate(pl)
+	var t_motor := Time.get_ticks_usec()
+	props.push_from_players(everyone)
+	props.track(tick, everyone)
 	var t_sim := Time.get_ticks_usec()
+	_stats.trams_us += t_trams - t0
+	_stats.motor_us += t_motor - t_trams
+	_stats.props_us += t_sim - t_motor
 	_stats.sim_us += t_sim - t0
 	if tick % 10 == 0:
 		_dispatch(social.update(now(), _distance_between))
@@ -274,7 +340,10 @@ func _simulate(pl: Player) -> void:
 	var limit := MAX_INPUTS_PER_TICK if pl.queue.size() > 2 else 1
 	while not pl.queue.is_empty() and pl.input_credit >= 1.0 and processed < limit:
 		var inp: Dictionary = pl.queue.pop_front()
-		PlayerMotor.step(pl.body, inp)
+		var events := PlayerMotor.step(pl.body, inp, transit)
+		if events & PlayerMotor.EVENT_TRAM_HIT and now() - pl.tram_hit_at > 3.0:
+			pl.tram_hit_at = now()
+			log_line("%s was hit by a tram" % pl.display_name)
 		_stats.sim_steps += 1
 		pl.yaw = inp.yaw
 		pl.pitch = inp.pitch
@@ -290,11 +359,12 @@ func _simulate(pl: Player) -> void:
 	pl.starved_ticks += 1
 	if pl.starved_ticks > STARVED_TICKS_BEFORE_IDLE:
 		_stats.idle_steps += 1
-		PlayerMotor.step(pl.body, SnapshotCodec.quantize_input(pl.last_processed_seq, 0, 0, pl.yaw, pl.pitch, 0))
+		PlayerMotor.step(pl.body, SnapshotCodec.quantize_input(pl.last_processed_seq, 0, 0, pl.yaw, pl.pitch, 0, tick), transit)
 
 
 func _send_snapshots() -> void:
 	_rebuild_grid()
+	var prop_data := SnapshotCodec.encode_props(props.moving_poses(tick))
 	for pl in players.values():
 		if not Net.is_open(pl.id):
 			continue
@@ -334,7 +404,7 @@ func _send_snapshots() -> void:
 			if not interested.has(known_id):
 				pl.known.erase(known_id)
 				Net.s_entity_leave.rpc_id(pl.id, known_id)
-		var data := SnapshotCodec.encode_snapshot(tick, pl.last_processed_seq, pos, pl.body.velocity, entities)
+		var data := SnapshotCodec.encode_snapshot(tick, pl.last_processed_seq, pos, pl.body.velocity, entities, prop_data)
 		Net.s_snapshot.rpc_id(pl.id, data)
 		_stats.snap_bytes += data.size()
 		_stats.snap_entities += entities.size()
@@ -428,7 +498,9 @@ func on_alight(peer: int) -> void:
 		return
 	var line: TransitNetwork.TransitLine = transit.lines[pl.riding.line]
 	var st := line.state(pl.riding.vehicle, server_time())
-	if st.dwelling and line.stops[st.stop].in_zone:
+	# In the last second of a stop the doors are closing: a press then (often
+	# sent just as the rider saw the tram leave) asks for the next stop.
+	if st.dwelling and line.stops[st.stop].in_zone and float(st.leg_left) > 1.0:
 		_alight(pl, st, "request")
 		return
 	pl.riding.stop_request = not pl.riding.stop_request
@@ -444,11 +516,11 @@ func _alight(pl: Player, st: Dictionary, reason: String) -> void:
 	var platform := line.platform(stop, dir) + heading * ((int(pl.riding.slot) % 6) - 2.5) * 0.8
 	# Narrow streets: never drop anyone into a wall; slide back towards the track.
 	var track := line.track_point(float(line.stops[stop].s), dir)
-	var pos := TransitNetwork.en_to_godot(platform, 0.05)
+	var pos := TransitNetwork.en_to_godot(platform, StreetLayout.PLATFORM_HEIGHT + 0.03)
 	for k in 5:
-		var candidate := TransitNetwork.en_to_godot(platform.lerp(track, k / 4.0), 0.05)
-		if not pl.body.test_move(Transform3D(Basis(), candidate), Vector3.ZERO):
-			pos = candidate
+		var spot := standing_spot(pl.body, platform.lerp(track, k / 4.0 * 0.6))
+		if not spot.is_empty():
+			pos = spot[0]
 			break
 	pl.body.global_position = pos
 	pl.body.velocity = Vector3.ZERO
@@ -564,6 +636,27 @@ func on_block(peer: int, target: int) -> void:
 	log_line("%s blocked %s" % [a.display_name, b.display_name])
 
 
+func on_blocked_list(peer: int) -> void:
+	var pl: Player = players.get(peer)
+	if pl != null:
+		Net.s_blocked_list.rpc_id(peer, store.blocked_list(pl.account_id))
+
+
+## Unblocking restores visibility on the next snapshot (unless the other
+## person has blocked you too); nothing tells the other person.
+func on_unblock(peer: int, account_id: String) -> void:
+	var pl: Player = players.get(peer)
+	if pl == null or not pl.blocked_accounts.has(account_id):
+		return
+	pl.blocked_accounts.erase(account_id)
+	store.unblock(pl.account_id, account_id)
+	store.audit("unblock", {"blocker": pl.account_id, "blocked": account_id})
+	var other_name := str(store.accounts.get(account_id, {}).get("name", "?"))
+	_dispatch([SocialRules._notice(peer, "unblocked", other_name)])
+	Net.s_blocked_list.rpc_id(peer, store.blocked_list(pl.account_id))
+	log_line("%s unblocked %s" % [pl.display_name, other_name])
+
+
 func on_report(peer: int, target: int, reason: String) -> void:
 	var a: Player = players.get(peer)
 	var b: Player = players.get(target)
@@ -655,11 +748,13 @@ func _save_location(pl: Player) -> void:
 func _log_stats(t: float) -> void:
 	var span := t - float(_stats.at)
 	var ticks := maxi(1, _stats.ticks)
-	log_line("stats: players=%d tick_avg=%.2fms (sim %.2f, snapshots %.2f) tick_max=%.2fms steps/s=%.0f idle=%d dropped=%d gap_filled=%d snapshots=%.1fKB/s entities/snapshot=%.1f" % [
-		players.size(), _stats.tick_us / 1000.0 / ticks, _stats.sim_us / 1000.0 / ticks, _stats.snap_us / 1000.0 / ticks,
+	log_line("stats: players=%d tick_avg=%.2fms (sim %.2f [trams %.2f motor %.2f props %.2f], snapshots %.2f) tick_max=%.2fms steps/s=%.0f idle=%d dropped=%d gap_filled=%d snapshots=%.1fKB/s entities/snapshot=%.1f prop_pushes=%d" % [
+		players.size(), _stats.tick_us / 1000.0 / ticks, _stats.sim_us / 1000.0 / ticks,
+		_stats.trams_us / 1000.0 / ticks, _stats.motor_us / 1000.0 / ticks, _stats.props_us / 1000.0 / ticks, _stats.snap_us / 1000.0 / ticks,
 		_stats.tick_us_max / 1000.0, _stats.sim_steps / span, _stats.idle_steps, _stats.dropped, _stats.gap_filled,
-		_stats.snap_bytes / 1024.0 / span, float(_stats.snap_entities) / maxi(1, _stats.snaps)])
-	_stats = {"ticks": 0, "tick_us": 0, "tick_us_max": 0, "sim_us": 0, "sim_steps": 0, "idle_steps": 0, "dropped": 0, "gap_filled": 0, "snap_us": 0, "snap_bytes": 0, "snap_entities": 0, "snaps": 0, "at": t}
+		_stats.snap_bytes / 1024.0 / span, float(_stats.snap_entities) / maxi(1, _stats.snaps), props.pushes])
+	props.pushes = 0
+	_stats = {"ticks": 0, "tick_us": 0, "tick_us_max": 0, "sim_us": 0, "sim_steps": 0, "idle_steps": 0, "dropped": 0, "gap_filled": 0, "snap_us": 0, "snap_bytes": 0, "snap_entities": 0, "snaps": 0, "trams_us": 0, "motor_us": 0, "props_us": 0, "at": t}
 
 
 func shutdown() -> void:

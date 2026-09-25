@@ -81,6 +81,28 @@ func block(blocker: String, blocked: String) -> void:
 	flush()
 
 
+## Lifts a block; false if there was none.
+func unblock(blocker: String, blocked: String) -> bool:
+	var mine: Dictionary = blocks.get(blocker, {})
+	if not mine.erase(blocked):
+		return false
+	if mine.is_empty():
+		blocks.erase(blocker)
+	_dirty = true
+	flush()
+	return true
+
+
+## Everyone `blocker` has blocked, newest first: [{account, name, since}].
+func blocked_list(blocker: String) -> Array:
+	var out := []
+	var mine: Dictionary = blocks.get(blocker, {})
+	for acc in mine:
+		out.append({"account": str(acc), "name": str(accounts.get(acc, {}).get("name", "?")), "since": str(mine[acc])})
+	out.sort_custom(func(a, b): return a.since > b.since)
+	return out
+
+
 func new_incident_id() -> String:
 	return _crypto.generate_random_bytes(8).hex_encode()
 

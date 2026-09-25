@@ -31,6 +31,8 @@ static func load_settings() -> Dictionary:
 		"spawn_mode": "social",
 		"avatar": AvatarSpec.defaults(),
 		"mouse_sensitivity": 0.0025,
+		"quality": "auto",
+		"show_fps": false,
 	}
 	var data: Variant = _read(SETTINGS_PATH)
 	if typeof(data) == TYPE_DICTIONARY:

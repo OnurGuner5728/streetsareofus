@@ -24,6 +24,7 @@ var _bubble: Label3D
 var _bubble_left := 0.0
 var _speed := 0.0
 var _pitch := 0.0
+var _anim_skip := 0.0
 
 
 func setup(entity_id: int, info: Dictionary) -> void:
@@ -123,8 +124,15 @@ func update_render(now_server: float, delta: float, camera_pos: Vector3) -> void
 				_apply(a.pos.lerp(b.pos, f), lerp_angle(float(a.yaw), float(b.yaw), f),
 					lerpf(a.pitch, b.pitch, f), lerpf(a.speed, b.speed, f))
 				break
-	view.animate(_speed, delta, _pitch)
-	_label.visible = global_position.distance_to(camera_pos) < NAME_RANGE
+	var dist := global_position.distance_to(camera_pos)
+	# Limbs of people far away are a few pixels tall: animate them less often.
+	_anim_skip += delta
+	if dist < 40.0 or _anim_skip > 0.1:
+		view.animate(_speed, _anim_skip if dist >= 40.0 else delta, _pitch)
+		_anim_skip = 0.0
+	var show_name := dist < NAME_RANGE
+	if _label.visible != show_name:
+		_label.visible = show_name
 	if _bubble_left > 0.0:
 		_bubble_left -= delta
 		_bubble.visible = _bubble_left > 0.0

@@ -14,8 +14,17 @@ const MOVE := 1
 const PLATFORM_OFFSET := 2.4
 const FLOOR_HEIGHT := 0.32
 const ZONE_MARGIN := 40.0
+# Car bodies: modern trams are three 8 m sections, the nostalgic car one.
+const MODERN_OFFSETS := [-8.3, 0.0, 8.3]
+const MODERN_SECTION := 8.0
+const NOSTALGIC_SECTION := 10.9
+const CAR_HALF_WIDTH := 1.2
 
 var lines: Array = []  # of TransitLine
+var zone_half := 256.0
+var _state_cache := {}  # Vector3i(line, vehicle, tick) -> state
+var _coarse_tick := -1000000
+var _coarse: Array = []  # [line, vehicle, pos (EN)] at _coarse_tick
 
 
 class TransitLine:
@@ -41,8 +50,17 @@ class TransitLine:
 	var track_offset := 1.6
 	var right_track := PackedVector2Array()  # path offset to its right, mitred
 	var left_track := PackedVector2Array()
-	var legs: Array = []  # {t0, dur, kind, s0, s1, dir, stop, next}
+	# The timetable cycle as legs (dwell or move), in parallel packed arrays:
+	# state() runs for every tram every frame, and packed arrays are several
+	# times faster to read than dictionaries.
 	var leg_starts := PackedFloat64Array()
+	var leg_dur := PackedFloat64Array()
+	var leg_kind := PackedInt32Array()
+	var leg_s0 := PackedFloat64Array()
+	var leg_s1 := PackedFloat64Array()
+	var leg_dir := PackedInt32Array()
+	var leg_stop := PackedInt32Array()
+	var leg_next := PackedInt32Array()
 	var cycle := 1.0
 
 	func setup(data: Dictionary, zone_half: float) -> void:
@@ -125,18 +143,25 @@ class TransitLine:
 			var terminus := not loop and (i == 0 or i == stops.size() - 1)
 			var wait := layover if terminus else dwell
 			var s0: float = stops[i].s
-			legs.append({"t0": t, "dur": wait, "kind": DWELL, "s0": s0, "s1": s0, "dir": dir, "stop": i, "next": nxt})
+			_add_leg(t, wait, DWELL, s0, s0, dir, i, nxt)
 			t += wait
 			var s1: float = stops[nxt].s
 			if loop and s1 <= s0:
 				s1 += length
-			var d := absf(s1 - s0)
-			var dur := travel_time(d)
-			legs.append({"t0": t, "dur": dur, "kind": MOVE, "s0": s0, "s1": s1, "dir": dir, "stop": i, "next": nxt})
+			var dur := travel_time(absf(s1 - s0))
+			_add_leg(t, dur, MOVE, s0, s1, dir, i, nxt)
 			t += dur
 		cycle = maxf(t, 1.0)
-		for leg in legs:
-			leg_starts.append(leg.t0)
+
+	func _add_leg(t0: float, dur: float, kind: int, s0: float, s1: float, dir: int, stop: int, next: int) -> void:
+		leg_starts.append(t0)
+		leg_dur.append(dur)
+		leg_kind.append(kind)
+		leg_s0.append(s0)
+		leg_s1.append(s1)
+		leg_dir.append(dir)
+		leg_stop.append(stop)
+		leg_next.append(next)
 
 	func travel_time(d: float) -> float:
 		if d <= 0.0:
@@ -167,7 +192,7 @@ class TransitLine:
 		return fposmod(t - vehicle * cycle / vehicles, cycle)
 
 	func leg_at(tau: float) -> int:
-		return clampi(leg_starts.bsearch(tau, false) - 1, 0, legs.size() - 1)
+		return clampi(leg_starts.bsearch(tau, false) - 1, 0, leg_kind.size() - 1)
 
 	## Arc length along the path, wrapped for loops, extended past the ends for shuttles.
 	func point_at(s: float) -> Vector2:
@@ -184,6 +209,12 @@ class TransitLine:
 		var i := clampi(cum.bsearch(s, true) - 1, 0, n - 2)
 		var seg := cum[i + 1] - cum[i]
 		return poly[i].lerp(poly[i + 1], (s - cum[i]) / seg if seg > 0.0 else 0.0)
+
+	func section_offsets() -> Array:
+		return [0.0] if vehicle_type == "nostalgic" else MODERN_OFFSETS
+
+	func section_length() -> float:
+		return NOSTALGIC_SECTION if vehicle_type == "nostalgic" else MODERN_SECTION
 
 	func tangent_at(s: float) -> Vector2:
 		var a := point_at(s - 1.5)
@@ -219,24 +250,25 @@ class TransitLine:
 	func state(vehicle: int, t: float) -> Dictionary:
 		var tau := phase(vehicle, t)
 		var li := leg_at(tau)
-		var leg: Dictionary = legs[li]
-		var local := tau - float(leg.t0)
-		var s: float = leg.s0
+		var local := tau - leg_starts[li]
+		var s0 := leg_s0[li]
+		var s := s0
 		var spd := 0.0
-		if leg.kind == MOVE:
-			var d := absf(float(leg.s1) - float(leg.s0))
-			s = float(leg.s0) + signf(float(leg.s1) - float(leg.s0)) * travel_distance(d, local)
+		var dwelling := leg_kind[li] == DWELL
+		if not dwelling:
+			var d := absf(leg_s1[li] - s0)
+			s = s0 + signf(leg_s1[li] - s0) * travel_distance(d, local)
 			spd = travel_speed(d, local)
-		var dir: int = leg.dir
+		var dir := leg_dir[li]
 		var side := 1.0
-		if leg.kind == DWELL and is_terminus(int(leg.stop)):
+		if dwelling and is_terminus(leg_stop[li]):
 			# Crossing over to the other track during the layover, not jumping.
-			side = lerpf(-1.0, 1.0, smoothstep(0.2, 0.8, local / float(leg.dur)))
+			side = lerpf(-1.0, 1.0, smoothstep(0.2, 0.8, local / leg_dur[li]))
 		return {
 			"line": index, "vehicle": vehicle, "s": s, "dir": dir, "speed": spd,
-			"dwelling": leg.kind == DWELL, "stop": leg.stop if leg.kind == DWELL else -1,
-			"next": leg.next, "leg": li, "leg_left": float(leg.dur) - local,
-			"dwell_started": t - local if leg.kind == DWELL else -1.0, "side": side,
+			"dwelling": dwelling, "stop": leg_stop[li] if dwelling else -1,
+			"next": leg_next[li], "leg": li, "leg_left": leg_dur[li] - local,
+			"dwell_started": t - local if dwelling else -1.0, "side": side,
 			"pos": track_point(s, dir, side), "heading": tangent_at(s) * dir,
 		}
 
@@ -258,9 +290,8 @@ class TransitLine:
 		return out
 
 	func _dwell_leg(stop: int, dir: int) -> int:
-		for i in legs.size():
-			var leg: Dictionary = legs[i]
-			if leg.kind == DWELL and leg.stop == stop and leg.dir == dir:
+		for i in leg_kind.size():
+			if leg_kind[i] == DWELL and leg_stop[i] == stop and leg_dir[i] == dir:
 				return i
 		return -1
 
@@ -270,15 +301,14 @@ class TransitLine:
 		var li := _dwell_leg(stop, dir)
 		if li < 0:
 			return {}
-		var leg: Dictionary = legs[li]
 		var best := {}
 		for v in vehicles:
 			var tau := phase(v, t)
 			# Time until this vehicle next *departs* from the dwell (end of leg).
-			var until_depart := fposmod(float(leg.t0) + float(leg.dur) - tau, cycle)
+			var until_depart := fposmod(leg_starts[li] + leg_dur[li] - tau, cycle)
 			var depart := t + until_depart
 			if best.is_empty() or depart < float(best.depart):
-				best = {"vehicle": v, "arrive": depart - float(leg.dur), "depart": depart}
+				best = {"vehicle": v, "arrive": depart - leg_dur[li], "depart": depart}
 		return best
 
 	## Seconds from departing `from` to arriving at `to` (both in direction dir).
@@ -287,13 +317,13 @@ class TransitLine:
 		if li < 0:
 			return INF
 		var total := 0.0
-		var i := (li + 1) % legs.size()
-		for _n in legs.size():
-			var leg: Dictionary = legs[i]
-			if leg.kind == DWELL and leg.stop == to:
+		var n := leg_kind.size()
+		var i := (li + 1) % n
+		for _k in n:
+			if leg_kind[i] == DWELL and leg_stop[i] == to:
 				return total
-			total += float(leg.dur)
-			i = (i + 1) % legs.size()
+			total += leg_dur[i]
+			i = (i + 1) % n
 		return INF
 
 	## Path points a rider covers from stop `from` to stop `to` in dir.
@@ -318,6 +348,7 @@ class TransitLine:
 
 static func from_zone(transit: Variant, zone_half: float) -> TransitNetwork:
 	var net := TransitNetwork.new()
+	net.zone_half = zone_half
 	if typeof(transit) != TYPE_DICTIONARY:
 		return net
 	for data in transit.get("lines", []):
@@ -338,6 +369,45 @@ func vehicle_count() -> int:
 	for line: TransitLine in lines:
 		n += line.vehicles
 	return n
+
+
+## Car-section boxes within `radius` of p (Godot XZ) at a server tick, for
+## collisions: [centre XZ, travel direction XZ (unit), half length,
+## half width, speed]. Vehicle states are cached per tick, since the server
+## and a predicting client ask about the same few ticks many times.
+func boxes_near(tick: int, p: Vector2, radius: float) -> Array:
+	# Where every tram roughly is, refreshed every half second; a tram cannot
+	# have moved further than its top speed allows since then.
+	if absi(tick - _coarse_tick) > Protocol.TICK_RATE / 2:
+		_coarse_tick = tick
+		_coarse.clear()
+		for line: TransitLine in lines:
+			for v in line.vehicles:
+				_coarse.append([line, v, line.state(v, tick * Protocol.DT).pos])
+	if _state_cache.size() > 600:
+		_state_cache.clear()
+	var slack := absf(tick - _coarse_tick) * Protocol.DT * 9.0 + 1.0
+	var en := Vector2(p.x, -p.y)
+	var out := []
+	for entry in _coarse:
+		var line: TransitLine = entry[0]
+		if (entry[2] as Vector2).distance_to(en) > radius + line.vehicle_length + slack:
+			continue
+		var key := Vector3i(line.index, int(entry[1]), tick)
+		var st: Dictionary = _state_cache.get(key, {})
+		if st.is_empty():
+			st = line.state(int(entry[1]), tick * Protocol.DT)
+			_state_cache[key] = st
+		var centre: Vector2 = st.pos
+		if absf(centre.x) > zone_half + 30.0 or absf(centre.y) > zone_half + 30.0 				or Vector2(centre.x, -centre.y).distance_to(p) > radius + line.vehicle_length:
+			continue
+		var dir: int = st.dir
+		for off in line.section_offsets():
+			var s := float(st.s) + float(off) * dir
+			var c := line.track_point(s, dir, float(st.side))
+			var h := line.tangent_at(s) * dir
+			out.append([Vector2(c.x, -c.y), Vector2(h.x, -h.y), line.section_length() / 2.0 + 0.1, CAR_HALF_WIDTH, float(st.speed)])
+	return out
 
 
 ## Rider standing spot: slots spread along the car, alternating sides.

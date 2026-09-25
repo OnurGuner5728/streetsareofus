@@ -4,8 +4,19 @@ extends RefCounted
 ## from world-space coordinates, so nothing stretches and the phone download
 ## stays small. All shaders work in the Compatibility renderer (web, phones).
 ## `night` is a project-wide shader global driven by SkyController.
+## Every shader also compiles a LITE variant (one noise octave, no Voronoi)
+## that low-end phones switch to at runtime.
 
 const COMMON := """
+global uniform float wetness;
+global uniform float snow;
+// Rain darkens and polishes a surface; snow settles on it.
+void weather(inout vec3 albedo, inout float rough, float soak) {
+	albedo *= 1.0 - 0.42 * wetness * soak;
+	rough = mix(rough, 0.28, wetness * soak * 0.75);
+	albedo = mix(albedo, vec3(0.88, 0.9, 0.93), snow * 0.85);
+	rough = mix(rough, 0.8, snow);
+}
 vec3 srgb(vec3 c) { return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c)); }
 float hash12(vec2 p) {
 	vec3 p3 = fract(vec3(p.xyx) * 0.1031);
@@ -19,6 +30,9 @@ float vnoise(vec2 p) {
 	return mix(mix(hash12(i), hash12(i + vec2(1.0, 0.0)), u.x),
 		mix(hash12(i + vec2(0.0, 1.0)), hash12(i + vec2(1.0, 1.0)), u.x), u.y);
 }
+#ifdef LITE
+float fbm(vec2 p) { return vnoise(p) * 0.9375; }
+#else
 float fbm(vec2 p) {
 	float v = 0.0;
 	float a = 0.5;
@@ -29,6 +43,7 @@ float fbm(vec2 p) {
 	}
 	return v;
 }
+#endif
 """
 
 const PAVERS := """
@@ -46,8 +61,11 @@ void fragment() {
 	float tone = hash12(cell) * 0.14 + fbm(p * 0.35) * 0.2;
 	vec3 base = srgb(vec3(0.60, 0.58, 0.55)) * (0.8 + tone);
 	float stain = smoothstep(0.55, 0.75, fbm(p * 0.12 + 7.0)) * 0.25;
-	ALBEDO = mix(base * 0.55, base, body) * (1.0 - stain);
-	ROUGHNESS = 0.92;
+	vec3 col = mix(base * 0.55, base, body) * (1.0 - stain);
+	float rough = 0.92;
+	weather(col, rough, 1.0);
+	ALBEDO = col;
+	ROUGHNESS = rough;
 }
 """
 
@@ -57,6 +75,20 @@ varying vec3 wpos;
 %s
 void vertex() { wpos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz; }
 void fragment() {
+#ifdef LITE
+	// Staggered rounded setts: same look from walking height, no cell search.
+	vec2 q = wpos.xz / vec2(0.19, 0.16);
+	q.x += step(1.0, mod(floor(q.y), 2.0)) * 0.5;
+	vec2 cell = floor(q);
+	vec2 e = abs(fract(q) - 0.5) * 2.0;
+	float gap = 1.0 - smoothstep(0.72, 0.95, max(e.x, e.y * 1.1));
+	vec3 stone = srgb(mix(vec3(0.44, 0.42, 0.39), vec3(0.63, 0.58, 0.51), hash12(cell)));
+	vec3 col = mix(stone * 0.32, stone, gap);
+	float rough = mix(1.0, 0.7, gap);
+	weather(col, rough, 1.0);
+	ALBEDO = col;
+	ROUGHNESS = rough;
+#else
 	vec2 p = wpos.xz / 0.17;
 	vec2 i = floor(p);
 	vec2 f = fract(p);
@@ -74,8 +106,12 @@ void fragment() {
 	float gap = smoothstep(0.0, 0.14, d2 - d1);
 	vec3 stone = srgb(mix(vec3(0.44, 0.42, 0.39), vec3(0.63, 0.58, 0.51), hash12(id)));
 	stone *= 0.82 + 0.25 * fbm(wpos.xz * 0.45);
-	ALBEDO = mix(stone * 0.32, stone, gap);
-	ROUGHNESS = mix(1.0, 0.7, gap);
+	vec3 col = mix(stone * 0.32, stone, gap);
+	float rough = mix(1.0, 0.7, gap);
+	weather(col, rough, 1.0);
+	ALBEDO = col;
+	ROUGHNESS = rough;
+#endif
 }
 """
 
@@ -96,8 +132,16 @@ void fragment() {
 	float centre = (1.0 - smoothstep(0.025, 0.04, across)) * dash * step(0.5, marked);
 	float kerb = smoothstep(0.93, 0.945, across) * (1.0 - smoothstep(0.965, 0.98, across)) * step(0.5, marked);
 	float paint = max(centre, kerb) * (0.75 + 0.25 * vnoise(p * 4.0));
-	ALBEDO = mix(base, srgb(vec3(0.9, 0.9, 0.86)), paint);
-	ROUGHNESS = mix(0.95, 0.55, paint);
+	vec3 col = mix(base, srgb(vec3(0.9, 0.9, 0.86)), paint);
+	float rough = mix(0.95, 0.55, paint);
+	// Puddles gather in the dips once the road is properly wet.
+	float puddle = smoothstep(0.54, 0.6, fbm(p * 0.22 + 5.0)) * smoothstep(0.35, 0.9, wetness) * (1.0 - snow);
+	weather(col, rough, 1.0);
+	col = mix(col, col * 0.4, puddle);
+	rough = mix(rough, 0.03, puddle);
+	ALBEDO = col;
+	ROUGHNESS = rough;
+	SPECULAR = mix(0.5, 0.95, puddle);
 }
 """
 
@@ -109,11 +153,18 @@ varying vec3 tint;
 void vertex() { wpos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz; tint = COLOR.rgb; }
 void fragment() {
 	vec2 p = wpos.xz;
+#ifdef LITE
+	float n = vnoise(p * 0.9) * 0.6 + 0.2;
+#else
 	float n = fbm(p * 0.9) * 0.6 + fbm(p * 7.0) * 0.4;
+#endif
 	vec3 base = srgb(tint);
 	vec3 dry = srgb(vec3(0.55, 0.52, 0.32));
-	ALBEDO = mix(base * (0.7 + 0.45 * n), dry, smoothstep(0.62, 0.8, fbm(p * 0.15)) * 0.45);
-	ROUGHNESS = 1.0;
+	vec3 col = mix(base * (0.7 + 0.45 * n), dry, smoothstep(0.62, 0.8, fbm(p * 0.15)) * 0.45);
+	float rough = 1.0;
+	weather(col, rough, 0.5);
+	ALBEDO = col;
+	ROUGHNESS = rough;
 }
 """
 
@@ -173,7 +224,11 @@ void fragment() {
 	float band = (1.0 - step(0.035, cell.y)) * step(0.5, cell_id.y);
 	float plinth = 1.0 - step(0.55, up);
 	float n = fbm(vec2(wpos.x + wpos.z, wpos.y) * 0.9);
+#ifdef LITE
+	float grime = smoothstep(2.8, 0.0, up) * 0.16;
+#else
 	float grime = smoothstep(2.8, 0.0, up) * 0.16 + smoothstep(0.55, 0.9, fbm(vec2((wpos.x + wpos.z) * 2.5, wpos.y * 0.25))) * 0.2;
+#endif
 	vec3 wall = base * (0.86 + 0.22 * n) * (1.0 - grime);
 	wall = mix(wall, wall * 0.8, band);
 	wall = mix(wall, srgb(vec3(0.40, 0.38, 0.36)) * (0.8 + 0.3 * n), plinth);
@@ -203,18 +258,23 @@ void fragment() {
 	vec2 p = wpos.xz;
 	float n = fbm(p * 0.7) * 0.5 + hash12(floor(p * 12.0)) * 0.12;
 	float stain = smoothstep(0.55, 0.8, fbm(p * 0.2 + 11.0));
-	ALBEDO = srgb(tint) * (0.75 + n) * (1.0 - stain * 0.35);
-	ROUGHNESS = 0.95;
+	vec3 col = srgb(tint) * (0.75 + n) * (1.0 - stain * 0.35);
+	float rough = 0.95;
+	weather(col, rough, 0.8);
+	ALBEDO = col;
+	ROUGHNESS = rough;
 }
 """
 
 const LEAVES := """
 shader_type spatial;
+global uniform float wind;
 varying vec3 wpos;
 %s
 void vertex() {
 	wpos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
-	float sway = sin(TIME * 1.1 + wpos.x * 0.3 + wpos.z * 0.2) * 0.06 + sin(TIME * 2.3 + wpos.y) * 0.02;
+	float gust = 0.4 + wind * 1.8;
+	float sway = (sin(TIME * (1.1 + wind) + wpos.x * 0.3 + wpos.z * 0.2) * 0.06 + sin(TIME * 2.3 + wpos.y) * 0.02) * gust;
 	VERTEX.x += sway * max(VERTEX.y + 1.0, 0.0);
 }
 void fragment() {
@@ -236,6 +296,8 @@ void fragment() {
 """
 
 static var _cache := {}
+static var _variants := {}  # key -> [full Shader, lite Shader]
+static var lite := false
 
 
 static func get_shader(key: String) -> ShaderMaterial:
@@ -247,12 +309,23 @@ static func get_shader(key: String) -> ShaderMaterial:
 	}[key]
 	if code.contains("%s"):
 		code = code % COMMON
-	var shader := Shader.new()
-	shader.code = code
+	var full := Shader.new()
+	full.code = code
+	var cheap := Shader.new()
+	cheap.code = code.replace("shader_type spatial;", "shader_type spatial;
+#define LITE")
+	_variants[key] = [full, cheap]
 	var mat := ShaderMaterial.new()
-	mat.shader = shader
+	mat.shader = cheap if lite else full
 	_cache[key] = mat
 	return mat
+
+
+## Switches every city surface between the full and the LITE shaders.
+static func set_lite(on: bool) -> void:
+	lite = on
+	for key in _variants:
+		(_cache[key] as ShaderMaterial).shader = _variants[key][1 if on else 0]
 
 
 static func solid(color: Color, roughness := 0.8, metallic := 0.0) -> StandardMaterial3D:

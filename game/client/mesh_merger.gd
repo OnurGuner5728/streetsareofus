@@ -33,21 +33,21 @@ func box(group: String, size: Vector3, pos: Vector3, color: Color, basis := Basi
 	add(group, m, Transform3D(basis, pos), color)
 
 
-func capsule(group: String, radius: float, height: float, pos: Vector3, color: Color, scale := Vector3.ONE) -> void:
+func capsule(group: String, radius: float, height: float, pos: Vector3, color: Color, scale := Vector3.ONE, segments := 10) -> void:
 	var m := CapsuleMesh.new()
 	m.radius = radius
 	m.height = maxf(height, radius * 2.0)
-	m.radial_segments = 10
-	m.rings = 3
+	m.radial_segments = segments
+	m.rings = 3 if segments >= 8 else 1
 	add(group, m, Transform3D(Basis().scaled(scale), pos), color)
 
 
-func sphere(group: String, radius: float, pos: Vector3, color: Color, scale := Vector3.ONE) -> void:
+func sphere(group: String, radius: float, pos: Vector3, color: Color, scale := Vector3.ONE, segments := 12) -> void:
 	var m := SphereMesh.new()
 	m.radius = radius
 	m.height = radius * 2.0
-	m.radial_segments = 12
-	m.rings = 6
+	m.radial_segments = segments
+	m.rings = maxi(3, segments / 2)
 	add(group, m, Transform3D(Basis().scaled(scale), pos), color)
 
 
@@ -62,6 +62,13 @@ func cylinder(group: String, top: float, bottom: float, height: float, xf: Trans
 
 func has(group: String) -> bool:
 	return _groups.has(group)
+
+
+## Commits one group into a mesh (for MultiMesh and the like).
+func commit(group: String) -> ArrayMesh:
+	var st: SurfaceTool = _groups.get(group)
+	_groups.erase(group)
+	return st.commit() if st else ArrayMesh.new()
 
 
 ## Commits one group into a MeshInstance3D under parent (vertex colour
@@ -101,9 +108,11 @@ static func _shape_key(mesh: PrimitiveMesh) -> Array:
 	if mesh is BoxMesh:
 		return [(mesh as BoxMesh).size]
 	if mesh is CapsuleMesh:
-		return [(mesh as CapsuleMesh).radius, (mesh as CapsuleMesh).height]
+		var c := mesh as CapsuleMesh
+		return [c.radius, c.height, c.radial_segments, c.rings]
 	if mesh is SphereMesh:
-		return [(mesh as SphereMesh).radius, (mesh as SphereMesh).height]
+		var sp := mesh as SphereMesh
+		return [sp.radius, sp.height, sp.radial_segments, sp.rings]
 	if mesh is CylinderMesh:
 		var c := mesh as CylinderMesh
 		return [c.top_radius, c.bottom_radius, c.height]

@@ -4,8 +4,9 @@ extends CanvasLayer
 ##
 ## The static city (buildings, streets, parks, tram lines) is drawn once into
 ## a texture. The minimap samples it through a shader that rotates with the
-## player's heading and masks it to a circle; everything that moves (people,
-## trams, the route) is drawn on top every frame.
+## player's heading and masks it to a circle. Things that move (people,
+## trams, the route) are drawn north-up a few times a second into a layer
+## that is simply rotated every frame, so turning costs no redraw.
 
 signal destination_chosen(en: Vector2)
 signal route_cleared
@@ -24,6 +25,7 @@ const ASKING := Color("ffca28")
 const ROUTE_WALK := Color("ffffff")
 const GOAL := Color("ff6b4a")
 const TRAM_GREEN := Color("2ee27a")
+const MINI_REDRAW := 1.0 / 12.0
 const CAR_KINDS := ["primary", "secondary", "tertiary", "unclassified", "residential", "living_street", "service", "busway"]
 
 var client: GameClient
@@ -31,6 +33,10 @@ var map_texture: Texture2D
 var _viewport: SubViewport
 var _mini: Control
 var _mini_map: ColorRect
+var _mini_world: Control  # north-up markers, rotated with the heading
+var _mini_sweep: Control
+var _mini_north: Control
+var _mini_timer := 0.0
 var _big: Control
 var _big_canvas: Control
 var _info: Label
@@ -153,11 +159,23 @@ void fragment() {
 	mat.set_shader_parameter("map", map_texture)
 	_mini_map.material = mat
 	_mini.add_child(_mini_map)
-	var overlay := Control.new()
-	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	overlay.draw.connect(_draw_mini_overlay.bind(overlay))
-	_mini.add_child(overlay)
+	_mini_sweep = _mini_layer(_draw_mini_sweep)
+	_mini_world = _mini_layer(_draw_mini_overlay)
+	_mini_layer(_draw_mini_frame)
+	_mini_north = _mini_layer(_draw_mini_north)
+	_mini_north.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	_mini_north.size = Vector2(20, 20)
+	_mini_north.pivot_offset = Vector2.ZERO
+
+
+func _mini_layer(painter: Callable) -> Control:
+	var c := Control.new()
+	c.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	c.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	c.pivot_offset = Vector2(MINI_RADIUS, MINI_RADIUS)
+	c.draw.connect(painter.bind(c))
+	_mini.add_child(c)
+	return c
 
 
 func _on_mini_input(event: InputEvent) -> void:
@@ -169,6 +187,7 @@ func _on_mini_input(event: InputEvent) -> void:
 func _process(delta: float) -> void:
 	if client == null or client.body == null:
 		return
+	var t0 := FrameProfiler.start()
 	_sweep = fmod(_sweep + delta * 1.4, TAU)
 	var me := ZoneData.to_en(client.body.global_position)
 	var mat := _mini_map.material as ShaderMaterial
@@ -176,32 +195,55 @@ func _process(delta: float) -> void:
 	mat.set_shader_parameter("heading", client.yaw)
 	# Minimap is 2r pixels across and shows 2 * MINI_RANGE_M metres.
 	mat.set_shader_parameter("uv_per_px", MINI_RANGE_M * 2.0 / client.zone.size_m)
-	for child in _mini.get_children():
-		child.queue_redraw()
+	_mini_sweep.rotation = _sweep
+	_mini_world.rotation = client.yaw
+	var north := Vector2(sin(client.yaw), -cos(client.yaw))  # north on screen, heading up
+	_mini_north.position = Vector2(MINI_RADIUS, MINI_RADIUS) + north * (MINI_RADIUS - 9) - Vector2(10, 10)
+	_mini_timer -= delta
+	if _mini_timer <= 0.0:
+		_mini_timer = MINI_REDRAW
+		_mini_world.queue_redraw()
 	if _big.visible:
 		_big_canvas.queue_redraw()
+	FrameProfiler.add("map.process", t0)
 
 
-## EN point -> minimap pixels (heading up).
+## EN point -> pixels of the north-up marker layer (rotated by the heading).
 func _mini_point(me: Vector2, q: Vector2) -> Vector2:
 	var d := q - me
-	var c := cos(client.yaw)
-	var s := sin(client.yaw)
-	var screen := Vector2(d.x * c + d.y * s, d.x * s - d.y * c)
-	return Vector2(MINI_RADIUS, MINI_RADIUS) + screen * (MINI_RADIUS / MINI_RANGE_M)
+	return Vector2(MINI_RADIUS, MINI_RADIUS) + Vector2(d.x, -d.y) * (MINI_RADIUS / MINI_RANGE_M)
+
+
+func _draw_mini_sweep(o: Control) -> void:
+	var centre := Vector2(MINI_RADIUS, MINI_RADIUS)
+	var pts := PackedVector2Array([centre])
+	for i in 13:
+		var a := -0.5 + i * 0.5 / 12.0
+		pts.append(centre + Vector2(cos(a), sin(a)) * MINI_RADIUS)
+	o.draw_colored_polygon(pts, Color(0.4, 0.9, 0.6, 0.08))
+	o.draw_line(centre, centre + Vector2(MINI_RADIUS, 0), Color(0.5, 1.0, 0.7, 0.35), 1.5)
+
+
+## You (always pointing up) and the rim; drawn once.
+func _draw_mini_frame(o: Control) -> void:
+	var centre := Vector2(MINI_RADIUS, MINI_RADIUS)
+	o.draw_colored_polygon(PackedVector2Array([centre + Vector2(0, -8), centre + Vector2(5.5, 6), centre + Vector2(0, 3), centre + Vector2(-5.5, 6)]), Color("ffd54f"))
+	o.draw_arc(centre, MINI_RADIUS, 0, TAU, 64, Color(1, 1, 1, 0.5), 1.5)
+
+
+func _draw_mini_north(o: Control) -> void:
+	o.draw_circle(Vector2(10, 10), 8, Color(0.1, 0.12, 0.15, 0.9))
+	o.draw_string(ThemeDB.fallback_font, Vector2(6, 15), "K", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color.WHITE)
 
 
 func _draw_mini_overlay(o: Control) -> void:
+	var t0 := FrameProfiler.start()
+	_draw_mini_overlay_inner(o)
+	FrameProfiler.add("map.draw", t0)
+
+
+func _draw_mini_overlay_inner(o: Control) -> void:
 	var me := ZoneData.to_en(client.body.global_position)
-	var centre := Vector2(MINI_RADIUS, MINI_RADIUS)
-	var r := MINI_RADIUS
-	# Radar sweep.
-	var sweep_pts := PackedVector2Array([centre])
-	for i in 13:
-		var a := _sweep - 0.5 + i * 0.5 / 12.0
-		sweep_pts.append(centre + Vector2(cos(a), sin(a)) * r)
-	o.draw_colored_polygon(sweep_pts, Color(0.4, 0.9, 0.6, 0.08))
-	o.draw_line(centre, centre + Vector2(cos(_sweep), sin(_sweep)) * r, Color(0.5, 1.0, 0.7, 0.35), 1.5)
 	var nav := client.navigator
 	if nav and nav.has_plan():
 		for leg in nav.plan.legs:
@@ -215,7 +257,9 @@ func _draw_mini_overlay(o: Control) -> void:
 				o.draw_rect(Rect2(p - Vector2(3, 3), Vector2(6, 6)), Color.WHITE)
 				o.draw_rect(Rect2(p - Vector2(3, 3), Vector2(6, 6)), line.color, false, 1.5)
 		for v in line.vehicles:
-			var vs := line.state(v, client.server_now())
+			var vs := client.fleet.state_of(line.index, v) if client.fleet else {}
+			if vs.is_empty():
+				vs = line.state(v, client.server_now())
 			if me.distance_to(vs.pos) > MINI_RANGE_M * 1.2:
 				continue
 			var lit := client.fleet != null and client.fleet.highlight_line == line.index and client.fleet.highlight_dir == int(vs.dir)
@@ -233,15 +277,6 @@ func _draw_mini_overlay(o: Control) -> void:
 			if int(req.from) == id:
 				col = ASKING
 		_mini_marker(o, me, ZoneData.to_en(rp.global_position), col, 3.5, true)
-	# You, always pointing up.
-	o.draw_colored_polygon(PackedVector2Array([centre + Vector2(0, -8), centre + Vector2(5.5, 6), centre + Vector2(0, 3), centre + Vector2(-5.5, 6)]), Color("ffd54f"))
-	# North on the rim.
-	var n := _mini_point(me, me + Vector2(0, 1000)) - centre
-	var north := centre + n.normalized() * (r - 9)
-	o.draw_circle(north, 8, Color(0.1, 0.12, 0.15, 0.9))
-	var font := ThemeDB.fallback_font
-	o.draw_string(font, north + Vector2(-4, 5), "K", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color.WHITE)
-	o.draw_arc(centre, r, 0, TAU, 64, Color(1, 1, 1, 0.5), 1.5)
 
 
 ## Dot inside the radar, arrow on the rim for things further away.

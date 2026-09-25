@@ -7,6 +7,10 @@ signal chat_closed
 signal resume_requested
 signal disconnect_requested
 signal person_action(action: String)  ## "mute", "block" or "report:<reason>"
+signal blocked_list_requested
+signal unblock_requested(account_id: String)
+signal quality_requested(key: String)
+signal fps_toggled(show: bool)
 
 const HELP := """[b]Hareket[/b]  WASD · Shift koş · Space zıpla · Fare bak
 [b]Sosyal[/b]  bakıyorken:  E konuşma isteği · G el salla · H selam ver
@@ -14,7 +18,8 @@ const HELP := """[b]Hareket[/b]  WASD · Shift koş · Space zıpla · Fare bak
 [b]Gelen istek[/b]  Y kabul · N reddet (ya da hiçbir şey yapma)
 [b]Sohbet[/b]  Enter yaz · X sohbetten ayrıl
 [b]Şehir[/b]  Tab harita (dokun: rota çiz) · F tramvaya bin / durak iste / in
-F1 yardım · F3 ağ bilgisi · Esc menü"""
+          E kediyi sev · koşarak topa gir: şut · raylarda durma!
+F1 yardım · F3 ağ bilgisi · Esc menü (engellenenler, grafik, FPS)"""
 
 var _location: Label
 var _stats: Label
@@ -36,6 +41,12 @@ var _block_button: Button
 var _mute_button: Button
 var _portrait: Label
 var _route: Label
+var _fps: Label
+var _blocked: PanelContainer
+var _blocked_rows: VBoxContainer
+var _quality_button: Button
+var _fps_button: Button
+var _quality_key := "auto"
 var touch_mode := false
 
 const REPORT_LABELS := [["harassment", "Taciz"], ["hate", "Nefret söylemi"], ["spam", "Spam"], ["impersonation", "Taklit"], ["other", "Diğer"]]
@@ -136,16 +147,21 @@ func _ready() -> void:
 	_pause.visible = false
 	root.add_child(_pause)
 	var box := VBoxContainer.new()
-	_place(box, Control.PRESET_CENTER, Vector2(-120, -60))
-	box.custom_minimum_size = Vector2(240, 0)
+	_place(box, Control.PRESET_CENTER, Vector2(-130, -140))
+	box.custom_minimum_size = Vector2(260, 0)
+	box.add_theme_constant_override("separation", 6)
 	_pause.add_child(box)
-	for spec in [["Devam et", resume_requested], ["Bağlantıyı kes", disconnect_requested]]:
-		var b := Button.new()
-		b.text = spec[0]
-		b.custom_minimum_size = Vector2(240, 44)
-		b.pressed.connect((spec[1] as Signal).emit)
-		box.add_child(b)
+	_menu_button(box, "Devam et", resume_requested.emit)
+	_menu_button(box, "Engellenenler", blocked_list_requested.emit)
+	_quality_button = _menu_button(box, "", _cycle_quality)
+	_fps_button = _menu_button(box, "", func(): set_fps_visible(not _fps.visible); fps_toggled.emit(_fps.visible))
+	_menu_button(box, "Bağlantıyı kes", disconnect_requested.emit)
 	_build_person_menu(root)
+	_build_blocked_panel(root)
+	_fps = _label(root, 13, Control.PRESET_TOP_LEFT, Vector2(16, 58))
+	_fps.modulate = Color(0.75, 1.0, 0.8)
+	set_fps_visible(false)
+	set_quality_key("auto")
 
 	_portrait = Label.new()
 	_portrait.text = "Oynamak için telefonu yatay çevir"
@@ -187,6 +203,93 @@ func _build_person_menu(root: Control) -> void:
 	_menu_button(box, "Kapat", close_person_menu)
 
 
+## "Engellenenler": everyone you blocked, each with a two-tap unblock.
+func _build_blocked_panel(root: Control) -> void:
+	_blocked = PanelContainer.new()
+	_place(_blocked, Control.PRESET_CENTER, Vector2(-180, -170))
+	_blocked.custom_minimum_size = Vector2(360, 0)
+	_blocked.visible = false
+	root.add_child(_blocked)
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 6)
+	_blocked.add_child(box)
+	var title := Label.new()
+	title.text = "Engellediğin kişiler"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	box.add_child(title)
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(340, 200)
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	box.add_child(scroll)
+	_blocked_rows = VBoxContainer.new()
+	_blocked_rows.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(_blocked_rows)
+	var note := Label.new()
+	note.text = "Engeli kaldırdığında birbirinizi yeniden görürsünüz. Karşı tarafa bildirim gitmez."
+	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	note.add_theme_font_size_override("font_size", 12)
+	note.modulate = Color("aab4c0")
+	box.add_child(note)
+	_menu_button(box, "Kapat", func(): _blocked.visible = false)
+
+
+func show_blocked(list: Array) -> void:
+	for child in _blocked_rows.get_children():
+		child.queue_free()
+	if list.is_empty():
+		var empty := Label.new()
+		empty.text = "Kimseyi engellemedin."
+		empty.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		_blocked_rows.add_child(empty)
+	for entry in list:
+		if typeof(entry) != TYPE_DICTIONARY:
+			continue
+		var row := HBoxContainer.new()
+		var who := Label.new()
+		who.text = "%s
+%s" % [str(entry.get("name", "?")), str(entry.get("since", "")).substr(0, 10)]
+		who.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		who.add_theme_font_size_override("font_size", 14)
+		row.add_child(who)
+		var account := str(entry.get("account", ""))
+		var b := Button.new()
+		b.text = "Engeli kaldır"
+		b.custom_minimum_size = Vector2(150, 40)
+		b.pressed.connect(func():
+			if b.text == "Engeli kaldır":
+				b.text = "Emin misin? Dokun"
+			else:
+				b.disabled = true
+				unblock_requested.emit(account))
+		row.add_child(b)
+		_blocked_rows.add_child(row)
+	_blocked.visible = true
+
+
+func is_blocked_panel_open() -> bool:
+	return _blocked.visible
+
+
+func set_quality_key(key: String) -> void:
+	_quality_key = key
+	_quality_button.text = "Grafik: %s" % GraphicsQuality.NAMES[GraphicsQuality.from_key(key)]
+
+
+func _cycle_quality() -> void:
+	var order := ["auto", "low", "medium", "high"]
+	set_quality_key(order[(order.find(_quality_key) + 1) % order.size()])
+	quality_requested.emit(_quality_key)
+
+
+func set_fps_visible(show: bool) -> void:
+	_fps.visible = show
+	_fps_button.text = "FPS göstergesi: %s" % ("açık" if show else "kapalı")
+
+
+func set_fps(text: String) -> void:
+	_fps.text = text
+
+
 func _menu_button(parent: Control, text: String, callback: Callable) -> Button:
 	var b := Button.new()
 	b.text = text
@@ -209,7 +312,7 @@ func close_person_menu() -> void:
 
 
 func is_modal_open() -> bool:
-	return _person.visible or _pause.visible
+	return _person.visible or _pause.visible or _blocked.visible
 
 
 func _on_block_pressed() -> void:

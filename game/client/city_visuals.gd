@@ -9,17 +9,18 @@ const ASPHALT_KINDS := ["primary", "secondary", "tertiary", "unclassified", "res
 const COBBLE_KINDS := ["pedestrian", "living_street"]
 const MARKED_KINDS := ["primary", "secondary", "tertiary"]
 const GREEN_AREAS := {"park": Color("5c8a47"), "grass": Color("6a9650"), "playground": Color("8a9a55"), "pitch": Color("4f8a44")}
-const CELL := 16.0
 const RAIL_GAUGE := 1.435
 const FACADES := ["e8dcc4", "d9c7a7", "c9b18f", "e3d5b8", "bfa98a", "d8cfc4", "c7b9a5", "e6c9a8",
 	"d4a88c", "b9b2a6", "cdd3d6", "e0d2c0", "c9a58a", "d6d0bd", "e2c7b1", "c4b8a8"]
 const FACADES_COMMERCIAL := ["c8ccd0", "b8c0c8", "d8d4cc", "bcc4c4", "d2cbc0"]
 const ROOFS := ["6f6a64", "7b746c", "8a8580", "5d5a57", "757069", "a4553b"]
 const AWNINGS := ["b03a2e", "2e7d4f", "1f5f99", "c77d20", "6d3b8f", "8a8a8a", "a52a4a"]
+## Pure decoration, hidden on GraphicsQuality.LOW.
+const DETAIL_PROPS := ["BayWindows", "Awnings", "WaterTanks", "AirConditioners", "CatenaryArms"]
 
 
 static func build(zone: ZoneData, vis: Node3D) -> Dictionary:
-	var ctx := _Context.new(zone)
+	var ctx := StreetLayout.for_zone(zone)
 	_ground(ctx, vis)
 	_areas(ctx, vis)
 	_roads(ctx, vis)
@@ -28,113 +29,18 @@ static func build(zone: ZoneData, vis: Node3D) -> Dictionary:
 	_buildings(ctx, vis)
 	_trees(ctx, vis)
 	var lamps := _lamps(ctx, vis)
+	_cars(ctx, vis)
+	_street_furniture(ctx, vis)
+	_shop_signs(ctx, vis)
+	_street_signs(ctx, vis)
 	_catenary(ctx, vis)
 	var boards := _stops(ctx, vis)
 	return {"lamps": lamps, "boards": boards}
 
 
-## Shared lookups: road segments and building footprints bucketed by cell.
-class _Context:
-	extends RefCounted
-	var zone: ZoneData
-	var half := 256.0
-	var road_cells := {}  # Vector2i -> Array of [a: Vector2, b: Vector2, width, kind]
-	var building_cells := {}  # Vector2i -> Array of PackedVector2Array
-	var junctions := {}  # Vector2i (0.1 m key) -> exclusion radius
-	var junction_cells := {}  # Vector2i cell -> Array of [point, radius]
-	var tracks: Array = []  # PackedVector2Array track centre lines (XZ)
-
-	func _init(z: ZoneData) -> void:
-		zone = z
-		half = z.half_size()
-		var seen := {}
-		for road in zone.roads:
-			var pts := WorldBuilder.footprint_xz(road.points)
-			var w := float(road.width)
-			for i in pts.size() - 1:
-				_bucket(road_cells, pts[i], pts[i + 1], [pts[i], pts[i + 1], w, str(road.kind)])
-			if not ASPHALT_KINDS.has(road.kind) and not COBBLE_KINDS.has(road.kind):
-				continue
-			for p in pts:
-				var k := Vector2i(roundi(p.x * 10), roundi(p.y * 10))
-				if not seen.has(k):
-					seen[k] = {}
-				seen[k][str(road.id)] = maxf(float(seen[k].get(str(road.id), 0.0)), w)
-		for k in seen:
-			if seen[k].size() >= 2:
-				var widest := 0.0
-				for w in seen[k].values():
-					widest = maxf(widest, w)
-				junctions[k] = widest / 2.0 + 1.5
-				var jp := Vector2(k.x / 10.0, k.y / 10.0)
-				var jc := Vector2i(floori(jp.x / CELL), floori(jp.y / CELL))
-				for dx in range(-1, 2):
-					for dy in range(-1, 2):
-						var c := jc + Vector2i(dx, dy)
-						if not junction_cells.has(c):
-							junction_cells[c] = []
-						junction_cells[c].append([jp, widest / 2.0 + 1.5])
-		for b in zone.buildings:
-			if float(b.min_height) > 2.2:
-				continue
-			var poly := WorldBuilder.footprint_xz(b.footprint)
-			var box := Rect2(poly[0], Vector2.ZERO)
-			for p in poly:
-				box = box.expand(p)
-			for x in range(floori(box.position.x / CELL), floori(box.end.x / CELL) + 1):
-				for y in range(floori(box.position.y / CELL), floori(box.end.y / CELL) + 1):
-					var c := Vector2i(x, y)
-					if not building_cells.has(c):
-						building_cells[c] = []
-					building_cells[c].append(poly)
-		for line: TransitNetwork.TransitLine in zone.transit.lines:
-			var polys: Array = [line.path] if line.loop else [line.right_track, line.left_track]
-			for poly in polys:
-				tracks.append(WorldBuilder.footprint_xz(Array(poly).map(func(p): return [p.x, p.y])))
-
-	func _bucket(cells: Dictionary, a: Vector2, b: Vector2, item: Array) -> void:
-		var box := Rect2(a, Vector2.ZERO).expand(b).grow(item[2] / 2.0 + 2.0)
-		for x in range(floori(box.position.x / CELL), floori(box.end.x / CELL) + 1):
-			for y in range(floori(box.position.y / CELL), floori(box.end.y / CELL) + 1):
-				var c := Vector2i(x, y)
-				if not cells.has(c):
-					cells[c] = []
-				cells[c].append(item)
-
-	func roads_near(p: Vector2) -> Array:
-		return road_cells.get(Vector2i(floori(p.x / CELL), floori(p.y / CELL)), [])
-
-	## Distance to the nearest building wall; negative inside a building.
-	func building_clearance(p: Vector2) -> float:
-		var best := INF
-		for poly in building_cells.get(Vector2i(floori(p.x / CELL), floori(p.y / CELL)), []):
-			var inside := Geometry2D.is_point_in_polygon(p, poly)
-			for i in poly.size():
-				var q := Geometry2D.get_closest_point_to_segment(p, poly[i], poly[(i + 1) % poly.size()])
-				var d := p.distance_to(q)
-				best = minf(best, -d if inside else d)
-		return best
-
-	func near_junction(p: Vector2, extra := 0.0) -> bool:
-		for j in junction_cells.get(Vector2i(floori(p.x / CELL), floori(p.y / CELL)), []):
-			if p.distance_to(j[0]) < float(j[1]) + extra:
-				return true
-		return false
-
-	func near_track(p: Vector2, radius: float) -> bool:
-		for poly in tracks:
-			for i in poly.size() - 1:
-				if p.distance_to(Geometry2D.get_closest_point_to_segment(p, poly[i], poly[i + 1])) < radius:
-					return true
-		return false
-
-	func inside_zone(p: Vector2, margin := 0.0) -> bool:
-		return absf(p.x) < half - margin and absf(p.y) < half - margin
-
-
 # --- ground, areas, roads ------------------------------------------------------------
 
-static func _ground(ctx: _Context, vis: Node3D) -> void:
+static func _ground(ctx: StreetLayout, vis: Node3D) -> void:
 	var plane := PlaneMesh.new()
 	plane.size = Vector2(ctx.zone.size_m + 800.0, ctx.zone.size_m + 800.0)
 	var ground := MeshInstance3D.new()
@@ -161,7 +67,7 @@ static func _ground(ctx: _Context, vis: Node3D) -> void:
 		vis.add_child(mi)
 
 
-static func _areas(ctx: _Context, vis: Node3D) -> void:
+static func _areas(ctx: StreetLayout, vis: Node3D) -> void:
 	var green := SurfaceTool.new()
 	green.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var stone := SurfaceTool.new()
@@ -193,7 +99,7 @@ static func _areas(ctx: _Context, vis: Node3D) -> void:
 			vis.add_child(mi)
 
 
-static func _roads(ctx: _Context, vis: Node3D) -> void:
+static func _roads(ctx: StreetLayout, vis: Node3D) -> void:
 	var tools := {}
 	for key in ["asphalt", "cobbles", "pavers", "curb"]:
 		var st := SurfaceTool.new()
@@ -260,7 +166,7 @@ static func offset_polyline(pts: PackedVector2Array, off: float) -> PackedVector
 
 
 ## Kerb stones along one edge, left out where other streets join.
-static func _curb(ctx: _Context, st: SurfaceTool, pts: PackedVector2Array, off: float) -> void:
+static func _curb(ctx: StreetLayout, st: SurfaceTool, pts: PackedVector2Array, off: float) -> void:
 	var edge := offset_polyline(pts, off)
 	var inward := -signf(off)
 	var run := PackedVector2Array()
@@ -299,7 +205,7 @@ static func _emit_curb(st: SurfaceTool, run: PackedVector2Array, inward: float) 
 		WorldBuilder._add_tri(st, Vector3(a.x, 0.03, a.y), Vector3(a.x, top, a.y), Vector3(b.x, top, b.y), face, Color.WHITE)
 
 
-static func _crossings(ctx: _Context, vis: Node3D) -> void:
+static func _crossings(ctx: StreetLayout, vis: Node3D) -> void:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var any := false
@@ -339,7 +245,7 @@ static func _crossings(ctx: _Context, vis: Node3D) -> void:
 
 # --- trams: tracks, wires, stops -------------------------------------------------------
 
-static func _tracks(ctx: _Context, vis: Node3D) -> void:
+static func _tracks(ctx: StreetLayout, vis: Node3D) -> void:
 	var bed := SurfaceTool.new()
 	bed.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var rails := SurfaceTool.new()
@@ -350,7 +256,7 @@ static func _tracks(ctx: _Context, vis: Node3D) -> void:
 			ribbon(bed, piece, 2.2, 0.058, Color.WHITE)
 			for side in [-1.0, 1.0]:
 				ribbon(rails, piece, 0.08, 0.078, Color.WHITE, side * RAIL_GAUGE / 2.0)
-	for spec in [[bed, CityMaterials.solid(Color("4a4844"), 0.95), "TrackBed"], [rails, CityMaterials.solid(Color("b9bcc0"), 0.25, 0.9), "Rails"]]:
+	for spec in [[bed, CityMaterials.solid(Color("4a4844"), 0.95), "TrackBed"], [rails, CityMaterials.solid(Color("8a8c8e"), 0.45, 0.55), "Rails"]]:
 		var mi := MeshInstance3D.new()
 		mi.name = spec[2]
 		mi.mesh = (spec[0] as SurfaceTool).commit()
@@ -360,7 +266,7 @@ static func _tracks(ctx: _Context, vis: Node3D) -> void:
 
 
 ## Pieces of a polyline inside the zone (densified so clipping is smooth).
-static func _inside_run(ctx: _Context, poly: PackedVector2Array) -> Array:
+static func _inside_run(ctx: StreetLayout, poly: PackedVector2Array) -> Array:
 	var pieces := []
 	var cur := PackedVector2Array()
 	for i in poly.size():
@@ -375,7 +281,7 @@ static func _inside_run(ctx: _Context, poly: PackedVector2Array) -> Array:
 	return pieces
 
 
-static func _catenary(ctx: _Context, vis: Node3D) -> void:
+static func _catenary(ctx: StreetLayout, vis: Node3D) -> void:
 	var pole_xf := []
 	var arm_xf := []
 	var wires := SurfaceTool.new()
@@ -425,64 +331,46 @@ static func _catenary(ctx: _Context, vis: Node3D) -> void:
 		vis.add_child(mi)
 
 
-## Shelters, platforms, signs and live departure boards. Returns the boards
-## as [{label: Label3D, serves: [[line, stop, dir], ...]}] for the client to refresh.
-static func _stops(ctx: _Context, vis: Node3D) -> Array:
-	var groups := {}
-	for line: TransitNetwork.TransitLine in ctx.zone.transit.lines:
-		for i in line.stops.size():
-			if not line.stops[i].in_zone:
-				continue
-			for dir in ([1] if line.loop else [1, -1]):
-				var p := line.platform(i, dir)
-				var key := Vector2i(roundi(p.x / 3.0), roundi(p.y / 3.0))
-				if not groups.has(key):
-					groups[key] = {"pos": p, "tangent": line.tangent_at(float(line.stops[i].s)) * dir,
-						"name": line.stops[i].name, "room": line.platform_room(i, dir) - (line.stops[i].plat_r if dir > 0 else line.stops[i].plat_l),
-						"track_gap": (line.stops[i].plat_r if dir > 0 else line.stops[i].plat_l) - line.track_offset,
-						"long": line.vehicle_type != "nostalgic", "serves": [], "color": line.color}
-				groups[key].serves.append([line.index, i, dir])
+## Shelters, raised platforms, signs and live departure boards (placement
+## from StreetLayout, which also gives the server its colliders). Returns
+## the boards as [{label: Label3D, serves: [[line, stop, dir], ...]}].
+static func _stops(ctx: StreetLayout, vis: Node3D) -> Array:
 	var boards := []
-	var stone := CityMaterials.solid(Color("b7b2a8"), 0.9)
-	var frame := CityMaterials.solid(Color("2f3438"), 0.4, 0.6)
-	for g in groups.values():
-		var en: Vector2 = g.pos
-		var t: Vector2 = g.tangent
-		var right := Vector2(t.y, -t.x)  # away from the track, in EN
+	var stone := Color("b7b2a8")
+	var frame := Color("2f3438")
+	for g in ctx.stops:
 		var node := Node3D.new()
 		node.name = "Stop_" + str(g.name)
-		node.position = Vector3(en.x, 0.0, -en.y)
-		node.basis = Basis.looking_at(Vector3(t.x, 0, -t.y), Vector3.UP)
+		node.transform = g.xf
 		vis.add_child(node)
 		# Local frame: -Z along travel, +X away from the track.
-		var length := 26.0 if g.long else 13.0
-		# The slab runs from just clear of the tram (1.3 m from the track
-		# centre) to a little behind where people stand.
-		var inner := -(float(g.track_gap) - 1.3)
-		var outer := minf(0.6, float(g.room) - 0.2)
-		if outer - inner >= 0.6:
-			_box(node, Vector3(outer - inner, 0.1, length), Vector3((inner + outer) / 2.0, 0.05, 0), stone)
-			_box(node, Vector3(0.12, 0.14, length), Vector3(inner + 0.06, 0.07, 0), CityMaterials.solid(Color("e8e3d6"), 0.8))
-		var has_shelter := float(g.room) >= 1.4
-		if has_shelter:
-			_box(node, Vector3(1.5, 0.08, 3.6), Vector3(0.45, 2.55, 0), frame)
-			_box(node, Vector3(0.04, 2.2, 3.4), Vector3(1.1, 1.3, 0), CityMaterials.glass())
+		var length: float = g.length
+		# One merged mesh per stop (plus its glass): few draw calls per stop.
+		var m := MeshMerger.new()
+		var slab: Array = g.slab
+		if not slab.is_empty():
+			var centre: Vector3 = slab[0]
+			var size: Vector3 = slab[1]
+			var inner := centre.x - size.x / 2.0
+			m.box("stop", size, centre, stone)
+			# White edge line and a yellow tactile strip along the tram side.
+			m.box("stop", Vector3(0.12, 0.01, length), Vector3(inner + 0.06, size.y + 0.005, 0), Color("e8e3d6"))
+			m.box("stop", Vector3(0.3, 0.012, length), Vector3(inner + 0.5, size.y + 0.006, 0), Color("d9b43a"))
+		if g.shelter:
+			m.box("stop", Vector3(1.5, 0.08, 3.6), Vector3(0.45, 2.55, 0), frame)
+			m.box("glass", Vector3(0.04, 2.2, 3.4), Vector3(1.1, 1.3, 0), Color.WHITE)
 			for z in [-1.7, 1.7]:
-				_box(node, Vector3(0.08, 2.5, 0.08), Vector3(1.1, 1.27, z), frame)
-			_box(node, Vector3(0.45, 0.06, 2.4), Vector3(0.8, 0.48, 0), CityMaterials.solid(Color("6b4a33"), 0.7))
-		# Sign pole with the stop name.
-		var pole := _box(node, Vector3(0.08, 3.0, 0.08), Vector3(0.6, 1.5, -3.5), frame)
-		pole.name = "SignPole"
-		var disk := MeshInstance3D.new()
-		var cyl := CylinderMesh.new()
-		cyl.top_radius = 0.32
-		cyl.bottom_radius = 0.32
-		cyl.height = 0.04
-		disk.mesh = cyl
-		disk.material_override = CityMaterials.solid(g.color, 0.5)
-		disk.position = Vector3(0.6, 3.1, -3.5)
-		disk.rotation.x = PI / 2
-		node.add_child(disk)
+				m.box("stop", Vector3(0.08, 2.5, 0.08), Vector3(1.1, 1.27, z), frame)
+			m.box("stop", Vector3(0.45, 0.06, 2.4), Vector3(0.8, 0.48, 0), Color("6b4a33"))
+			for z in [-1.0, 1.0]:
+				m.box("stop", Vector3(0.06, 0.45, 0.06), Vector3(0.8, 0.23, z), frame)
+		# Sign pole with the stop name and the line colour disk.
+		m.box("stop", Vector3(0.08, 3.0, 0.08), Vector3(0.6, 1.5, -3.5), frame)
+		m.cylinder("stop", 0.32, 0.32, 0.04, Transform3D(Basis(Vector3.RIGHT, PI / 2), Vector3(0.6, 3.1, -3.5)), g.color)
+		m.emit("stop", node, MeshMerger.vertex_colour_material(0.8))
+		var glass := m.emit("glass", node, CityMaterials.glass())
+		if glass:
+			glass.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		var title := Label3D.new()
 		title.text = str(g.name)
 		title.font_size = 42
@@ -490,23 +378,174 @@ static func _stops(ctx: _Context, vis: Node3D) -> Array:
 		title.outline_size = 8
 		title.billboard = BaseMaterial3D.BILLBOARD_FIXED_Y
 		title.position = Vector3(0.6, 3.55, -3.5)
+		set_range(title, 110.0)
 		node.add_child(title)
 		var board := Label3D.new()
 		board.font_size = 30
 		board.pixel_size = 0.005
 		board.outline_size = 6
 		board.modulate = Color("ffcf6b")
-		board.position = Vector3(0.4, 2.2 if has_shelter else 2.7, 0.0 if has_shelter else -3.5)
+		board.position = Vector3(0.4, 2.2 if g.shelter else 2.7, 0.0 if g.shelter else -3.5)
 		board.rotation.y = -PI / 2  # face the track
 		board.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+		set_range(board, 45.0)
 		node.add_child(board)
 		boards.append({"label": board, "serves": g.serves})
 	return boards
 
 
+# --- signs ----------------------------------------------------------------------------
+
+const SIGN_SKIP := ["atm", "waste_disposal", "bench", "parking", "bicycle_parking", "vending_machine", "toilets",
+	"drinking_water", "post_box", "recycling", "telephone", "fountain", "apartment"]
+const SIGN_COLOURS := {
+	"pharmacy": Color("ff4d4d"), "chemist": Color("ff4d4d"), "bank": Color("e8f0ff"),
+	"cafe": Color("ffd08a"), "restaurant": Color("ffcf6b"), "fast_food": Color("ffb347"), "bar": Color("ff9ecf"),
+	"pub": Color("ff9ecf"), "nightclub": Color("d68bff"), "bakery": Color("ffe3a3"), "confectionery": Color("ffc4e1"),
+	"theatre": Color("fff2a8"), "cinema": Color("fff2a8"), "books": Color("c9f0c1"),
+}
+const STREET_WORDS := {"Caddesi": "Cd.", "Sokağı": "Sk.", "Sokak": "Sk.", "Bulvarı": "Bul.", "Meydanı": "Myd.",
+	"Çıkmazı": "Çkm.", "Yokuşu": "Yk."}
+
+
+## The real names of shops, cafés and banks (OSM points of interest) on the
+## street-facing wall of the building they are in, above the shop window.
+static func _shop_signs(ctx: StreetLayout, vis: Node3D) -> void:
+	var placed: Array = []
+	var holder := Node3D.new()
+	holder.name = "ShopSigns"
+	vis.add_child(holder)
+	for poi in ctx.zone.pois:
+		var label_text := str(poi.get("name", ""))
+		var kind := str(poi.get("kind", ""))
+		if label_text == "" or kind in SIGN_SKIP:
+			continue
+		var p := Vector2(float(poi.e), -float(poi.n))
+		var best: Array = []
+		var best_d := 14.0
+		for poly in ctx.building_cells.get(Vector2i(floori(p.x / StreetLayout.CELL), floori(p.y / StreetLayout.CELL)), []):
+			for i in poly.size():
+				var a: Vector2 = poly[i]
+				var b: Vector2 = poly[(i + 1) % poly.size()]
+				if a.distance_to(b) < 3.0:
+					continue
+				var q := Geometry2D.get_closest_point_to_segment(p, a, b)
+				var d := p.distance_to(q)
+				if d >= best_d:
+					continue
+				# Outward normal: the side of the edge away from the building.
+				var n := Vector2(-(b - a).y, (b - a).x).normalized()
+				if Geometry2D.is_point_in_polygon(q + n * 0.3, poly):
+					n = -n
+				if _faces_street(ctx, a, b, n):
+					best_d = d
+					best = [q, n]
+		if best.is_empty():
+			continue
+		var at: Vector2 = best[0]
+		var out: Vector2 = best[1]
+		var crowded := false
+		for other: Vector2 in placed:
+			if other.distance_to(at) < 3.2:
+				crowded = true
+				break
+		if crowded:
+			continue
+		placed.append(at)
+		var sign := Label3D.new()
+		sign.text = ("ECZANE\n" + label_text) if kind == "pharmacy" else label_text
+		sign.font_size = 44
+		sign.pixel_size = 0.0055
+		sign.outline_size = 10
+		sign.outline_modulate = Color(0, 0, 0, 0.85)
+		sign.modulate = SIGN_COLOURS.get(kind, Color("f4f1ea"))
+		sign.width = 520.0
+		sign.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		sign.position = Vector3(at.x + out.x * 0.15, 3.3, at.y + out.y * 0.15)  # above the awnings
+		sign.rotation.y = atan2(out.x, out.y)  # Label3D reads towards +Z
+		set_range(sign, 45.0)
+		holder.add_child(sign)
+
+
+## Blue Istanbul street name plates on a pole at junctions of named streets.
+static func _street_signs(ctx: StreetLayout, vis: Node3D) -> void:
+	# Which named streets meet at each junction node, and in which direction.
+	var meets := {}
+	for road in ctx.zone.roads:
+		var road_name := str(road.get("name", ""))
+		if road_name == "":
+			continue
+		var pts := WorldBuilder.footprint_xz(road.points)
+		for i in pts.size():
+			var key := Vector2i(roundi(pts[i].x * 10), roundi(pts[i].y * 10))
+			if not ctx.junctions.has(key):
+				continue
+			var nb := pts[i + 1] if i + 1 < pts.size() else pts[i - 1]
+			if not meets.has(key):
+				meets[key] = {}
+			meets[key][road_name] = (nb - pts[i]).normalized()
+	var m := MeshMerger.new()
+	var holder := Node3D.new()
+	holder.name = "StreetSigns"
+	vis.add_child(holder)
+	var any := false
+	for key in meets:
+		var names: Dictionary = meets[key]
+		if names.size() < 2:
+			continue
+		var j := Vector2(key.x / 10.0, key.y / 10.0)
+		var reach: float = ctx.junctions[key] + 0.6
+		# The corner between the first two streets, if it is clear.
+		var dirs: Array = names.values()
+		var corner := ((dirs[0] as Vector2) + (dirs[1] as Vector2)).normalized()
+		if corner == Vector2.ZERO:
+			corner = Vector2(-(dirs[0] as Vector2).y, (dirs[0] as Vector2).x)
+		var pole := j + corner * reach * 1.25
+		if ctx.building_clearance(pole) < 0.4 or ctx.near_track(pole, 2.5) or not ctx.inside_zone(pole, 3.0):
+			pole = j - corner * reach * 1.25
+			if ctx.building_clearance(pole) < 0.4 or ctx.near_track(pole, 2.5) or not ctx.inside_zone(pole, 3.0):
+				continue
+		any = true
+		var base := Vector3(pole.x, 0.0, pole.y)
+		m.box("s", Vector3(0.06, 2.9, 0.06), base + Vector3(0, 1.45, 0), Color("3b3f44"))
+		var level := 0
+		for street_name in names:
+			if level >= 2:
+				break
+			var along: Vector2 = names[street_name]
+			var yaw := atan2(along.x, along.y) + PI / 2.0  # plate runs along its street
+			var basis := Basis(Vector3.UP, yaw)
+			var y := 2.7 - level * 0.34
+			m.box("s", Vector3(1.15, 0.28, 0.03), base + Vector3(0, y, 0), Color("1f4fa3"), basis)
+			m.box("s", Vector3(1.19, 0.32, 0.02), base + Vector3(0, y, 0), Color("f2f2f2"), basis)
+			for face: float in [1.0, -1.0]:
+				var text := Label3D.new()
+				text.text = _short_street(str(street_name))
+				text.font_size = 34
+				text.pixel_size = 0.0045
+				text.outline_size = 0
+				text.modulate = Color.WHITE
+				text.width = 240.0
+				text.autowrap_mode = TextServer.AUTOWRAP_OFF
+				text.position = base + Vector3(0, y, 0) + basis * Vector3(0, 0, 0.02 * face)
+				text.rotation.y = yaw + (0.0 if face > 0.0 else PI)
+				set_range(text, 30.0)
+				holder.add_child(text)
+			level += 1
+	if any:
+		m.emit("s", holder, MeshMerger.vertex_colour_material(0.6))
+
+
+static func _short_street(street_name: String) -> String:
+	for word in STREET_WORDS:
+		if street_name.ends_with(" " + word):
+			return street_name.trim_suffix(word) + STREET_WORDS[word]
+	return street_name
+
+
 # --- buildings -------------------------------------------------------------------------
 
-static func _buildings(ctx: _Context, vis: Node3D) -> void:
+static func _buildings(ctx: StreetLayout, vis: Node3D) -> void:
 	var walls := {}
 	var roofs := {}
 	var balcony_xf := []
@@ -638,7 +677,7 @@ static func _wall_quad(st: SurfaceTool, p0: Vector2, p1: Vector2, y0: float, y1:
 
 
 ## A wall faces the street if a road runs just outside it.
-static func _faces_street(ctx: _Context, p0: Vector2, p1: Vector2, out: Vector2) -> bool:
+static func _faces_street(ctx: StreetLayout, p0: Vector2, p1: Vector2, out: Vector2) -> bool:
 	var probe := (p0 + p1) / 2.0 + out * 4.0
 	for seg in ctx.roads_near(probe):
 		var q := Geometry2D.get_closest_point_to_segment(probe, seg[0], seg[1])
@@ -713,7 +752,7 @@ static func _box_into(st: SurfaceTool, size: Vector3, pos: Vector3, color: Color
 
 # --- street furniture ----------------------------------------------------------------
 
-static func _trees(ctx: _Context, vis: Node3D) -> void:
+static func _trees(ctx: StreetLayout, vis: Node3D) -> void:
 	var points := WorldBuilder.tree_points(ctx.zone)
 	if points.is_empty():
 		return
@@ -744,8 +783,8 @@ static func _crown_mesh() -> Mesh:
 		var sphere := SphereMesh.new()
 		sphere.radius = spec[1]
 		sphere.height = spec[1] * 1.8
-		sphere.radial_segments = 10
-		sphere.rings = 6
+		sphere.radial_segments = 8
+		sphere.rings = 4
 		var arrays := sphere.get_mesh_arrays()
 		var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
 		var normals: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
@@ -757,47 +796,96 @@ static func _crown_mesh() -> Mesh:
 	return st.commit()
 
 
-## Street lamps along streets, kept off tracks, junctions and walls.
-## Returns lamp head positions (for the night lights near the camera).
-static func _lamps(ctx: _Context, vis: Node3D) -> PackedVector3Array:
+## Street lamps (placed by StreetLayout). Returns lamp head positions
+## for the night lights near the camera.
+static func _lamps(ctx: StreetLayout, vis: Node3D) -> PackedVector3Array:
 	var heads := PackedVector3Array()
 	var pole_xf := []
 	var head_xf := []
-	for road in ctx.zone.roads:
-		var kind := str(road.kind)
-		var w := float(road.width)
-		if not (ASPHALT_KINDS.has(kind) or COBBLE_KINDS.has(kind)) or w < 4.0 or kind == "service":
-			continue
-		var pts := WorldBuilder.footprint_xz(road.points)
-		var along := 12.0
-		var walked := 0.0
-		var side := 1.0 if WorldBuilder._hash01(str(road.id)) < 0.5 else -1.0
-		for i in pts.size() - 1:
-			var a := pts[i]
-			var b := pts[i + 1]
-			var seg := a.distance_to(b)
-			while along <= walked + seg:
-				var c := a.lerp(b, (along - walked) / seg)
-				var d := (b - a) / seg
-				var n := Vector2(-d.y, d.x) * side
-				var p := c + n * (w / 2.0 + 0.6)
-				along += 30.0 if ASPHALT_KINDS.has(kind) else 24.0
-				side = -side
-				if not ctx.inside_zone(p, 3.0) or ctx.near_junction(c, 3.0) or ctx.near_track(p, 3.2) \
-						or ctx.building_clearance(p) < 0.4:
-					continue
-				var yaw := atan2(-n.x, -n.y)  # local +Z (the arm) points towards the street centre
-				pole_xf.append(Transform3D(Basis(Vector3.UP, yaw), Vector3(p.x, 0, p.y)))
-				var head := Vector3(p.x - n.x * 1.1, 5.75, p.y - n.y * 1.1)
-				head_xf.append(Transform3D(Basis(Vector3.UP, yaw), head))
-				heads.append(head)
-			walked += seg
+	for l in ctx.lamps:
+		pole_xf.append(Transform3D(Basis(Vector3.UP, float(l.yaw)), l.base))
+		head_xf.append(Transform3D(Basis(Vector3.UP, float(l.yaw)), l.head))
+		heads.append(l.head)
 	var pole_mesh := _lamp_pole_mesh()
 	_multimesh(vis, pole_mesh, CityMaterials.solid(Color("3d4247"), 0.45, 0.6), pole_xf, [], 200.0, "LampPoles")
 	var head_mesh := BoxMesh.new()
 	head_mesh.size = Vector3(0.28, 0.14, 0.55)
 	_multimesh(vis, head_mesh, CityMaterials.get_shader("lamp_head"), head_xf, [], 400.0, "LampHeads")
 	return heads
+
+
+## Parked cars: one shared model, body colour per instance.
+static func _cars(ctx: StreetLayout, vis: Node3D) -> void:
+	if ctx.cars.is_empty():
+		return
+	var xfs := []
+	var cols := []
+	var sign_xfs := []
+	for c in ctx.cars:
+		var xf := Transform3D(Basis(Vector3.UP, float(c.yaw)), c.pos)
+		xfs.append(xf)
+		cols.append(c.color)
+		if c.taxi:
+			sign_xfs.append(xf * Transform3D(Basis(), Vector3(0, 1.55, 0.2)))
+	_multimesh(vis, _car_mesh(), CityMaterials.instanced(0.35), xfs, cols, 150.0, "ParkedCars")
+	if not sign_xfs.is_empty():
+		var sign := BoxMesh.new()
+		sign.size = Vector3(0.7, 0.18, 0.25)
+		_multimesh(vis, sign, CityMaterials.solid(Color("fff2a8"), 0.5), sign_xfs, [], 90.0, "TaxiSigns")
+
+
+## A small saloon, length along Z (front at -Z). White parts take the
+## instance colour; dark parts stay dark.
+static func _car_mesh() -> Mesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var size := StreetLayout.CAR_SIZE
+	var tyre := Color(0.05, 0.05, 0.05)
+	var glass := Color(0.09, 0.11, 0.13)
+	_box_into(st, Vector3(size.x, 0.62, size.z), Vector3(0, 0.55, 0), Color.WHITE)  # lower body
+	_box_into(st, Vector3(size.x - 0.12, 0.5, size.z * 0.5), Vector3(0, 1.1, 0.2), Color.WHITE)  # cabin
+	_box_into(st, Vector3(size.x - 0.08, 0.4, size.z * 0.46), Vector3(0, 1.1, 0.2), glass)  # windows
+	_box_into(st, Vector3(size.x - 0.3, 0.06, size.z * 0.5), Vector3(0, 1.37, 0.2), Color.WHITE)  # roof
+	for x in [-1.0, 1.0]:
+		for z in [-1.3, 1.35]:
+			_box_into(st, Vector3(0.22, 0.6, 0.6), Vector3(x * (size.x / 2.0 - 0.1), 0.3, z), tyre)
+	_box_into(st, Vector3(size.x - 0.2, 0.12, 0.05), Vector3(0, 0.6, -size.z / 2.0), Color(0.95, 0.93, 0.8))  # headlights
+	_box_into(st, Vector3(size.x - 0.2, 0.12, 0.05), Vector3(0, 0.62, size.z / 2.0), Color(0.55, 0.05, 0.05))  # tail lights
+	return st.commit()
+
+
+## Bollards and benches.
+static func _street_furniture(ctx: StreetLayout, vis: Node3D) -> void:
+	var bollard_xf := []
+	for p: Vector3 in ctx.bollards:
+		bollard_xf.append(Transform3D(Basis(), p + Vector3(0, StreetLayout.BOLLARD_HEIGHT / 2.0, 0)))
+	var bollard := CylinderMesh.new()
+	bollard.top_radius = 0.08
+	bollard.bottom_radius = 0.11
+	bollard.height = StreetLayout.BOLLARD_HEIGHT
+	bollard.radial_segments = 8
+	_multimesh(vis, bollard, CityMaterials.solid(Color("26292c"), 0.5, 0.4), bollard_xf, [], 90.0, "Bollards")
+	var bench_xf := []
+	for bench in ctx.benches:
+		bench_xf.append(Transform3D(Basis(Vector3.UP, float(bench.yaw)), bench.pos))
+	_multimesh(vis, _bench_mesh(), CityMaterials.instanced(0.8), bench_xf, [], 110.0, "Benches")
+
+
+## Park bench: wooden slats on cast iron legs; faces -Z.
+static func _bench_mesh() -> Mesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var wood := Color("7a5334")
+	var iron := Color("2b2d2f")
+	var s := StreetLayout.BENCH_SIZE
+	for x in [-s.x / 2.0 + 0.15, s.x / 2.0 - 0.15]:
+		_box_into(st, Vector3(0.06, s.y, s.z), Vector3(x, s.y / 2.0, 0), iron)
+		_box_into(st, Vector3(0.06, 0.5, 0.06), Vector3(x, s.y + 0.25, s.z / 2.0 - 0.05), iron)
+	for k in 3:
+		_box_into(st, Vector3(s.x, 0.04, 0.14), Vector3(0, s.y, -s.z / 2.0 + 0.1 + k * 0.17), wood)
+	for k in 2:
+		_box_into(st, Vector3(s.x, 0.12, 0.03), Vector3(0, s.y + 0.2 + k * 0.17, s.z / 2.0 - 0.04), wood)
+	return st.commit()
 
 
 static func _lamp_pole_mesh() -> Mesh:
@@ -833,10 +921,19 @@ static func _multimesh(vis: Node3D, mesh: Mesh, mat: Material, xforms: Array, co
 		mmi.name = "%s_%d_%d" % [node_name, c.x, c.y]
 		mmi.multimesh = mm
 		mmi.material_override = mat
-		mmi.visibility_range_end = range_end
-		mmi.visibility_range_end_margin = 20.0
-		mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+		set_range(mmi, range_end)
+		if node_name in DETAIL_PROPS:
+			mmi.add_to_group("detail")
+			mmi.visible = GraphicsQuality.detail_props()
 		vis.add_child(mmi)
+
+
+## Visibility range that follows GraphicsQuality (see GameClient.apply_quality).
+static func set_range(gi: GeometryInstance3D, base: float) -> void:
+	gi.set_meta("range", base)
+	gi.add_to_group("ranged")
+	gi.visibility_range_end = base * GraphicsQuality.range_scale()
+	gi.visibility_range_end_margin = 10.0
 
 
 static func _box(parent: Node3D, size: Vector3, pos: Vector3, mat: Material) -> MeshInstance3D:

@@ -9,11 +9,11 @@ var _test := ""
 
 func _ready() -> void:
 	var tests := [
-		test_avatar_sanitize, test_names, test_input_codec, test_snapshot_codec,
+		test_avatar_sanitize, test_names, test_input_codec, test_input_world_tick, test_snapshot_codec,
 		test_social_request_flow, test_social_conversation, test_social_blocks,
 		test_store, test_spawn_picker, test_zone_load,
 		test_world_collision, test_motor_walks_and_is_blocked, test_replay_matches_realtime,
-		test_client_and_server_worlds_agree,
+		test_client_and_server_worlds_agree, test_step_up, test_tram_shoves_and_blocks, test_props, test_crowd,
 		test_transit_network, test_transit_timetable, test_walking_routes, test_route_prefers_tram,
 	]
 	for t in tests:
@@ -92,13 +92,21 @@ func test_input_codec() -> void:
 	check(SnapshotCodec.decode_inputs(PackedByteArray([200])).is_empty(), "absurd count rejected")
 
 
+func test_input_world_tick() -> void:
+	var inp := SnapshotCodec.quantize_input(3, 0, 1, 0, 0, 0, 70000)
+	var back: Dictionary = SnapshotCodec.decode_inputs(SnapshotCodec.encode_inputs([inp]))[0]
+	check(SnapshotCodec.unwrap_tick(int(back.wt), 70010) == 70000, "world tick unwraps just behind the server")
+	check(SnapshotCodec.unwrap_tick(int(back.wt), 69999) == 70000, "world tick unwraps just ahead of the server")
+	check(SnapshotCodec.unwrap_tick(65535, 65540) == 65535, "world tick unwraps across the 16-bit boundary")
+
+
 func test_snapshot_codec() -> void:
 	var entities := [
 		{"id": 12345, "pos": Vector3(1.5, 0.0, -20.25), "yaw": 1.0, "pitch": 0.2, "speed": 4.2, "flags": 1},
 		{"id": 2000000000, "pos": Vector3(-100, 3, 50), "yaw": 6.0, "pitch": -0.5, "speed": 0.0, "flags": 0},
 	]
 	var data := SnapshotCodec.encode_snapshot(99, 42, Vector3(1, 2, 3), Vector3(0.5, -1, 0), entities)
-	check(data.size() == 34 + 2 * SnapshotCodec.ENTITY_BYTES, "snapshot size is compact")
+	check(data.size() == 34 + 2 * SnapshotCodec.ENTITY_BYTES + 2, "snapshot size is compact")
 	var snap := SnapshotCodec.decode_snapshot(data)
 	check(snap.tick == 99 and snap.ack == 42, "header survives")
 	check(snap.self_pos == Vector3(1, 2, 3), "self position survives")
@@ -108,6 +116,15 @@ func test_snapshot_codec() -> void:
 		check(snap.entities[0].pos.is_equal_approx(Vector3(1.5, 0.0, -20.25)), "entity position survives")
 		near(snap.entities[0].speed, 4.2, 0.05, "speed")
 	check(SnapshotCodec.decode_snapshot(data.slice(0, data.size() - 1)).is_empty(), "truncated snapshot rejected")
+	var tilt := Transform3D(Basis(Vector3(1, 0, 1).normalized(), 0.8), Vector3(12.34, 0.56, -200.1))
+	var props := SnapshotCodec.encode_props([[7, tilt], [300, Transform3D.IDENTITY]])
+	check(props.size() == 2 + 2 * SnapshotCodec.PROP_BYTES, "props are 16 bytes each")
+	var with_props := SnapshotCodec.decode_snapshot(SnapshotCodec.encode_snapshot(5, 1, Vector3.ZERO, Vector3.ZERO, [], props))
+	check(with_props.props.size() == 2 and with_props.props[0][0] == 7, "props survive in a snapshot")
+	if with_props.props.size() == 2:
+		var got: Transform3D = with_props.props[0][1]
+		check(got.origin.distance_to(tilt.origin) < 0.01, "prop position to a centimetre")
+		check(got.basis.get_rotation_quaternion().angle_to(tilt.basis.get_rotation_quaternion()) < 0.002, "prop rotation survives")
 
 
 func _rules(blocks: Dictionary) -> SocialRules:
@@ -206,6 +223,13 @@ func test_store() -> void:
 	check(reloaded.blocked_by(id).has("fedcba9876543210fedcba9876543210"), "block survives reload")
 	check(reloaded.last_location(id, "zone_a", 3).local_z == 2.0, "location survives reload")
 	check(reloaded.last_location(id, "zone_a", 4).is_empty(), "location ignored for another zone version")
+	var other := "fedcba9876543210fedcba9876543210"
+	reloaded.authenticate(other, "ef".repeat(32), "Öteki")
+	var listed := reloaded.blocked_list(id)
+	check(listed.size() == 1 and listed[0].account == other and listed[0].name == "Öteki", "blocked list names the blocked account")
+	check(reloaded.unblock(id, other), "unblock lifts the block")
+	check(not reloaded.unblock(id, other), "second unblock is a no-op")
+	check(ServerStore.new(dir).blocked_by(id).is_empty(), "unblock survives reload")
 	for f in DirAccess.get_files_at(dir):
 		DirAccess.remove_absolute(dir.path_join(f))
 	DirAccess.remove_absolute(dir)
@@ -413,6 +437,228 @@ func test_client_and_server_worlds_agree() -> void:
 	for w in worlds:
 		w.get_parent().queue_free()
 
+
+
+func _box_collider(parent: Node3D, size: Vector3, center: Vector3) -> void:
+	var body := StaticBody3D.new()
+	body.collision_layer = Protocol.LAYER_WORLD
+	var cs := CollisionShape3D.new()
+	var shape := BoxShape3D.new()
+	shape.size = size
+	cs.shape = shape
+	body.add_child(cs)
+	parent.add_child(body)
+	body.global_position = center
+
+
+## Kerb-high ledges are walked onto; anything taller is a wall.
+func test_step_up() -> void:
+	var made: Array = await _grid_world()
+	var zone: ZoneData = made[0]
+	var holder: Node3D = made[1]
+	var x := float(zone.roads[0].points[0][0])
+	_box_collider(holder, Vector3(3, 0.25, 3), Vector3(x, 0.125, 30.0))  # a tram platform
+	_box_collider(holder, Vector3(3, 0.6, 3), Vector3(x, 0.3, 50.0))  # a low wall
+	await get_tree().physics_frame
+	var body := PlayerMotor.make_body(AvatarSpec.defaults())
+	holder.add_child(body)
+	body.global_position = Vector3(x, 0.05, 36.0)
+	await get_tree().physics_frame
+	var stepped := false
+	for i in Protocol.TICK_RATE * 2:
+		await get_tree().physics_frame
+		if PlayerMotor.step(body, SnapshotCodec.quantize_input(i + 1, 0, 1, 0.0, 0, 0)) & PlayerMotor.EVENT_STEPPED:
+			stepped = true
+	check(stepped, "walking into a 25 cm platform steps up")
+	near(body.global_position.y, 0.25, 0.04, "standing on the platform")
+	body.global_position = Vector3(x, 0.05, 56.0)
+	body.velocity = Vector3.ZERO
+	for i in Protocol.TICK_RATE * 2:
+		await get_tree().physics_frame
+		PlayerMotor.step(body, SnapshotCodec.quantize_input(100 + i, 0, 1, 0.0, 0, 0))
+	check(body.global_position.y < 0.1 and body.global_position.z > 51.4, "a 60 cm wall is not climbed (y=%.2f z=%.2f)" % [body.global_position.y, body.global_position.z])
+	holder.queue_free()
+
+
+## A moving tram throws a player standing on its track sideways, the same
+## way every time; a stopped one is a wall.
+func test_tram_shoves_and_blocks() -> void:
+	var zone := ZoneData.load_zone("tr_istanbul_kadikoy_001")
+	var holder := Node3D.new()
+	add_child(holder)
+	WorldBuilder.build(zone, holder, false)
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	var net := zone.transit
+	var line: TransitNetwork.TransitLine = null
+	for l: TransitNetwork.TransitLine in net.lines:
+		if not l.loop and line == null:
+			line = l
+	check(line != null, "a shuttle line to test with")
+	if line == null:
+		return
+	# A moment when vehicle 0 runs at full speed well inside the zone.
+	var t0 := -1.0
+	var t := 0.0
+	while t < line.cycle and t0 < 0.0:
+		var st := line.state(0, t)
+		var ahead := line.track_point(float(st.s) + int(st.dir) * 20.0, int(st.dir))
+		if not st.dwelling and float(st.speed) > line.speed * 0.9 and absf(ahead.x) < 200.0 and absf(ahead.y) < 200.0:
+			t0 = t
+		t += 0.5
+	check(t0 >= 0.0, "found a tram at speed")
+	var st0 := line.state(0, t0)
+	var dir: int = st0.dir
+	var front := float(st0.s) + dir * (12.4 + 4.0)
+	var en := line.track_point(front, dir)
+	var tick0 := roundi(t0 / Protocol.DT)
+	var finals := []
+	var hits := 0
+	for run in 2:
+		var body := PlayerMotor.make_body(AvatarSpec.defaults())
+		holder.add_child(body)
+		body.global_position = TransitNetwork.en_to_godot(en, 0.05)
+		await get_tree().physics_frame
+		for k in 75:
+			var inp := SnapshotCodec.quantize_input(k + 1, 0, 0, 0.0, 0, 0, tick0 + k)
+			if PlayerMotor.step(body, inp, net) & PlayerMotor.EVENT_TRAM_HIT:
+				hits += 1
+		finals.append(body.global_position)
+		# Nowhere near the inside of a tram afterwards.
+		var p := Vector2(body.global_position.x, body.global_position.z)
+		for box in net.boxes_near(tick0 + 75, p, 20.0):
+			var a: Vector2 = box[1]
+			var d: Vector2 = p - (box[0] as Vector2)
+			var inside := absf(d.dot(a)) < float(box[2]) and absf(d.dot(Vector2(-a.y, a.x))) < float(box[3])
+			check(not inside, "run %d: player is not left inside a tram" % run)
+		body.queue_free()
+	check(hits >= 2, "the tram hit the player in both runs (%d hit ticks)" % hits)
+	check((finals[0] as Vector3).distance_to(finals[1]) < 0.001, "tram collisions are deterministic")
+	var side := (finals[0] as Vector3) - TransitNetwork.en_to_godot(en, 0.0)
+	check(Vector2(side.x, side.z).length() > 1.2, "shoved off the track (%.2f m)" % Vector2(side.x, side.z).length())
+
+	# A tram waiting at a stop: walking into its side stops you at its skin.
+	var dwell_t := -1.0
+	t = 0.0
+	while t < line.cycle and dwell_t < 0.0:
+		var st := line.state(0, t)
+		if st.dwelling and line.stops[int(st.stop)].in_zone and float(st.leg_left) > 4.0 and not line.is_terminus(int(st.stop)):
+			dwell_t = t
+		t += 0.5
+	if dwell_t >= 0.0:
+		var st := line.state(0, dwell_t)
+		var h: Vector2 = st.heading
+		var right := Vector2(h.y, -h.x)
+		var start_en: Vector2 = (st.pos as Vector2) + right * 3.2
+		var body := PlayerMotor.make_body(AvatarSpec.defaults())
+		holder.add_child(body)
+		body.global_position = TransitNetwork.en_to_godot(start_en, 0.05)
+		await get_tree().physics_frame
+		var toward := (st.pos as Vector2) - start_en
+		var heading := atan2(-toward.x, toward.y)
+		var tick := roundi(dwell_t / Protocol.DT)
+		for k in 45:
+			PlayerMotor.step(body, SnapshotCodec.quantize_input(k + 1, 0, 1, heading, 0, 0, tick + k), net)
+		var gap := ZoneData.to_en(body.global_position).distance_to(st.pos)
+		check(gap > TransitNetwork.CAR_HALF_WIDTH + 0.2, "a stopped tram is solid (%.2f m from its centre line)" % gap)
+		body.queue_free()
+	holder.queue_free()
+
+
+## Loose props: laid out the same way every time, kicked by a running
+## player, pushed by trams, reported while moving.
+func test_props() -> void:
+	var zone := ZoneData.load_zone("tr_istanbul_kadikoy_001")
+	var layout := PropLayout.for_zone(zone)
+	var kinds := {}
+	for p in layout.props:
+		kinds[p.kind] = int(kinds.get(p.kind, 0)) + 1
+	check(kinds.get("ball", 0) >= 3 and kinds.get("bin", 0) >= 10 and kinds.get("chair", 0) >= 10,
+		"zone has balls, bins and café chairs (%s)" % [kinds])
+	var again := PropLayout.new(zone)
+	check(again.props.size() == layout.props.size() and (again.props[-1].pos as Vector3).is_equal_approx(layout.props[-1].pos),
+		"prop layout is deterministic")
+	var vp := SubViewport.new()
+	vp.own_world_3d = true
+	add_child(vp)
+	var holder := Node3D.new()
+	vp.add_child(holder)
+	WorldBuilder.build(zone, holder, false)
+	var world := PropWorld.new()
+	holder.add_child(world)
+	world.setup(zone)
+	for i in 3:
+		await get_tree().physics_frame
+	# Run into the first ball from 3 m away.
+	var ball_id := -1
+	for p in layout.props:
+		if p.kind == "ball" and ball_id < 0:
+			ball_id = int(p.id)
+	var ball: RigidBody3D = world.bodies[ball_id]
+	var home := ball.global_position
+	var pl := ZoneServer.Player.new()
+	pl.body = PlayerMotor.make_body(AvatarSpec.defaults())
+	holder.add_child(pl.body)
+	# Take a run-up from a side with nothing in the way (park trees, benches).
+	var space := holder.get_world_3d().direct_space_state
+	var approach := 0.0
+	for turn in 16:
+		var a := turn * TAU / 16.0
+		var clear := true
+		for h: float in [0.25, 0.9]:
+			var from := home + Vector3(sin(a), 0, cos(a)) * 3.5 + Vector3(0, h, 0)
+			var to := home + Vector3(0, h, 0) - Vector3(sin(a), 0, cos(a)) * 1.0
+			for side: float in [-0.35, 0.35]:
+				var off := Vector3(cos(a), 0, -sin(a)) * side
+				if not space.intersect_ray(PhysicsRayQueryParameters3D.create(from + off, to + off, Protocol.LAYER_WORLD)).is_empty():
+					clear = false
+		if clear:
+			approach = a
+			break
+	var start := home + Vector3(sin(approach), 0, cos(approach)) * 3.5 + Vector3(0, -PropWorld.BALL_RADIUS + 0.05, 0)
+	pl.body.global_position = start
+	pl.buttons = PlayerMotor.BUTTON_SPRINT
+	await get_tree().physics_frame
+	var moving_seen := false
+	for k in 60:
+		await get_tree().physics_frame
+		PlayerMotor.step(pl.body, SnapshotCodec.quantize_input(k + 1, 0, 1, approach, 0, PlayerMotor.BUTTON_SPRINT))
+
+		world.push_from_players([pl])
+		world.track(k, [pl])
+		if not world.moving_poses(k).is_empty():
+			moving_seen = true
+
+	var moved := ball.global_position.distance_to(home)
+	check(moved > 2.0, "a running player kicks the ball (%.1f m)" % moved)
+	check(moving_seen, "a moving prop is reported for snapshots")
+	check(world.displaced_poses().size() >= 1, "displaced props are remembered for joiners")
+	vp.queue_free()
+
+
+## Ambient pedestrians: plenty of them, on pavements (not in buildings),
+## moving smoothly, the same for everyone.
+func test_crowd() -> void:
+	var zone := ZoneData.load_zone("tr_istanbul_kadikoy_001")
+	var crowd := Crowd.for_zone(zone)
+	check(crowd.walkers.size() >= 60, "crowd has walkers (%d)" % crowd.walkers.size())
+	var streets := StreetLayout.for_zone(zone)
+	var inside := 0
+	var worst_jump := 0.0
+	for w: Crowd.Walker in crowd.walkers:
+		var prev: Vector2 = w.pose(1000.0)[0]
+		for k in 40:
+			var pose := w.pose(1000.0 + k * 0.5)
+			var p: Vector2 = pose[0]
+			worst_jump = maxf(worst_jump, p.distance_to(prev))
+			prev = p
+			if streets.building_clearance(Vector2(p.x, -p.y)) < 0.0:
+				inside += 1
+	check(worst_jump < Crowd.WALK_MAX * 0.5 + 1.5, "walkers move smoothly (worst %.2f m per 0.5 s)" % worst_jump)
+	check(inside < crowd.walkers.size() * 2, "walkers stay out of buildings (%d samples inside)" % inside)
+	var again := Crowd.new(zone)
+	check((again.walkers[5].pose(77.0)[0] as Vector2).is_equal_approx(crowd.walkers[5].pose(77.0)[0]), "crowd is deterministic")
+	print("crowd sample: %s %s" % [crowd.walkers[0].pose(1000.0), crowd.walkers[1].pose(1000.0)])
 
 
 # --- transit and routing --------------------------------------------------------

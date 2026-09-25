@@ -7,7 +7,7 @@ extends Node3D
 ##
 ## `hours_override` (0-24, local zone time) pins the clock for screenshots.
 
-const UPDATE_EVERY := 5.0
+const UPDATE_EVERY := 2.0
 const NIGHT_LIGHTS := 8
 const ZONE_UTC_OFFSET := 3.0  # Istanbul
 
@@ -22,12 +22,20 @@ var _sky: ProceduralSkyMaterial
 var _lights: Array = []
 var _timer := 0.0
 var _light_timer := 0.0
+var _compat := false
+# Weather, fed by WeatherView: 0..1 each.
+var cloud := 0.2
+var rain := 0.0
+var fog := 0.0
+var _base_sun := 1.0
+var _base_ambient := 1.0
 
 
 func setup(zone: ZoneData, lamps: PackedVector3Array, compatibility: bool) -> void:
 	latitude = zone.origin_lat
 	longitude = zone.origin_lon
 	lamp_positions = lamps
+	_compat = compatibility
 	_sky = ProceduralSkyMaterial.new()
 	_sky.sun_angle_max = 20.0
 	var sky := Sky.new()
@@ -63,6 +71,7 @@ func setup(zone: ZoneData, lamps: PackedVector3Array, compatibility: bool) -> vo
 	sun.directional_shadow_max_distance = 90.0 if compatibility else 150.0
 	sun.shadow_blur = 1.5
 	add_child(sun)
+	apply_quality()
 	for i in NIGHT_LIGHTS:
 		var l := OmniLight3D.new()
 		l.omni_range = 16.0
@@ -73,6 +82,17 @@ func setup(zone: ZoneData, lamps: PackedVector3Array, compatibility: bool) -> vo
 		add_child(l)
 		_lights.append(l)
 	_apply(0.0)
+
+
+## Shadows, glow, fog and lamp lights for GraphicsQuality.level.
+func apply_quality() -> void:
+	sun.shadow_enabled = GraphicsQuality.shadows()
+	sun.directional_shadow_max_distance = GraphicsQuality.shadow_distance()
+	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS 		if GraphicsQuality.level == GraphicsQuality.HIGH and not _compat else DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
+	environment.glow_enabled = GraphicsQuality.glow()
+	environment.ssao_enabled = GraphicsQuality.level == GraphicsQuality.HIGH and not _compat
+	environment.fog_density = GraphicsQuality.fog_density()
+	_light_timer = 0.0
 
 
 ## Local zone time as hours 0-24.
@@ -90,18 +110,26 @@ func _process(delta: float) -> void:
 		_apply(0.0)
 
 
+## Lightning: brightens the scene for a moment without touching the sky
+## material (changing that re-renders the sky's radiance map).
+func flash(amount: float) -> void:
+	sun.light_energy = _base_sun + amount * 2.5
+	environment.ambient_light_energy = _base_ambient + amount * 1.6
+
+
 ## Place the night lights on the lamps closest to the camera.
 func update_lights(camera_pos: Vector3, delta: float) -> void:
 	_light_timer -= delta
 	if _light_timer > 0.0:
 		return
 	_light_timer = 0.5
-	var on := night > 0.3
+	var on := night > 0.3 and GraphicsQuality.night_lights() > 0
 	if not on or lamp_positions.is_empty():
 		for l in _lights:
 			l.visible = false
 		return
 	var order := []
+	# Lamp lights cost a pass per lit object in the Compatibility renderer.
 	for p in lamp_positions:
 		var d := camera_pos.distance_squared_to(p)
 		if d < 90.0 * 90.0:
@@ -109,7 +137,7 @@ func update_lights(camera_pos: Vector3, delta: float) -> void:
 	order.sort_custom(func(a, b): return a[0] < b[0])
 	for i in _lights.size():
 		var l: OmniLight3D = _lights[i]
-		l.visible = i < order.size()
+		l.visible = i < order.size() and i < GraphicsQuality.night_lights()
 		if l.visible:
 			l.global_position = order[i][1] - Vector3(0, 0.3, 0)
 			l.light_energy = 2.2 * night
@@ -131,14 +159,24 @@ func _apply(_unused: float) -> void:
 	var warm := Color("ffb46b")
 	var moon := Color("9fb4ff")
 	sun.light_color = moon.lerp(day_col.lerp(warm, golden), 1.0 - night)
-	sun.light_energy = lerpf(1.35, 0.14, night) * (1.0 - 0.35 * golden * (1.0 - night))
-	_sky.sky_top_color = Color("0a1222").lerp(Color("3f74b5"), 1.0 - night).lerp(Color("4a5f8f"), golden * 0.4)
-	_sky.sky_horizon_color = Color("1a2438").lerp(Color("c3d3e2"), 1.0 - night).lerp(Color("f0a86b"), golden * 0.7)
+	# Overcast: a dim, diffuse sun, grey sky, more even light, no hard shadows.
+	var overcast := clampf((cloud - 0.35) / 0.65, 0.0, 1.0)
+	golden *= 1.0 - overcast
+	_base_sun = lerpf(1.35, 0.14, night) * (1.0 - 0.35 * golden * (1.0 - night)) * (1.0 - 0.75 * overcast)
+	sun.light_energy = _base_sun
+	sun.shadow_enabled = GraphicsQuality.shadows() and overcast < 0.8
+	var grey_top := Color("8e959d").lerp(Color("5d6369"), rain)
+	var grey_horizon := Color("b3b8bc").lerp(Color("80868b"), rain)
+	_sky.sky_top_color = Color("0a1222").lerp(Color("3f74b5"), 1.0 - night).lerp(Color("4a5f8f"), golden * 0.4) 		.lerp(grey_top.darkened(night * 0.85), overcast * 0.85)
+	_sky.sky_horizon_color = Color("1a2438").lerp(Color("c3d3e2"), 1.0 - night).lerp(Color("f0a86b"), golden * 0.7) 		.lerp(grey_horizon.darkened(night * 0.85), overcast * 0.85)
 	_sky.ground_horizon_color = _sky.sky_horizon_color
 	_sky.ground_bottom_color = Color("0b0e12").lerp(Color("6b6f73"), 1.0 - night)
 	_sky.sun_curve = 0.15
-	environment.ambient_light_energy = lerpf(0.95, 0.25, night)
+	_base_ambient = lerpf(0.95, 0.25, night) * (1.0 + 0.25 * overcast)
+	environment.ambient_light_energy = _base_ambient
+	environment.ambient_light_sky_contribution = lerpf(0.35, 0.6, overcast)
 	environment.fog_light_color = _sky.sky_horizon_color.darkened(0.1)
+	environment.fog_density = GraphicsQuality.fog_density() + rain * 0.006 + fog * 0.03
 
 
 ## Unit vector towards the sun in Godot space for the zone's coordinates.

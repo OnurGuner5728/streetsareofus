@@ -8,6 +8,8 @@ extends RefCounted
 ## partner to put next to a real player.
 ## "commuter": runs to the stop with the soonest tram, boards it, requests
 ## the next stop and gets off; exercises routing and the tram rules.
+## block_test (social): after the chat, blocks the partner, opens the
+## blocked list and unblocks them again.
 
 var mode := "wander"
 var rng := RandomNumberGenerator.new()
@@ -22,6 +24,10 @@ var _path := PackedVector2Array()
 var _wp := 0
 var _commute := {}
 var _phase := ""
+var block_test := false
+var _saw_props := false
+var _block_phase := ""
+var _block_at := 0.0
 
 
 func _init(bot_mode: String, seed_value: int) -> void:
@@ -67,12 +73,34 @@ func _social_tick(client: GameClient) -> void:
 		elif not _waved:
 			_waved = true
 			client.send_emote("wave")
+		elif block_test and _block_phase == "":
+			_block_phase = "blocked"
+			_block_at = GameClient.now()
+			client.block_player(int(client.conversations.keys()[0]))
+		return
+	if _block_phase == "blocked" and GameClient.now() - _block_at > 3.0:
+		_block_phase = "listed"
+		Net.c_blocked_list.rpc_id(1)
 		return
 	if mode != "social" or client.outgoing_request >= 0:
 		return
 	var target := client.nearest_remote(Protocol.INTERACTION_RANGE - 0.5)
 	if target > 0:
 		client.request_talk(target)
+
+
+func on_blocked_list(client: GameClient, list: Array) -> void:
+	if _block_phase == "listed" and not list.is_empty():
+		_block_phase = "unblocked"
+		client.log_line("unblocking %s" % list[0].name)
+		client.unblock(str(list[0].account))
+
+
+## Logs once that props are moving in snapshots (for the physics smoke test).
+func on_props_moving(client: GameClient, poses: Array) -> void:
+	if not _saw_props:
+		_saw_props = true
+		client.log_line("props moving: %d" % poses.size())
 
 
 func on_incoming(client: GameClient, request_id: int, _from_id: int) -> void:

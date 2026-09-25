@@ -1,6 +1,7 @@
 extends Node
 ## Entry point. User arguments come after "--" on the command line:
 ##   --server [--port=7000] [--transport=enet|ws] [--zone=ID] [--data-dir=PATH] [--cluster] [--quit-after=S]
+##            [--weather=live|off|clear|cloudy|rain|storm|fog|snow]
 ##   --bot=social|wander|idle --connect=ADDRESS [--name=N] [--quit-after=S]
 ##   --connect=ADDRESS [--name=N] [--spawn=MODE] [--touch] [--time=HH:MM] [--screenshot=PNG] [--yaw=DEG] [--pitch=DEG]
 ## ADDRESS is host:port for ENet (UDP) or a ws:// / wss:// URL for WebSocket.
@@ -15,6 +16,14 @@ func _ready() -> void:
 	if DisplayServer.get_name() == "headless":
 		# Headless servers and bots would otherwise spin a full core each.
 		Engine.max_fps = Protocol.TICK_RATE * 2
+	elif args.has("screenshot") or args.has("perf"):
+		# Tooling windows must not steal the keyboard or mouse from whoever
+		# is using the machine.
+		get_window().set_flag(Window.FLAG_NO_FOCUS, true)
+		# Parked almost entirely off the right edge of the screen; the game
+		# still renders there and screenshots read the viewport, not the screen.
+		var usable := DisplayServer.screen_get_usable_rect()
+		get_window().position = Vector2i(usable.end.x - 24, usable.end.y - get_window().size.y)
 	elif DisplayServer.is_touchscreen_available() or args.has("touch"):
 		# Phones: a smaller logical canvas makes text and buttons thumb-sized.
 		get_window().content_scale_size = Vector2i(854, 480)
@@ -64,6 +73,7 @@ func _start_server(args: Dictionary) -> void:
 		"cluster": args.has("cluster") or args.has("spawn-at"),
 		"spawn_at": str(args.get("spawn-at", "")),
 		"quit_after": float(args.get("quit-after", 0.0)),
+		"weather": str(args.get("weather", "live")),
 	})
 	if err != OK:
 		printerr("server failed to start: %s" % error_string(err))
@@ -96,6 +106,7 @@ func _on_play_requested(settings: Dictionary, host_locally: bool) -> void:
 	_start_game({
 		"address": address, "name": settings.name, "avatar": settings.avatar,
 		"spawn_mode": settings.spawn_mode, "mouse_sensitivity": settings.get("mouse_sensitivity", 0.0025),
+		"quality": settings.get("quality", "auto"), "show_fps": settings.get("show_fps", false),
 		"account_id": identity.account_id, "account_secret": identity.account_secret,
 	})
 
@@ -113,7 +124,7 @@ func _start_client_from_args(args: Dictionary) -> void:
 		"account_id": identity.account_id, "account_secret": identity.account_secret,
 		"quit_after": float(args.get("quit-after", 0.0)),
 	}
-	for key in ["screenshot", "screenshot-after", "yaw", "pitch", "time", "tram-shot", "open-map", "route-to"]:
+	for key in ["screenshot", "screenshot-after", "yaw", "pitch", "time", "tram-shot", "open-map", "route-to", "perf", "quality", "block-test", "look-npc", "look-sign"]:
 		if args.has(key):
 			opts[key.replace("-", "_")] = args[key]
 	_start_game(opts)

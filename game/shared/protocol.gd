@@ -3,8 +3,8 @@ extends RefCounted
 ## Constants shared by client and server. Bump PROTOCOL_VERSION on any
 ## change to RPC signatures or the binary snapshot/input layout.
 
-const PROTOCOL_VERSION := 2
-const CLIENT_BUILD := "0.2.0-alpha"
+const PROTOCOL_VERSION := 3
+const CLIENT_BUILD := "0.3.0-alpha"
 const DEFAULT_PORT := 7000
 const DEFAULT_ZONE := "tr_istanbul_kadikoy_001"
 const MAX_PEERS := 64
@@ -63,3 +63,5 @@ const POPULATION_EVERY_TICKS := 90  # 3 s
 
 const LAYER_WORLD := 1
 const LAYER_PLAYERS := 2
+const LAYER_PROPS := 4  # server-simulated loose objects
+const LAYER_TRAMS := 8  # kinematic tram bodies that push props (server only)

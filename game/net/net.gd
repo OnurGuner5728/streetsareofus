@@ -105,11 +105,15 @@ func disable_throttling(peer_id: int) -> void:
 			p.throttle_configure(5000, 0, 0)
 
 
-## False while a WebSocket peer is closing; sending then only logs errors.
+## False while a peer is going away (closing WebSocket, disconnecting ENet
+## peer); sending then only logs errors.
 func is_open(peer_id: int) -> bool:
 	if peer is WebSocketMultiplayerPeer:
 		var ws: WebSocketPeer = (peer as WebSocketMultiplayerPeer).get_peer(peer_id)
 		return ws != null and ws.get_ready_state() == WebSocketPeer.STATE_OPEN
+	if peer is ENetMultiplayerPeer:
+		var ep: ENetPacketPeer = (peer as ENetMultiplayerPeer).get_peer(peer_id)
+		return ep != null and ep.get_state() == ENetPacketPeer.STATE_CONNECTED
 	return true
 
 
@@ -218,6 +222,18 @@ func c_board(line: int, vehicle: int) -> void:
 		server.on_board(_sender(), line, vehicle)
 
 
+@rpc("any_peer", "call_remote", "reliable", 1)
+func c_blocked_list() -> void:
+	if server:
+		server.on_blocked_list(_sender())
+
+
+@rpc("any_peer", "call_remote", "reliable", 1)
+func c_unblock(account_id: String) -> void:
+	if server:
+		server.on_unblock(_sender(), account_id)
+
+
 ## Step off now if the tram is at a stop, otherwise toggle the stop request.
 @rpc("any_peer", "call_remote", "reliable", 1)
 func c_alight() -> void:
@@ -318,6 +334,27 @@ func s_ride(info: Dictionary) -> void:
 func s_rider(id: int, ride: Array) -> void:
 	if client:
 		client.on_rider(id, ride)
+
+
+## The zone's weather (see WeatherService), on joining and when it changes.
+@rpc("authority", "call_remote", "reliable", 1)
+func s_weather(info: Dictionary) -> void:
+	if client:
+		client.on_weather(info)
+
+
+## Poses of every prop that is away from home, sent once on joining.
+@rpc("authority", "call_remote", "reliable", 1)
+func s_props(data: PackedByteArray) -> void:
+	if client:
+		client.on_props(data)
+
+
+## People you have blocked: [{account, name, since}].
+@rpc("authority", "call_remote", "reliable", 1)
+func s_blocked_list(list: Array) -> void:
+	if client:
+		client.on_blocked_list(list)
 
 
 ## Player counts per 64 m cell, row-major from the north-west corner.

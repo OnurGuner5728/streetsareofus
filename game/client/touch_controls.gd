@@ -44,10 +44,12 @@ func _ready() -> void:
 
 ## ctx: target (someone under the crosshair), talking_to_target, in_conversation, incoming
 func set_context(ctx: Dictionary) -> void:
+	if _surface.visible != enabled:
+		_surface.visible = enabled
+		_surface.queue_redraw()
 	if ctx != _context:
 		_context = ctx
-	_surface.visible = enabled
-	_surface.queue_redraw()
+		_surface.queue_redraw()
 
 
 ## Look movement since the last call, in radians (x = yaw, y = pitch).
@@ -74,6 +76,8 @@ func _buttons() -> Array:
 		else:
 			list.append({"id": "talk", "label": "Konuş", "pos": Vector2(w - 62, h - 170), "r": 38.0, "tint": Color("3d8bfd")})
 		list.append({"id": "person", "label": "Kişi", "pos": Vector2(w - 140, h - 200), "r": 26.0})
+	elif _context.get("cat", false):
+		list.append({"id": "pet", "label": "Sev", "pos": Vector2(w - 62, h - 170), "r": 34.0, "tint": Color("d9893a")})
 	if _context.get("in_conversation", false):
 		list.append({"id": "chat", "label": "Yaz", "pos": Vector2(w - 228, h - 130), "r": 30.0, "tint": Color("2f9e6f")})
 	var tram_label: String = _context.get("tram_label", "")
@@ -108,6 +112,7 @@ func _input(event: InputEvent) -> void:
 		if drag.index == _joy_index:
 			_joy_knob = (drag.position - _joy_origin).limit_length(JOY_RADIUS)
 			move = Vector2(_joy_knob.x, -_joy_knob.y) / JOY_RADIUS
+			_surface.queue_redraw()
 		elif drag.index == _look_index:
 			_look_delta += drag.position - _look_last
 			_look_last = drag.position
@@ -161,6 +166,12 @@ func _release_all() -> void:
 
 
 func _draw_controls() -> void:
+	var t0 := FrameProfiler.start()
+	_draw_controls_inner()
+	FrameProfiler.add("touch.draw", t0)
+
+
+func _draw_controls_inner() -> void:
 	if not enabled:
 		return
 	var font := ThemeDB.fallback_font

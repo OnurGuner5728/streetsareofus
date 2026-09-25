@@ -57,13 +57,44 @@ static func _build_collision(zone: ZoneData, root: Node3D) -> void:
 			body.add_child(cs)
 
 	for t in tree_points(zone):
-		var trunk := CylinderShape3D.new()
-		trunk.radius = 0.3
-		trunk.height = 3.0
-		var cs := CollisionShape3D.new()
-		cs.shape = trunk
-		cs.position = t + Vector3(0, 1.5, 0)
-		body.add_child(cs)
+		_add_cylinder(body, t + Vector3(0, 1.5, 0), 0.3, 3.0)
+
+	# Street furniture, placed identically on server and clients.
+	var layout := StreetLayout.for_zone(zone)
+	for g in layout.stops:
+		var xf: Transform3D = g.xf
+		if not (g.slab as Array).is_empty():
+			_add_box_xf(body, xf * Transform3D(Basis(), g.slab[0]), g.slab[1])  # raised platform
+		if g.shelter:
+			_add_box_xf(body, xf * Transform3D(Basis(), Vector3(1.1, 1.3, 0)), Vector3(0.12, 2.5, 3.5))  # shelter back
+	for c in layout.cars:
+		_add_box_xf(body, Transform3D(Basis(Vector3.UP, float(c.yaw)), c.pos + Vector3(0, StreetLayout.CAR_SIZE.y / 2.0, 0)), StreetLayout.CAR_SIZE)
+	for bench in layout.benches:
+		var seat := StreetLayout.BENCH_SIZE
+		_add_box_xf(body, Transform3D(Basis(Vector3.UP, float(bench.yaw)), bench.pos + Vector3(0, seat.y / 2.0, 0)), seat)
+	for p: Vector3 in layout.bollards:
+		_add_cylinder(body, p + Vector3(0, StreetLayout.BOLLARD_HEIGHT / 2.0, 0), 0.1, StreetLayout.BOLLARD_HEIGHT)
+	for l in layout.lamps:
+		_add_cylinder(body, (l.base as Vector3) + Vector3(0, 3.0, 0), 0.09, 6.0)
+
+
+static func _add_box_xf(body: StaticBody3D, xf: Transform3D, size: Vector3) -> void:
+	var shape := BoxShape3D.new()
+	shape.size = size
+	var cs := CollisionShape3D.new()
+	cs.shape = shape
+	cs.transform = xf
+	body.add_child(cs)
+
+
+static func _add_cylinder(body: StaticBody3D, center: Vector3, radius: float, height: float) -> void:
+	var shape := CylinderShape3D.new()
+	shape.radius = radius
+	shape.height = height
+	var cs := CollisionShape3D.new()
+	cs.shape = shape
+	cs.position = center
+	body.add_child(cs)
 
 
 static func _add_box(body: StaticBody3D, center: Vector3, size: Vector3) -> void:

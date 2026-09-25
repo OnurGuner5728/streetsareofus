@@ -20,7 +20,8 @@ const NOTICES := {
 	"you_blocked": "Bu kişiyi engelledin.",
 	"not_in_conversation": "Mesaj için önce bir konuşma isteğinin kabul edilmesi gerekir.",
 	"rate_limited": "Çok hızlı; biraz yavaşla.",
-	"blocked": "Engellendi. Artık birbirinizi görmeyeceksiniz.",
+	"blocked": "Engellendi. Artık birbirinizi görmeyeceksiniz. Geri almak için: Menü → Engellenenler.",
+	"unblocked": "%s artık engelli değil; birbirinizi yeniden görebilirsiniz.",
 	"reported": "Şikayet alındı. Olay numarası: %s",
 	"tram_not_boardable": "Bu tramvaya şu an binilemez: durakta değil ya da bölgeden çıkıyor.",
 	"too_far_tram": "Tramvayın kapısına biraz daha yaklaş.",
@@ -50,6 +51,11 @@ var fleet: TramFleet
 var navigator: Navigator
 var city_map: CityMap
 var sky: SkyController
+var sounds: CitySounds
+var props_view: PropView
+var weather_view: WeatherView
+var crowd_view: CrowdView
+var critters: Critters
 var _boards: Array = []
 var _board_timer := 0.0
 var _bob_phase := 0.0
@@ -90,6 +96,15 @@ var _ticks_this_frame := 0
 var _rtt_ms := 0.0
 var _touch_mode := false
 var _person_target := -1
+var _quality_setting := GraphicsQuality.AUTO
+var _fps_window := {"frames": 0, "time": 0.0, "slow": 0}
+var _render_scale := 1.0
+var _hud_tick := 0.0
+var _step_visual := 0.0  # eases the camera up kerbs and platforms
+var _flashing := false
+var _shake := 0.0
+var _tram_hit_at := -INF
+var _tram_warned_at := -INF
 
 
 static func now() -> float:
@@ -105,6 +120,7 @@ func start(opts: Dictionary) -> void:
 	display_name = str(opts.name)
 	if str(opts.get("bot", "")) != "":
 		bot = BotBrain.new(str(opts.bot), hash(display_name))
+		bot.block_test = opts.has("block_test")
 	Net.client = self
 	multiplayer.connected_to_server.connect(_on_connected)
 	multiplayer.connection_failed.connect(_on_connection_failed)
@@ -181,6 +197,10 @@ func on_welcome(info: Dictionary) -> void:
 	transit = zone.transit
 	# Trams need a clock before the first snapshot arrives.
 	_clock_offset = now() - float(info.get("server_time", 0.0))
+	if not _headless:
+		_quality_setting = GraphicsQuality.from_key(str(options.get("quality", "auto")))
+		GraphicsQuality.level = GraphicsQuality.initial_level(_quality_setting)
+		CityMaterials.set_lite(GraphicsQuality.lite_shaders())
 	var world := WorldBuilder.build(zone, self, not _headless)
 	if not _headless:
 		var city: Dictionary = world.get_meta("city", {})
@@ -193,10 +213,24 @@ func on_welcome(info: Dictionary) -> void:
 			var hm := str(options.time).split(":")
 			sky.hours_override = float(hm[0]) + (float(hm[1]) / 60.0 if hm.size() > 1 else 0.0)
 		sky.setup(zone, city.get("lamps", PackedVector3Array()), compat)
+		weather_view = WeatherView.new()
+		weather_view.name = "Weather"
+		add_child(weather_view)
+		weather_view.setup(self)
 		fleet = TramFleet.new()
 		fleet.name = "Trams"
 		add_child(fleet)
 		fleet.setup(transit, zone.half_size())
+		props_view = PropView.new()
+		props_view.name = "Props"
+		add_child(props_view)
+		props_view.setup(zone)
+		crowd_view = CrowdView.new()
+		crowd_view.name = "Crowd"
+		add_child(crowd_view)
+		critters = Critters.new()
+		critters.name = "Critters"
+		add_child(critters)
 	body = PlayerMotor.make_body(avatar)
 	body.name = "LocalPlayer"
 	add_child(body)
@@ -217,6 +251,9 @@ func on_welcome(info: Dictionary) -> void:
 		camera.top_level = true
 		add_child(camera)
 		camera.make_current()
+		apply_quality(GraphicsQuality.level)
+		crowd_view.setup(self)
+		critters.setup(self)
 		if bot == null:
 			hud = GameHud.new()
 			add_child(hud)
@@ -224,6 +261,15 @@ func on_welcome(info: Dictionary) -> void:
 			hud.resume_requested.connect(_set_paused.bind(false))
 			hud.disconnect_requested.connect(_finish.bind("Bağlantı kesildi."))
 			hud.person_action.connect(_on_person_action)
+			hud.blocked_list_requested.connect(func(): Net.c_blocked_list.rpc_id(1))
+			hud.unblock_requested.connect(unblock)
+			hud.quality_requested.connect(set_quality_setting)
+			hud.fps_toggled.connect(func(show: bool):
+				var settings := LocalProfile.load_settings()
+				settings.show_fps = show
+				LocalProfile.save_settings(settings))
+			hud.set_quality_key(GraphicsQuality.key_of(_quality_setting))
+			hud.set_fps_visible(bool(options.get("show_fps", false)))
 			if _touch_mode:
 				hud.apply_touch_layout()
 				hud.set_attribution("Harita verisi: " + zone.attribution_text())
@@ -234,7 +280,8 @@ func on_welcome(info: Dictionary) -> void:
 			else:
 				hud.set_attribution("Harita verisi: " + zone.attribution_text() + "  ·  F1 yardım")
 				hud.notice("Hoş geldin, %s. Yardım için F1, harita için Tab." % display_name, 5.0)
-				Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+				if not (options.has("screenshot") or options.has("perf")):
+					Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 			navigator = Navigator.new()
 			navigator.name = "Navigator"
 			add_child(navigator)
@@ -247,6 +294,12 @@ func on_welcome(info: Dictionary) -> void:
 				navigator.set_destination(en)
 				city_map.refresh_info())
 			city_map.route_cleared.connect(navigator.clear)
+			sounds = CitySounds.new()
+			sounds.name = "Sounds"
+			add_child(sounds)
+			sounds.setup(self)
+			if props_view:
+				props_view.sounds = sounds
 			if touch:
 				touch.exclude = [Rect2(get_viewport().get_visible_rect().size.x - 2 * CityMap.MINI_RADIUS - 16, 70,
 					2 * CityMap.MINI_RADIUS, 2 * CityMap.MINI_RADIUS)]
@@ -275,6 +328,10 @@ func on_snapshot(data: PackedByteArray) -> void:
 		var r: RemotePlayer = remotes.get(e.id)
 		if r:
 			r.push_sample(server_time, e.pos, e.yaw, e.pitch, e.speed)
+	if props_view and not (snap.props as Array).is_empty():
+		props_view.push(server_time, snap.props)
+	if bot and not (snap.props as Array).is_empty():
+		bot.on_props_moving(self, snap.props)
 
 
 func on_entity_enter(id: int, info: Dictionary) -> void:
@@ -308,6 +365,8 @@ func on_interaction_incoming(request_id: int, from_id: int, _kind: String) -> vo
 	if muted.has(from_id):
 		return  # muted players' requests are silently ignored
 	incoming[request_id] = {"from": from_id, "expires": now() + Protocol.REQUEST_TIMEOUT}
+	if sounds:
+		sounds.chime()
 	log_line("incoming request %d from %s" % [request_id, _name_of(from_id)])
 	if bot:
 		bot.on_incoming(self, request_id, from_id)
@@ -389,7 +448,7 @@ func on_ride(info: Dictionary) -> void:
 	body.global_position = info.pos
 	body.velocity = Vector3.ZERO
 	for inp in _pending_inputs:
-		PlayerMotor.step(body, inp)
+		PlayerMotor.step(body, inp, transit)
 		inp.pos = body.global_position
 		inp.vel = body.velocity
 	_prev_pos = body.global_position
@@ -405,6 +464,34 @@ func on_ride(info: Dictionary) -> void:
 func on_rider(id: int, ride: Array) -> void:
 	if remotes.has(id):
 		remotes[id].ride = ride
+
+
+func on_weather(info: Dictionary) -> void:
+	log_line("weather: %s" % WeatherService.describe(info))
+	if weather_view:
+		weather_view.set_info(info)
+
+
+func on_props(data: PackedByteArray) -> void:
+	var poses: Variant = SnapshotCodec.decode_props(data)
+	if poses != null and props_view:
+		props_view.apply_now(poses)
+
+
+func on_blocked_list(list: Array) -> void:
+	log_line("blocked list: %s" % ", ".join(list.map(func(e): return str(e.get("name", "?")) if typeof(e) == TYPE_DICTIONARY else "?")))
+	if bot:
+		bot.on_blocked_list(self, list)
+	if hud:
+		hud.show_blocked(list)
+
+
+func unblock(account_id: String) -> void:
+	Net.c_unblock.rpc_id(1, account_id)
+
+
+func block_player(id: int) -> void:
+	Net.c_block.rpc_id(1, id)
 
 
 func on_population(counts: PackedByteArray) -> void:
@@ -431,6 +518,32 @@ func tram_action() -> void:
 		_notice("Yakında kapıları açık bir tramvay yok.")
 		return
 	Net.c_board.rpc_id(1, int(st.line), int(st.vehicle))
+
+
+func _on_tram_hit() -> void:
+	_shake = 1.0
+	if now() - _tram_hit_at > 3.0:
+		_tram_hit_at = now()
+		log_line("hit by a tram")
+		_notice("Tramvay çarptı! Rayların üstünde durma.")
+
+
+## Warns (and rings the bell) when a moving tram is coming straight at you.
+func _tram_warning() -> void:
+	if not riding.is_empty() or now() - _tram_warned_at < 6.0:
+		return
+	var p := Vector2(body.global_position.x, body.global_position.z)
+	for box in transit.boxes_near(roundi(server_now() / Protocol.DT), p, 40.0):
+		var a: Vector2 = box[1]
+		var d: Vector2 = p - (box[0] as Vector2)
+		var ahead := d.dot(a) - float(box[2])
+		var across := absf(d.dot(Vector2(-a.y, a.x)))
+		if float(box[4]) > 1.0 and ahead > 0.0 and ahead < 30.0 and across < float(box[3]) + 0.6:
+			_tram_warned_at = now()
+			_notice("Dikkat, tramvay geliyor! Raylardan çekil.")
+			if sounds:
+				sounds.tram_bell(Vector3((box[0] as Vector2).x, 2.0, (box[0] as Vector2).y))
+			return
 
 
 func on_notice(code: String, detail: String) -> void:
@@ -542,10 +655,17 @@ func _physics_process(_delta: float) -> void:
 			buttons |= PlayerMotor.BUTTON_SPRINT
 
 	_input_seq += 1
-	var inp := SnapshotCodec.quantize_input(_input_seq, mx, my, yaw, pitch, buttons)
+	# Stamped with the server tick we are looking at, so trams stand in the
+	# same place for this input here and on the server.
+	var wt := roundi(server_now() / Protocol.DT)
+	var inp := SnapshotCodec.quantize_input(_input_seq, mx, my, yaw, pitch, buttons, wt)
 	_prev_pos = body.global_position
 	if riding.is_empty():
-		PlayerMotor.step(body, inp)
+		var events := PlayerMotor.step(body, inp, transit)
+		if events & PlayerMotor.EVENT_STEPPED:
+			_step_visual -= body.global_position.y - _prev_pos.y
+		if events & PlayerMotor.EVENT_TRAM_HIT:
+			_on_tram_hit()
 	else:
 		body.global_position = transit.rider_position(riding.line, riding.vehicle, riding.slot, server_now())
 	_curr_pos = body.global_position
@@ -588,7 +708,7 @@ func _reconcile() -> void:
 	body.global_position = snap.self_pos
 	body.velocity = snap.self_vel
 	for inp in _pending_inputs:
-		PlayerMotor.step(body, inp)
+		PlayerMotor.step(body, inp, transit)
 		inp.pos = body.global_position
 		inp.vel = body.velocity
 	var error := before - body.global_position
@@ -615,9 +735,23 @@ func _process(delta: float) -> void:
 		render_pos = transit.rider_position(riding.line, riding.vehicle, riding.slot, server_now())
 	if sky:
 		night = sky.night
+	if weather_view:
+		weather_view.update(delta)
+		sky.cloud = weather_view.cloud
+		sky.rain = weather_view.rain
+		sky.fog = weather_view.fog
+		if weather_view._flash > 0.0 or _flashing:
+			sky.flash(weather_view._flash)
+			_flashing = weather_view._flash > 0.0
+	var t0 := FrameProfiler.start()
 	if fleet:
+		if camera:
+			fleet.camera_pos = camera.global_position
+			fleet.view_distance = camera.far
 		fleet.update(server_now(), night)
-	var cam_pos := render_pos + Vector3(0, _eye_height, 0)
+	FrameProfiler.add("fleet", t0)
+	_step_visual = lerpf(_step_visual, 0.0, 1.0 - exp(-12.0 * delta))
+	var cam_pos := render_pos + Vector3(0, _eye_height + _step_visual, 0)
 	if touch:
 		var size := get_viewport().get_visible_rect().size
 		hud.set_portrait_warning(size.y > size.x)
@@ -630,21 +764,147 @@ func _process(delta: float) -> void:
 		var speed := Vector2(body.velocity.x, body.velocity.z).length() if riding.is_empty() else 0.0
 		_bob_phase = fmod(_bob_phase + delta * (1.5 + speed * 2.2), TAU)
 		var bob := sin(_bob_phase * 2.0) * 0.03 * clampf(speed / Protocol.WALK_SPEED, 0.0, 1.5)
+		_shake = maxf(0.0, _shake - delta * 1.5)
+		var jolt := Vector3(sin(now() * 71.0), sin(now() * 53.0), 0.0) * 0.05 * _shake
 		camera.global_position = cam_pos + Vector3(0, bob, 0)
-		camera.rotation = Vector3(pitch, yaw, sin(_bob_phase) * 0.004 * speed)
+		camera.rotation = Vector3(pitch + jolt.y, yaw + jolt.x, sin(_bob_phase) * 0.004 * speed)
 		camera.fov = lerpf(camera.fov, 75.0 + (7.0 if speed > Protocol.WALK_SPEED + 0.5 else 0.0), 1.0 - exp(-6.0 * delta))
+	t0 = FrameProfiler.start()
 	if sky:
 		sky.update_lights(cam_pos, delta)
+	FrameProfiler.add("lights", t0)
+	t0 = FrameProfiler.start()
+	if sounds:
+		sounds.update(night, delta)
+		if riding.is_empty():
+			sounds.footsteps(Vector2(body.velocity.x, body.velocity.z).length(), body.is_on_floor(), delta)
+	FrameProfiler.add("sounds", t0)
+	t0 = FrameProfiler.start()
 	_board_timer -= delta
 	if _board_timer <= 0.0 and not _boards.is_empty():
 		_board_timer = 1.0
 		_refresh_boards()
+	FrameProfiler.add("boards", t0)
+	t0 = FrameProfiler.start()
 	var server_now := now() - _clock_offset
 	for r in remotes.values():
 		r.update_render(server_now, delta, cam_pos)
-	if hud:
-		_update_hud(delta)
+	if props_view:
+		props_view.update(server_now)
+	t0 = FrameProfiler.start()
+	if crowd_view and crowd_view.crowd:
+		crowd_view.update(server_now, sky.local_hours())
+	if critters and critters.client:
+		critters.update(server_now, delta)
+	FrameProfiler.add("crowd", t0)
+	FrameProfiler.add("remotes", t0)
+	t0 = FrameProfiler.start()
+	# Prompts and hints only need to follow the player at 10 Hz.
+	_hud_tick += delta
+	if hud and _hud_tick >= 0.1:
+		_update_hud(_hud_tick)
+		_hud_tick = 0.0
+	FrameProfiler.add("hud", t0)
+	_auto_quality(delta)
+	_perf_probe(delta)
 	_maybe_screenshot()
+
+
+var _perf := {"frames": 0, "time": 0.0, "worst": 0.0, "at": 0.0}
+
+
+## --perf: frame statistics every two seconds on stdout, for tuning.
+func _perf_probe(delta: float) -> void:
+	if not options.get("perf", false) or camera == null:
+		return
+	if _perf.at == 0.0:
+		_perf.at = now()
+		FrameProfiler.enabled = true
+		# --perf=Prefix1,Prefix2 hides scene parts to measure what they cost.
+		var hide := str(options.perf).split(",", false) if str(options.perf) != "true" else PackedStringArray()
+		for node in find_children("*", "Node3D", true, false):
+			for prefix in hide:
+				if str(node.name).begins_with(prefix):
+					(node as Node3D).visible = false
+		if hide.has("post") and sky:
+			sky.environment.glow_enabled = false
+			sky.environment.fog_enabled = false
+			sky.environment.adjustment_enabled = false
+			sky.environment.tonemap_mode = Environment.TONE_MAPPER_LINEAR
+		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
+		return
+	_perf.frames += 1
+	_perf.time += delta
+	_perf.worst = maxf(_perf.worst, delta)
+	if now() - float(_perf.at) < 2.0:
+		return
+	print("[perf] fps=%.0f worst_ms=%.1f process_ms=%.2f physics_ms=%.2f draw_calls=%d objects=%d prims=%dk nodes=%d" % [
+		_perf.frames / _perf.time, _perf.worst * 1000.0,
+		Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0,
+		Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0,
+		Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME),
+		Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME),
+		Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME) / 1000,
+		Performance.get_monitor(Performance.OBJECT_NODE_COUNT)])
+	print("[perf] sections_ms " + FrameProfiler.report(_perf.frames))
+	_perf = {"frames": 0, "time": 0.0, "worst": 0.0, "at": now()}
+
+
+## Applies a GraphicsQuality level to everything already built.
+func apply_quality(level: int) -> void:
+	GraphicsQuality.level = clampi(level, GraphicsQuality.LOW, GraphicsQuality.HIGH)
+	CityMaterials.set_lite(GraphicsQuality.lite_shaders())
+	if sky:
+		sky.apply_quality()
+	if camera:
+		camera.far = GraphicsQuality.camera_far()
+	for node in get_tree().get_nodes_in_group("ranged"):
+		var gi := node as GeometryInstance3D
+		gi.visibility_range_end = float(gi.get_meta("range")) * GraphicsQuality.range_scale()
+	for node in get_tree().get_nodes_in_group("detail"):
+		(node as Node3D).visible = GraphicsQuality.detail_props()
+	log_line("graphics quality %s" % GraphicsQuality.NAMES[GraphicsQuality.level])
+
+
+## Player choice from the pause menu ("auto" re-enables automatic steps).
+func set_quality_setting(key: String) -> void:
+	_quality_setting = GraphicsQuality.from_key(key)
+	_set_render_scale(1.0)
+	apply_quality(GraphicsQuality.initial_level(_quality_setting))
+	var settings := LocalProfile.load_settings()
+	settings.quality = key
+	LocalProfile.save_settings(settings)
+
+
+## On "auto", steps quality down when the frame rate stays poor for a few
+## seconds; below LOW it renders the 3D view at a lower resolution.
+func _auto_quality(delta: float) -> void:
+	if _quality_setting != GraphicsQuality.AUTO or now() - _joined_at < 8.0:
+		return
+	_fps_window.frames += 1
+	_fps_window.time += delta
+	if _fps_window.time < 3.0:
+		return
+	var fps: float = _fps_window.frames / _fps_window.time
+	_fps_window.slow = int(_fps_window.slow) + 1 if fps < 24.0 else 0
+	_fps_window.frames = 0
+	_fps_window.time = 0.0
+	if int(_fps_window.slow) < 2:
+		return
+	_fps_window.slow = 0
+	if GraphicsQuality.level > GraphicsQuality.LOW:
+		apply_quality(GraphicsQuality.level - 1)
+		_notice("Akıcılık için görüntü kalitesi %s yapıldı (Menü'den değiştirebilirsin)." % GraphicsQuality.NAMES[GraphicsQuality.level])
+	elif _render_scale > 0.6:
+		_set_render_scale(_render_scale - 0.2)
+		_notice("Akıcılık için çözünürlük %%%d yapıldı." % roundi(_render_scale * 100.0))
+
+
+func _set_render_scale(scale: float) -> void:
+	_render_scale = scale
+	var vp := get_viewport()
+	vp.scaling_3d_mode = Viewport.SCALING_3D_MODE_BILINEAR
+	vp.scaling_3d_scale = scale
 
 
 func _map_open() -> bool:
@@ -704,6 +964,38 @@ func _maybe_screenshot() -> void:
 		navigator.set_destination(Vector2(float(at[0]), float(at[1])))
 	if options.has("open_map") and city_map and not city_map.is_big_open():
 		city_map.open_big()
+	if options.has("look_sign") and not _screenshot_busy:
+		# Debug framing: face the nearest shop sign in sight.
+		var holder := find_child("ShopSigns", true, false)
+		var best := Vector3.INF
+		for sign: Node3D in (holder.get_children() if holder else []):
+			var p := sign.global_position
+			var d := p.distance_to(camera.global_position)
+			var ray := PhysicsRayQueryParameters3D.create(camera.global_position, p, Protocol.LAYER_WORLD)
+			var hit := get_world_3d().direct_space_state.intersect_ray(ray)
+			if d > 5.0 and d < 35.0 and (hit.is_empty() or (hit.position as Vector3).distance_to(p) < 0.6) 					and (best == Vector3.INF or d < best.distance_to(camera.global_position)):
+				best = p
+		if best != Vector3.INF:
+			var to := best - camera.global_position
+			yaw = atan2(-to.x, -to.z)
+			pitch = asin(clampf(to.normalized().y, -1.0, 1.0)) - 0.1
+			_screenshot_busy = true
+			await get_tree().create_timer(0.3).timeout
+	if options.has("look_npc") and crowd_view and not _screenshot_busy:
+		# Debug framing: face the nearest pedestrian in view of the camera.
+		var best := Vector3.INF
+		for i in crowd_view._count:
+			var p: Vector3 = crowd_view._last[i]
+			var d := p.distance_to(camera.global_position)
+			var ray := PhysicsRayQueryParameters3D.create(camera.global_position, p + Vector3(0, 1.2, 0), Protocol.LAYER_WORLD)
+			if d > 4.0 and d < 40.0 and get_world_3d().direct_space_state.intersect_ray(ray).is_empty() 					and (best == Vector3.INF or d < best.distance_to(camera.global_position)):
+				best = p
+		if best != Vector3.INF:
+			var to := best + Vector3(0, 1.0, 0) - camera.global_position
+			yaw = atan2(-to.x, -to.z)
+			pitch = asin(clampf(to.normalized().y, -1.0, 1.0))
+			_screenshot_busy = true
+			await get_tree().create_timer(0.3).timeout
 	if options.has("tram_shot") and fleet:
 		# Debug framing: wait for a tram to come close, then look at it.
 		var best := {}
@@ -782,6 +1074,8 @@ func _on_key(key: Key) -> void:
 		KEY_E:
 			if target > 0:
 				request_talk(target)
+			elif _cat_in_reach() >= 0:
+				critters.pet(_cat_in_reach())
 		KEY_G:
 			send_emote("wave")
 		KEY_H:
@@ -850,6 +1144,9 @@ func _on_touch_action(id: String) -> void:
 				respond_incoming(latest, id == "accept")
 		"tram":
 			tram_action()
+		"pet":
+			if _cat_in_reach() >= 0:
+				critters.pet(_cat_in_reach())
 
 
 ## What the tram button does right now, for the touch UI and hints.
@@ -890,6 +1187,13 @@ func _on_person_action(what: String) -> void:
 		report_player(id, what.trim_prefix("report:"))
 
 
+## A cat right in front of you (for stroking), or -1.
+func _cat_in_reach() -> int:
+	if critters == null or critters.client == null or camera == null:
+		return -1
+	return critters.cat_near(camera.global_position - Vector3(0, 1.0, 0), -camera.global_transform.basis.z, 2.2)
+
+
 func _latest_incoming() -> int:
 	var best := -1
 	for id in incoming:
@@ -920,13 +1224,17 @@ func _look_target() -> int:
 
 
 func _update_hud(delta: float) -> void:
+	_tram_warning()
+	var t0 := FrameProfiler.start()
 	var target := _look_target()
 	var latest := _latest_incoming()
 	var tram := _tram_context()
+	FrameProfiler.add("hud.tram_ctx", t0)
 	if touch:
-		touch.set_context({"target": target > 0, "talking_to_target": conversations.has(target),
+		touch.set_context({"target": target > 0, "cat": target <= 0 and _cat_in_reach() >= 0, "talking_to_target": conversations.has(target),
 			"in_conversation": not conversations.is_empty(), "incoming": latest >= 0,
 			"tram_label": tram.get("label", ""), "tram_tint": tram.get("tint", Color("2e86de"))})
+	t0 = FrameProfiler.start()
 	if navigator:
 		navigator.update()
 		var route := navigator.instruction()
@@ -935,6 +1243,7 @@ func _update_hud(delta: float) -> void:
 		elif route == "" and tram.has("hint"):
 			route = tram.hint
 		hud.set_route(route)
+	FrameProfiler.add("hud.nav", t0)
 	if target > 0:
 		var r: RemotePlayer = remotes[target]
 		var line := r.display_name + "   "
@@ -944,6 +1253,10 @@ func _update_hud(delta: float) -> void:
 			line += "[X] sohbetten ayrıl" if conversations.has(target) else "[E] konuşma isteği"
 			line += " · [G] el salla · [H] selam · [M] %s · [B] engelle · [R] şikayet" % ("sesi aç" if muted.has(target) else "sustur")
 		hud.set_target(line)
+	elif _cat_in_reach() >= 0:
+		hud.set_target("Sokak kedisi  ·  " + ("sevmek için Sev'e dokun" if touch else "sevmek için [E]"))
+	elif crowd_view and crowd_view.crowd and camera 			and crowd_view.look_target(camera.global_position, -camera.global_transform.basis.z, Protocol.INTERACTION_RANGE) >= 0:
+		hud.set_target("Yaya  [NPC]  ·  yapay bir figür; sohbet edilemez")
 	else:
 		hud.set_target("")
 	if latest >= 0:
@@ -959,11 +1272,15 @@ func _update_hud(delta: float) -> void:
 	if _hud_refresh > 0.0:
 		return
 	_hud_refresh = 0.5
+	t0 = FrameProfiler.start()
+	hud.set_fps("%d FPS · %s%s" % [Engine.get_frames_per_second(), GraphicsQuality.NAMES[GraphicsQuality.level],
+		" · %%%d" % roundi(_render_scale * 100.0) if _render_scale < 1.0 else ""])
 	var pos := body.global_position
 	var geo := zone.to_geo(pos)
 	var street := zone.nearest_street(pos)
-	hud.set_location("%s\n%s%.5f, %.5f   ·   yakında %d kişi" % [
-		zone.display_name, (street + "   ") if street else "", geo[0], geo[1], remotes.size()])
+	var sky_line := weather_view.summary() if weather_view else ""
+	hud.set_location("%s%s\n%s%.5f, %.5f   ·   yakında %d kişi" % [
+		zone.display_name, ("   ·   " + sky_line) if sky_line else "", (street + "   ") if street else "", geo[0], geo[1], remotes.size()])
 	var names := []
 	for id in conversations:
 		names.append(_name_of(id))
@@ -975,3 +1292,4 @@ func _update_hud(delta: float) -> void:
 	_stats.snapshots = 0
 	_stats.correction_max = 0.0
 	_stats.at = now()
+	FrameProfiler.add("hud.slow", t0)

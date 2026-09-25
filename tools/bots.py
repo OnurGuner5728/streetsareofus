@@ -86,6 +86,9 @@ def address(port: int, transport: str) -> str:
 
 
 def start_server(port: int, data_dir: str, quit_after: int, extra: list[str]) -> Proc:
+    # Tests never reach out for the real weather unless asked to.
+    if not any(a.startswith("--weather") for a in extra):
+        extra = [*extra, "--weather=clear"]
     server = Proc("server", godot("--server", f"--port={port}", f"--data-dir={data_dir}",
                                   f"--quit-after={quit_after}", *extra))
     if not server.wait_for("listening on", 30):
@@ -97,8 +100,10 @@ def start_server(port: int, data_dir: str, quit_after: int, extra: list[str]) ->
 def cmd_smoke(args) -> int:
     data_dir = tempfile.mkdtemp(prefix="soa_smoke_")
     server = start_server(args.port, data_dir, args.seconds + 20, ["--cluster", f"--transport={args.transport}"])
+    # BotA also blocks BotB after chatting, then unblocks them from its list.
     bots = [Proc(n, godot(f"--bot=social", f"--connect={address(args.port, args.transport)}", f"--name={n}",
-                          f"--quit-after={args.seconds}")) for n in ("BotA", "BotB")]
+                          f"--quit-after={args.seconds}", *(["--block-test"] if n == "BotA" else [])))
+            for n in ("BotA", "BotB")]
     for b in bots:
         b.finish(args.seconds + 30)
     server.proc.terminate()
@@ -112,8 +117,13 @@ def cmd_smoke(args) -> int:
         (bots[0], "chat from BotB: merhaba"), (bots[1], "chat from BotA: merhaba"),
         (bots[0], "BotB did wave"), (bots[1], "BotA did wave"),
         (bots[0], "stats snapshots="), (bots[1], "stats snapshots="),
+        (server, "BotA blocked BotB"), (bots[0], "blocked list: BotB"), (server, "BotA unblocked BotB"),
     ]
     failed = [f"{p.name}: missing '{needle}'" for p, needle in checks if not p.has(needle)]
+    # After the unblock they must see each other again.
+    for b, other in ((bots[0], "BotB"), (bots[1], "BotA")):
+        if sum(f"sees {other}" in l for l in b.lines) < 2:
+            failed.append(f"{b.name}: did not see {other} again after the unblock")
     for p in [server, *bots]:
         failed += [f"{p.name}: {e}" for e in p.errors()]
 
@@ -145,7 +155,7 @@ def cmd_smoke(args) -> int:
         for f in failed:
             print("  " + f)
         return 1
-    print(f"SMOKE TEST PASSED over {args.transport} ({len(checks)} checks, persistence verified)")
+    print(f"SMOKE TEST PASSED over {args.transport} ({len(checks)} checks, block/unblock and persistence verified)")
     return 0
 
 
@@ -226,7 +236,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("smoke")
     p.add_argument("--port", type=int, default=7011)
-    p.add_argument("--seconds", type=int, default=22)
+    p.add_argument("--seconds", type=int, default=32)
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("--transport", choices=["enet", "ws"], default="enet")
     p.set_defaults(func=cmd_smoke)

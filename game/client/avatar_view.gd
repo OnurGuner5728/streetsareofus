@@ -4,8 +4,6 @@ extends Node3D
 ## primitives, driven by the same avatar dictionary the network carries.
 ## Faces -Z, like the camera, so rotation.y = yaw.
 
-static var _materials := {}
-
 var avatar := {}
 var visual_height := 1.7
 var _hip_l: Node3D
@@ -36,6 +34,8 @@ func build(new_avatar: Dictionary) -> void:
 	var bottom_color := Color(str(cl.bottom_color))
 	var shoes_color := Color(str(cl.shoes_color))
 	var hair_color := Color(str(app.hair_color))
+	# One merged mesh per moving part: six draw calls per person.
+	var m := MeshMerger.new()
 
 	var hip_y := 0.5 * h
 	var shoulder_y := 0.81 * h
@@ -52,9 +52,11 @@ func build(new_avatar: Dictionary) -> void:
 		var hip := Node3D.new()
 		hip.position = Vector3(side * hip_x, hip_y, 0)
 		add_child(hip)
-		_capsule(hip, leg_r, leg_len * 0.55, Vector3(0, -leg_len * 0.25, 0), thigh_color)
-		_capsule(hip, leg_r * 0.85, leg_len * 0.55, Vector3(0, -leg_len * 0.72, 0), shin_color)
-		_box(hip, Vector3(leg_r * 2.1, 0.05 * h, 0.15 * h), Vector3(0, -leg_len - 0.005 * h, -0.03 * h), shoes_color)
+		var g := "hip%d" % side
+		m.capsule(g, leg_r, leg_len * 0.55, Vector3(0, -leg_len * 0.25, 0), thigh_color)
+		m.capsule(g, leg_r * 0.85, leg_len * 0.55, Vector3(0, -leg_len * 0.72, 0), shin_color)
+		m.box(g, Vector3(leg_r * 2.1, 0.05 * h, 0.15 * h), Vector3(0, -leg_len - 0.005 * h, -0.03 * h), shoes_color)
+		m.emit(g, hip, _material())
 		if side < 0:
 			_hip_l = hip
 		else:
@@ -63,63 +65,62 @@ func build(new_avatar: Dictionary) -> void:
 	# Torso.
 	var torso_r := 0.1 * h * width
 	var torso_h := shoulder_y - hip_y + 0.1 * h
-	var torso := _capsule(self, torso_r, torso_h, Vector3(0, (hip_y + shoulder_y) / 2.0, 0), top_color)
-	torso.scale = Vector3(shoulders, 1.0, 0.62)
+	m.capsule("torso", torso_r, torso_h, Vector3(0, (hip_y + shoulder_y) / 2.0, 0), top_color, Vector3(shoulders, 1.0, 0.62))
 	if bottom == "skirt":
-		var skirt := CylinderMesh.new()
-		skirt.top_radius = torso_r * 0.95
-		skirt.bottom_radius = torso_r * 1.35
-		skirt.height = 0.14 * h
-		_mesh(self, skirt, Vector3(0, hip_y - 0.05 * h, 0), bottom_color).scale = Vector3(1, 1, 0.75)
+		m.cylinder("torso", torso_r * 0.95, torso_r * 1.35, 0.14 * h,
+			Transform3D(Basis().scaled(Vector3(1, 1, 0.75)), Vector3(0, hip_y - 0.05 * h, 0)), bottom_color)
 	else:
-		_capsule(self, torso_r * 0.95, 0.12 * h, Vector3(0, hip_y + 0.02 * h, 0), bottom_color).scale = Vector3(1, 1, 0.62)
+		m.capsule("torso", torso_r * 0.95, 0.12 * h, Vector3(0, hip_y + 0.02 * h, 0), bottom_color, Vector3(1, 1, 0.62))
 	var top: String = cl.top
 	if top == "hoodie":
-		_sphere(self, 0.052 * h, Vector3(0, shoulder_y - 0.01 * h, 0.06 * h), top_color.darkened(0.08)).scale = Vector3(1.1, 0.8, 0.7)
+		m.sphere("torso", 0.052 * h, Vector3(0, shoulder_y - 0.01 * h, 0.06 * h), top_color.darkened(0.08), Vector3(1.1, 0.8, 0.7))
 	elif top == "jacket":
-		_box(self, Vector3(torso_r * 0.5, torso_h * 0.7, 0.01 * h), Vector3(0, (hip_y + shoulder_y) / 2.0 + 0.03 * h, -torso_r * 0.63), Color("f0f0f0"))
+		m.box("torso", Vector3(torso_r * 0.5, torso_h * 0.7, 0.01 * h), Vector3(0, (hip_y + shoulder_y) / 2.0 + 0.03 * h, -torso_r * 0.63), Color("f0f0f0"))
+	m.capsule("torso", 0.028 * h, 0.07 * h, Vector3(0, shoulder_y + 0.03 * h, 0), skin)  # neck
+	m.emit("torso", self, _material())
 
 	# Arms hang from shoulder pivots so emotes can rotate them.
 	var arm_r := 0.032 * h * muscle
 	var arm_len := 0.36 * h
-	var sleeve_color := top_color
 	for side in [-1.0, 1.0]:
 		var shoulder := Node3D.new()
 		shoulder.position = Vector3(side * (torso_r * shoulders + arm_r * 0.6), shoulder_y - 0.02 * h, 0)
 		add_child(shoulder)
-		_capsule(shoulder, arm_r, arm_len * 0.55, Vector3(0, -arm_len * 0.25, 0), sleeve_color)
-		_capsule(shoulder, arm_r * 0.9, arm_len * 0.55, Vector3(0, -arm_len * 0.72, 0), skin if top == "tshirt" else sleeve_color)
-		_sphere(shoulder, arm_r * 1.2, Vector3(0, -arm_len - arm_r * 0.3, 0), skin)
+		var g := "arm%d" % side
+		m.capsule(g, arm_r, arm_len * 0.55, Vector3(0, -arm_len * 0.25, 0), top_color)
+		m.capsule(g, arm_r * 0.9, arm_len * 0.55, Vector3(0, -arm_len * 0.72, 0), skin if top == "tshirt" else top_color)
+		m.sphere(g, arm_r * 1.2, Vector3(0, -arm_len - arm_r * 0.3, 0), skin)
+		m.emit(g, shoulder, _material())
 		if side < 0:
 			_shoulder_l = shoulder
 		else:
 			_shoulder_r = shoulder
 
-	# Neck and head on a pivot so the head can follow look pitch and nod.
-	_capsule(self, 0.028 * h, 0.07 * h, Vector3(0, shoulder_y + 0.03 * h, 0), skin)
+	# Head on a pivot so it can follow look pitch and nod.
 	_head = Node3D.new()
 	_head.position = Vector3(0, shoulder_y + 0.06 * h, 0)
 	add_child(_head)
 	var head_center := Vector3(0, head_r * 1.05, 0)
-	_sphere(_head, head_r, head_center, skin).scale = Vector3(0.9, 1.1, 1.0)
+	m.sphere("head", head_r, head_center, skin, Vector3(0.9, 1.1, 1.0))
 	for side in [-1.0, 1.0]:
-		_sphere(_head, head_r * 0.13, head_center + Vector3(side * head_r * 0.36, head_r * 0.12, -head_r * 0.9), Color("1d1d1f"))
-	_hair(str(app.hair), head_r, head_center, hair_color)
+		m.sphere("head", head_r * 0.13, head_center + Vector3(side * head_r * 0.36, head_r * 0.12, -head_r * 0.9), Color("1d1d1f"))
+	_hair(m, str(app.hair), head_r, head_center, hair_color)
+	m.emit("head", _head, _material())
 
 
-func _hair(style: String, r: float, c: Vector3, color: Color) -> void:
+func _hair(m: MeshMerger, style: String, r: float, c: Vector3, color: Color) -> void:
 	match style:
 		"short":
-			_sphere(_head, r * 1.04, c + Vector3(0, r * 0.18, r * 0.08), color).scale = Vector3(0.92, 0.9, 1.0)
+			m.sphere("head", r * 1.04, c + Vector3(0, r * 0.18, r * 0.08), color, Vector3(0.92, 0.9, 1.0))
 		"long":
-			_sphere(_head, r * 1.06, c + Vector3(0, r * 0.15, r * 0.08), color).scale = Vector3(0.95, 0.95, 1.0)
-			_box(_head, Vector3(r * 1.8, r * 2.2, r * 0.6), c + Vector3(0, -r * 0.8, r * 0.55), color)
+			m.sphere("head", r * 1.06, c + Vector3(0, r * 0.15, r * 0.08), color, Vector3(0.95, 0.95, 1.0))
+			m.box("head", Vector3(r * 1.8, r * 2.2, r * 0.6), c + Vector3(0, -r * 0.8, r * 0.55), color)
 		"bun":
-			_sphere(_head, r * 1.04, c + Vector3(0, r * 0.18, r * 0.08), color).scale = Vector3(0.92, 0.9, 1.0)
-			_sphere(_head, r * 0.45, c + Vector3(0, r * 0.9, r * 0.6), color)
+			m.sphere("head", r * 1.04, c + Vector3(0, r * 0.18, r * 0.08), color, Vector3(0.92, 0.9, 1.0))
+			m.sphere("head", r * 0.45, c + Vector3(0, r * 0.9, r * 0.6), color)
 		"cap":
-			_sphere(_head, r * 1.06, c + Vector3(0, r * 0.3, 0), color).scale = Vector3(0.95, 0.7, 1.0)
-			_box(_head, Vector3(r * 1.3, r * 0.08, r * 0.9), c + Vector3(0, r * 0.35, -r * 1.2), color.darkened(0.2))
+			m.sphere("head", r * 1.06, c + Vector3(0, r * 0.3, 0), color, Vector3(0.95, 0.7, 1.0))
+			m.box("head", Vector3(r * 1.3, r * 0.08, r * 0.9), c + Vector3(0, r * 0.35, -r * 1.2), color.darkened(0.2))
 
 
 ## speed in m/s; pitch in radians (camera pitch of that player).
@@ -150,44 +151,5 @@ func play_emote(kind: String) -> void:
 	_emote_time = 1.6 if kind == "wave" else 0.8
 
 
-func _capsule(parent: Node3D, radius: float, height: float, pos: Vector3, color: Color) -> MeshInstance3D:
-	var m := CapsuleMesh.new()
-	m.radius = radius
-	m.height = maxf(height, radius * 2.0)
-	m.radial_segments = 12
-	m.rings = 4
-	return _mesh(parent, m, pos, color)
-
-
-func _sphere(parent: Node3D, radius: float, pos: Vector3, color: Color) -> MeshInstance3D:
-	var m := SphereMesh.new()
-	m.radius = radius
-	m.height = radius * 2.0
-	m.radial_segments = 14
-	m.rings = 7
-	return _mesh(parent, m, pos, color)
-
-
-func _box(parent: Node3D, size: Vector3, pos: Vector3, color: Color) -> MeshInstance3D:
-	var m := BoxMesh.new()
-	m.size = size
-	return _mesh(parent, m, pos, color)
-
-
-func _mesh(parent: Node3D, mesh: Mesh, pos: Vector3, color: Color) -> MeshInstance3D:
-	var mi := MeshInstance3D.new()
-	mi.mesh = mesh
-	mi.position = pos
-	mi.material_override = _material(color)
-	parent.add_child(mi)
-	return mi
-
-
-static func _material(color: Color) -> StandardMaterial3D:
-	var key := color.to_html(false)
-	if not _materials.has(key):
-		var mat := StandardMaterial3D.new()
-		mat.albedo_color = color
-		mat.roughness = 0.85
-		_materials[key] = mat
-	return _materials[key]
+static func _material() -> StandardMaterial3D:
+	return MeshMerger.vertex_colour_material(0.85)

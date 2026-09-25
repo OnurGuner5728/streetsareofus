@@ -119,11 +119,31 @@ func attribution_text() -> String:
 	return " · ".join(parts)
 
 
-## Name of the nearest named street within `max_distance` metres, or "".
+## Name of the nearest named street within `max_distance` metres (at most
+## STREET_CELL), or "". Uses a grid of named road segments built on first use.
 func nearest_street(pos: Vector3, max_distance := 25.0) -> String:
+	if _street_cells.is_empty():
+		_index_streets()
 	var p := to_en(pos)
-	var best := max_distance
+	var best := minf(max_distance, STREET_CELL)
 	var best_name := ""
+	var c := Vector2i(floori(p.x / STREET_CELL), floori(p.y / STREET_CELL))
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			for seg in _street_cells.get(c + Vector2i(dx, dy), []):
+				var d := p.distance_to(Geometry2D.get_closest_point_to_segment(p, seg[0], seg[1]))
+				if d < best:
+					best = d
+					best_name = seg[2]
+	return best_name
+
+
+const STREET_CELL := 32.0
+var _street_cells := {}  # Vector2i -> [[a: Vector2, b: Vector2, name], ...]
+
+
+func _index_streets() -> void:
+	_street_cells[Vector2i(1 << 20, 0)] = []  # marks the index as built even for empty zones
 	for road in roads:
 		var road_name: String = road.get("name", "")
 		if road_name.is_empty():
@@ -132,8 +152,10 @@ func nearest_street(pos: Vector3, max_distance := 25.0) -> String:
 		for i in pts.size() - 1:
 			var a := Vector2(pts[i][0], pts[i][1])
 			var b := Vector2(pts[i + 1][0], pts[i + 1][1])
-			var d := p.distance_to(Geometry2D.get_closest_point_to_segment(p, a, b))
-			if d < best:
-				best = d
-				best_name = road_name
-	return best_name
+			var box := Rect2(a, Vector2.ZERO).expand(b)
+			for x in range(floori(box.position.x / STREET_CELL), floori(box.end.x / STREET_CELL) + 1):
+				for y in range(floori(box.position.y / STREET_CELL), floori(box.end.y / STREET_CELL) + 1):
+					var key := Vector2i(x, y)
+					if not _street_cells.has(key):
+						_street_cells[key] = []
+					_street_cells[key].append([a, b, road_name])

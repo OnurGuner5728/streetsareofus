@@ -5,19 +5,26 @@ extends RefCounted
 ## so its prediction runs on exactly what the server will see.
 ##
 ## Input batch:  u8 count, then per input
-##   u32 seq, s8 move_x, s8 move_y, u16 yaw, s8 pitch, u8 buttons
+##   u32 seq, s8 move_x, s8 move_y, u16 yaw, s8 pitch, u8 buttons, u16 world_tick
+## world_tick is the client's estimate of the server tick it saw when it
+## made the input (low 16 bits). Moving obstacles (trams) are evaluated at
+## that tick on both sides, so prediction and server agree exactly.
 ## Snapshot:     u32 tick, u32 ack_seq, f32x3 self_pos, f32x3 self_vel, u16 count,
-##   then per entity: u32 id, f32x3 pos, u16 yaw, s8 pitch, u8 speed_dm, u8 flags
+##   then per entity: u32 id, f32x3 pos, u16 yaw, s8 pitch, u8 speed_dm, u8 flags,
+##   then u16 prop_count and per moving prop: u16 id, s16x3 pos_cm, s16x4 quat
 
 const MAX_INPUTS_PER_PACKET := Protocol.MAX_RESENT_INPUTS
+const INPUT_BYTES := 12
 const MAX_ENTITIES := 512
 const ENTITY_BYTES := 21
+const PROP_BYTES := 16
+const MAX_PROPS := 256
 const FLAG_GROUNDED := 1
 const FLAG_SPRINT := 2
 const FLAG_RIDING := 4
 
 
-static func quantize_input(seq: int, mx: float, my: float, yaw: float, pitch: float, buttons: int) -> Dictionary:
+static func quantize_input(seq: int, mx: float, my: float, yaw: float, pitch: float, buttons: int, world_tick := 0) -> Dictionary:
 	var qx := clampi(roundi(mx * 127.0), -127, 127)
 	var qy := clampi(roundi(my * 127.0), -127, 127)
 	var qyaw := _yaw_to_u16(yaw)
@@ -25,8 +32,17 @@ static func quantize_input(seq: int, mx: float, my: float, yaw: float, pitch: fl
 	return {
 		"seq": seq, "qx": qx, "qy": qy, "qyaw": qyaw, "qpitch": qpitch, "buttons": buttons & 0xFF,
 		"mx": qx / 127.0, "my": qy / 127.0, "yaw": _u16_to_yaw(qyaw),
-		"pitch": qpitch / 127.0 * (PI / 2.0),
+		"pitch": qpitch / 127.0 * (PI / 2.0), "wt": world_tick,
 	}
+
+
+## Full tick from the low 16 bits a client sent, taking the value closest
+## to the server's own tick.
+static func unwrap_tick(low: int, server_tick: int) -> int:
+	var d := (server_tick - low) & 0xFFFF
+	if d >= 0x8000:
+		d -= 0x10000
+	return server_tick - d
 
 
 static func encode_inputs(inputs: Array) -> PackedByteArray:
@@ -41,6 +57,7 @@ static func encode_inputs(inputs: Array) -> PackedByteArray:
 		buf.put_u16(inp.qyaw)
 		buf.put_8(inp.qpitch)
 		buf.put_u8(inp.buttons)
+		buf.put_u16(int(inp.get("wt", 0)) & 0xFFFF)
 	return buf.data_array
 
 
@@ -51,7 +68,7 @@ static func decode_inputs(data: PackedByteArray) -> Array:
 	var buf := StreamPeerBuffer.new()
 	buf.data_array = data
 	var count := buf.get_u8()
-	if count > MAX_INPUTS_PER_PACKET or data.size() != 1 + count * 10:
+	if count > MAX_INPUTS_PER_PACKET or data.size() != 1 + count * INPUT_BYTES:
 		return []
 	var out := []
 	for i in count:
@@ -61,7 +78,7 @@ static func decode_inputs(data: PackedByteArray) -> Array:
 		var qyaw := buf.get_u16()
 		var qpitch := buf.get_8()
 		var buttons := buf.get_u8()
-		var inp := quantize_input(seq, 0, 0, 0, 0, buttons)
+		var inp := quantize_input(seq, 0, 0, 0, 0, buttons, buf.get_u16())
 		inp.qx = clampi(qx, -127, 127)
 		inp.qy = clampi(qy, -127, 127)
 		inp.qyaw = qyaw
@@ -74,7 +91,7 @@ static func decode_inputs(data: PackedByteArray) -> Array:
 	return out
 
 
-static func encode_snapshot(tick: int, ack_seq: int, self_pos: Vector3, self_vel: Vector3, entities: Array) -> PackedByteArray:
+static func encode_snapshot(tick: int, ack_seq: int, self_pos: Vector3, self_vel: Vector3, entities: Array, props := PackedByteArray()) -> PackedByteArray:
 	var buf := StreamPeerBuffer.new()
 	buf.put_u32(tick)
 	buf.put_u32(ack_seq)
@@ -95,7 +112,52 @@ static func encode_snapshot(tick: int, ack_seq: int, self_pos: Vector3, self_vel
 		buf.put_8(clampi(roundi(float(e.pitch) / (PI / 2.0) * 127.0), -127, 127))
 		buf.put_u8(clampi(roundi(float(e.speed) * 10.0), 0, 255))
 		buf.put_u8(e.flags)
+	var out := buf.data_array
+	if props.is_empty():
+		out.append_array(PackedByteArray([0, 0]))
+	else:
+		out.append_array(props)
+	return out
+
+
+## Prop poses: u16 count, then per prop u16 id, s16x3 position in cm,
+## s16x4 rotation quaternion. Used in snapshots and in the join sync.
+static func encode_props(poses: Array) -> PackedByteArray:
+	var buf := StreamPeerBuffer.new()
+	var count := mini(poses.size(), MAX_PROPS)
+	buf.put_u16(count)
+	for i in count:
+		var entry: Array = poses[i]
+		var xf: Transform3D = entry[1]
+		buf.put_u16(int(entry[0]))
+		for v in [xf.origin.x, xf.origin.y, xf.origin.z]:
+			buf.put_16(clampi(roundi(v * 100.0), -32767, 32767))
+		var q := xf.basis.get_rotation_quaternion()
+		for v in [q.x, q.y, q.z, q.w]:
+			buf.put_16(clampi(roundi(v * 32767.0), -32767, 32767))
 	return buf.data_array
+
+
+## [[id, Transform3D], ...] from encode_props data starting at `offset`,
+## or null when malformed.
+static func decode_props(data: PackedByteArray, offset := 0) -> Variant:
+	if data.size() < offset + 2:
+		return null
+	var buf := StreamPeerBuffer.new()
+	buf.data_array = data
+	buf.seek(offset)
+	var count := buf.get_u16()
+	if count > MAX_PROPS or data.size() != offset + 2 + count * PROP_BYTES:
+		return null
+	var out := []
+	for i in count:
+		var id := buf.get_u16()
+		var pos := Vector3(buf.get_16(), buf.get_16(), buf.get_16()) / 100.0
+		var q := Quaternion(buf.get_16() / 32767.0, buf.get_16() / 32767.0, buf.get_16() / 32767.0, buf.get_16() / 32767.0)
+		if q.length_squared() < 0.5:
+			q = Quaternion.IDENTITY
+		out.append([id, Transform3D(Basis(q.normalized()), pos)])
+	return out
 
 
 ## Returns {} for malformed packets.
@@ -108,7 +170,11 @@ static func decode_snapshot(data: PackedByteArray) -> Dictionary:
 	snap.self_pos = Vector3(buf.get_float(), buf.get_float(), buf.get_float())
 	snap.self_vel = Vector3(buf.get_float(), buf.get_float(), buf.get_float())
 	var count := buf.get_u16()
-	if data.size() != 34 + count * ENTITY_BYTES:
+	var props_at := 34 + count * ENTITY_BYTES
+	if count > MAX_ENTITIES or data.size() < props_at + 2:
+		return {}
+	var props: Variant = decode_props(data, props_at)
+	if props == null:
 		return {}
 	var entities := []
 	for i in count:
@@ -121,6 +187,7 @@ static func decode_snapshot(data: PackedByteArray) -> Dictionary:
 			"flags": buf.get_u8(),
 		})
 	snap.entities = entities
+	snap.props = props
 	return snap
 
 
