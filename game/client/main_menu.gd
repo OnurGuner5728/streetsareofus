@@ -31,7 +31,8 @@ func _build() -> void:
 	add_child(bg)
 	# Phones get two tabs instead of three columns side by side.
 	var compact := get_viewport().get_visible_rect().size.x < 1100.0
-	var web := OS.has_feature("web")
+	# Browsers and phones cannot start a server process: they only connect.
+	var web := OS.has_feature("web") or OS.has_feature("mobile")
 
 	var margin := MarginContainer.new()
 	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -65,7 +66,7 @@ func _build() -> void:
 		left.add_child(HSeparator.new())
 
 	_name = _line_edit(left, "Görünen isim", str(settings.name), "3-20 karakter")
-	_server = _line_edit(left, "Sunucu", str(settings.server), "adres:port veya wss://")
+	_server = _line_edit(left, "Sunucu", str(settings.server), "telefon linki (https://…), adres:port veya wss://")
 	_zones = ZoneData.available_zones()
 	if not web:
 		# Browsers cannot start a server process, so the zone only matters locally.
@@ -88,16 +89,29 @@ func _build() -> void:
 		host_btn.custom_minimum_size = Vector2(0, 44)
 		host_btn.pressed.connect(_on_play.bind(true))
 		left.add_child(host_btn)
-	elif compact:
+	elif compact and OS.has_feature("web"):
 		var full := Button.new()
 		full.text = "Tam ekran"
 		full.custom_minimum_size = Vector2(0, 40)
 		full.pressed.connect(func(): DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN))
 		left.add_child(full)
+	var android_browser := OS.has_feature("web") and str(JavaScriptBridge.eval("navigator.userAgent", true)).contains("Android")
+	if android_browser:
+		# The app runs natively (no browser in between): smoother on phones.
+		var apk := Button.new()
+		apk.text = "Android uygulamasını indir (daha akıcı)"
+		apk.custom_minimum_size = Vector2(0, 40)
+		apk.pressed.connect(func():
+			var origin := str(JavaScriptBridge.eval("location.origin", true))
+			JavaScriptBridge.eval("try { navigator.clipboard.writeText(location.origin) } catch (e) {} location.href = 'streetsareofus.apk'", true)
+			_status.text = "İndiriliyor. Kurduktan sonra uygulamada Sunucu alanına şu adresi yapıştır (panoya kopyalandı): " + origin)
+		left.add_child(apk)
 	_status = Label.new()
 	_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_status.add_theme_color_override("font_color", Color("ffcf70"))
 	left.add_child(_status)
+	if OS.has_feature("android") and not Net.normalize_address(str(settings.server)).begins_with("ws"):
+		_status.text = "Sunucu alanına telefon linkini yapıştır (https://….trycloudflare.com)."
 	var spacer := Control.new()
 	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	left.add_child(spacer)

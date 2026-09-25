@@ -47,7 +47,7 @@ static func shadow_distance() -> float:
 
 
 static func night_lights() -> int:
-	return [0, 3, 8][level]
+	return [0, 4, 10][level]
 
 
 static func glow() -> bool:

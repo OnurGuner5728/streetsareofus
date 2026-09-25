@@ -27,6 +27,7 @@ window/size/viewport_width=1280
 window/size/viewport_height=720
 window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
+window/handheld/orientation=4
 window/dpi/allow_hidpi.web=false
 
 [physics]
@@ -42,6 +43,8 @@ renderer/rendering_method.mobile="gl_compatibility"
 renderer/rendering_method.web="gl_compatibility"
 anti_aliasing/quality/msaa_3d=2
 anti_aliasing/quality/msaa_3d.web=0
+anti_aliasing/quality/msaa_3d.mobile=0
+textures/vram_compression/import_etc2_astc=true
 
 [shader_globals]
 

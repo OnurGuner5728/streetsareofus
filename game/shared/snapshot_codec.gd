@@ -22,6 +22,7 @@ const MAX_PROPS := 256
 const FLAG_GROUNDED := 1
 const FLAG_SPRINT := 2
 const FLAG_RIDING := 4
+const FLAG_SITTING := 8
 
 
 static func quantize_input(seq: int, mx: float, my: float, yaw: float, pitch: float, buttons: int, world_tick := 0) -> Dictionary:

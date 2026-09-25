@@ -25,6 +25,8 @@ var _bubble_left := 0.0
 var _speed := 0.0
 var _pitch := 0.0
 var _anim_skip := 0.0
+var _last_y := 0.0
+var _vy := 0.0  # smoothed vertical speed: in the air when large
 
 
 func setup(entity_id: int, info: Dictionary) -> void:
@@ -75,7 +77,8 @@ func say(text: String) -> void:
 	_bubble_left = BUBBLE_SECONDS
 
 
-func push_sample(t: float, pos: Vector3, yaw: float, pitch: float, speed: float) -> void:
+func push_sample(t: float, pos: Vector3, yaw: float, pitch: float, speed: float, flags := 0) -> void:
+	view.sitting = flags & SnapshotCodec.FLAG_SITTING != 0
 	if not _samples.is_empty():
 		var last: Dictionary = _samples[-1]
 		if t <= float(last.t):
@@ -125,10 +128,14 @@ func update_render(now_server: float, delta: float, camera_pos: Vector3) -> void
 					lerpf(a.pitch, b.pitch, f), lerpf(a.speed, b.speed, f))
 				break
 	var dist := global_position.distance_to(camera_pos)
+	if delta > 0.0:
+		_vy = lerpf(_vy, (global_position.y - _last_y) / delta, minf(1.0, delta * 12.0))
+	_last_y = global_position.y
+	view.talking = in_conversation
 	# Limbs of people far away are a few pixels tall: animate them less often.
 	_anim_skip += delta
 	if dist < 40.0 or _anim_skip > 0.1:
-		view.animate(_speed, _anim_skip if dist >= 40.0 else delta, _pitch)
+		view.animate(_speed, _anim_skip if dist >= 40.0 else delta, _pitch, absf(_vy) > 1.3)
 		_anim_skip = 0.0
 	var show_name := dist < NAME_RANGE
 	if _label.visible != show_name:

@@ -60,6 +60,10 @@ func cylinder(group: String, top: float, bottom: float, height: float, xf: Trans
 	add(group, m, xf, color)
 
 
+func groups() -> Array:
+	return _groups.keys()
+
+
 func has(group: String) -> bool:
 	return _groups.has(group)
 
@@ -112,7 +116,7 @@ static func _shape_key(mesh: PrimitiveMesh) -> Array:
 		return [c.radius, c.height, c.radial_segments, c.rings]
 	if mesh is SphereMesh:
 		var sp := mesh as SphereMesh
-		return [sp.radius, sp.height, sp.radial_segments, sp.rings]
+		return [sp.radius, sp.height, sp.radial_segments, sp.rings, sp.is_hemisphere]
 	if mesh is CylinderMesh:
 		var c := mesh as CylinderMesh
 		return [c.top_radius, c.bottom_radius, c.height]

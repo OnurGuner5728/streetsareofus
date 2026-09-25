@@ -26,7 +26,10 @@ const FACES := ["oval", "round", "square", "long"]
 const EYE_COLORS := {"brown": "5a3a22", "dark": "2a1d15", "hazel": "8a6a3a", "green": "4f7a4a", "blue": "4a74a8", "grey": "7c8790"}
 const BROWS := ["normal", "thin", "thick"]
 const BEARDS := ["none", "stubble", "mustache", "goatee", "short", "full"]
-const HAIR_STYLES := ["none", "buzz", "short", "side", "curly", "afro", "bob", "long", "ponytail", "bun", "braid"]
+const BODY_TYPES := ["male", "female"]
+const HAIR_STYLES := ["none", "buzz", "short", "long", "bun", "curly", "afro"]
+## Older hairstyles -> the closest current one.
+const LEGACY_HAIR := {"cap": "short", "side": "short", "bob": "long", "ponytail": "bun", "braid": "long"}
 const TOPS := ["tshirt", "longsleeve", "shirt", "polo", "tank", "hoodie", "sweater", "jacket", "coat", "dress"]
 const PATTERNS := ["plain", "stripes", "two_tone"]
 const BOTTOMS := ["jeans", "trousers", "sweatpants", "shorts", "skirt", "long_skirt"]
@@ -44,7 +47,7 @@ static func defaults() -> Dictionary:
 	return {
 		"body": {"height": 0.45, "weight": 0.4, "muscle": 0.3, "shoulders": 0.5,
 			"chest": 0.4, "hips": 0.45, "legs": 0.5, "head": 0.5},
-		"appearance": {"skin": "skin_03", "face": "oval", "eyes": "brown", "brows": "normal",
+		"appearance": {"body_type": "male", "skin": "skin_03", "face": "oval", "eyes": "brown", "brows": "normal",
 			"hair": "short", "hair_color": "#37251c", "beard": "none"},
 		"clothing": {
 			"top": "hoodie", "top_color": "#3a6ea5", "top_color2": "#e8e8e8", "pattern": "plain",
@@ -69,6 +72,7 @@ static func sanitize(raw: Variant) -> Dictionary:
 	for key in BODY_KEYS:
 		out.body[key] = _unit(body.get(key), out.body[key])
 	var app := _section(src, "appearance")
+	out.appearance.body_type = _choice(app.get("body_type"), BODY_TYPES, _guess_body(src))
 	out.appearance.skin = _choice(app.get("skin"), SKINS.keys(), out.appearance.skin)
 	out.appearance.face = _choice(app.get("face"), FACES, out.appearance.face)
 	out.appearance.eyes = _choice(app.get("eyes"), EYE_COLORS.keys(), out.appearance.eyes)
@@ -102,16 +106,21 @@ static func random(rng: RandomNumberGenerator) -> Dictionary:
 	var av := defaults()
 	for key in BODY_KEYS:
 		av.body[key] = rng.randf_range(0.1, 0.9)
+	av.appearance.body_type = BODY_TYPES[rng.randi() % BODY_TYPES.size()]
+	var fem: bool = av.appearance.body_type == "female"
 	av.appearance.skin = SKINS.keys()[rng.randi() % SKINS.size()]
 	av.appearance.face = FACES[rng.randi() % FACES.size()]
 	av.appearance.eyes = EYE_COLORS.keys()[rng.randi() % EYE_COLORS.size()]
 	av.appearance.brows = BROWS[rng.randi() % BROWS.size()]
-	av.appearance.hair = HAIR_STYLES[rng.randi() % HAIR_STYLES.size()]
+	var hairs := ["long", "bun", "curly", "afro", "short", "long", "bun"] if fem else ["short", "buzz", "short", "curly", "afro", "none", "long"]
+	av.appearance.hair = hairs[rng.randi() % hairs.size()]
 	av.appearance.hair_color = "#" + Color.from_hsv(rng.randf_range(0.02, 0.1), rng.randf_range(0.3, 0.7), rng.randf_range(0.08, 0.7)).to_html(false)
-	av.appearance.beard = BEARDS[rng.randi() % BEARDS.size()] if rng.randf() < 0.45 else "none"
+	av.appearance.beard = BEARDS[rng.randi() % BEARDS.size()] if not fem and rng.randf() < 0.5 else "none"
 	av.clothing.top = TOPS[rng.randi() % TOPS.size()]
 	av.clothing.pattern = PATTERNS[rng.randi() % PATTERNS.size()] if rng.randf() < 0.4 else "plain"
-	av.clothing.bottom = BOTTOMS[rng.randi() % BOTTOMS.size()]
+	av.clothing.bottom = BOTTOMS[rng.randi() % BOTTOMS.size()] if fem else ["jeans", "trousers", "sweatpants", "shorts"][rng.randi() % 4]
+	if not fem and av.clothing.top == "dress":
+		av.clothing.top = "shirt"
 	av.clothing.shoes = SHOES[rng.randi() % SHOES.size()]
 	for key in ["top_color", "top_color2", "bottom_color", "shoes_color"]:
 		av.clothing[key] = "#" + Color.from_hsv(rng.randf(), rng.randf_range(0.1, 0.75), rng.randf_range(0.2, 0.92)).to_html(false)
@@ -166,7 +175,16 @@ static func _section(src: Dictionary, key: String) -> Dictionary:
 
 
 static func _legacy_hair(value: Variant) -> Variant:
-	return "short" if typeof(value) == TYPE_STRING and value == "cap" else value
+	return LEGACY_HAIR.get(value, value) if typeof(value) == TYPE_STRING else value
+
+
+## Avatars made before body types existed: a reasonable first guess.
+static func _guess_body(src: Dictionary) -> String:
+	var app := _section(src, "appearance")
+	var cl := _section(src, "clothing")
+	if str(app.get("hair", "")) in ["long", "bob", "ponytail", "bun", "braid"] 			or str(cl.get("bottom", "")) in ["skirt", "long_skirt"] or str(cl.get("top", "")) == "dress":
+		return "female"
+	return "male"
 
 
 static func _unit(value: Variant, fallback: float) -> float:

@@ -40,9 +40,24 @@ func start_server(port: int, transport := "enet") -> Error:
 	return OK
 
 
+## What people paste into the server field -> an address connect_to takes.
+## A web page's address (http(s)://host/..., e.g. the phone link from
+## tools/serve_web.py) means that page's game socket: ws(s)://host/game.
+static func normalize_address(text: String) -> String:
+	var a := text.strip_edges()
+	if a.begins_with("https://") or a.begins_with("http://"):
+		var secure := a.begins_with("https://")
+		var host := a.split("://", true, 1)[1].split("/")[0]
+		return ("wss://" if secure else "ws://") + host + "/game"
+	if a.ends_with(".trycloudflare.com"):
+		return "wss://" + a + "/game"
+	return a
+
+
 ## address: "host:port" for ENet, or a ws:// / wss:// URL for WebSocket.
 func connect_to(address: String) -> Error:
 	close()
+	address = normalize_address(address)
 	var err: Error
 	if address.begins_with("ws://") or address.begins_with("wss://"):
 		var ws := WebSocketMultiplayerPeer.new()
@@ -55,6 +70,7 @@ func connect_to(address: String) -> Error:
 		err = enet.create_client(hp[0], hp[1], 2)
 		if err == OK:
 			_unlimit_bandwidth(enet)
+			tolerant_timeout(enet.get_peer(1))
 		peer = enet
 	if err != OK:
 		peer = null
@@ -80,6 +96,14 @@ static func _unlimit_bandwidth(enet: ENetMultiplayerPeer) -> void:
 	enet.host.bandwidth_limit(0, 0)
 
 
+## ENet drops a peer that has not acknowledged anything for a few seconds;
+## a phone that stalls (loading, a call, the app in the background) should
+## get more slack than that before it is thrown out.
+static func tolerant_timeout(packet_peer: ENetPacketPeer) -> void:
+	if packet_peer:
+		packet_peer.set_timeout(64, 15000, 45000)
+
+
 ## A phone on a slow link must not overflow the default 64 KB buffers.
 static func _tune_ws(ws: WebSocketMultiplayerPeer) -> void:
 	ws.inbound_buffer_size = WS_BUFFER
@@ -103,6 +127,7 @@ func disable_throttling(peer_id: int) -> void:
 		var p: ENetPacketPeer = (peer as ENetMultiplayerPeer).get_peer(peer_id)
 		if p:
 			p.throttle_configure(5000, 0, 0)
+			tolerant_timeout(p)
 
 
 ## False while a peer is going away (closing WebSocket, disconnecting ENet
@@ -190,6 +215,18 @@ func c_conversation_leave(other_id: int) -> void:
 func c_chat(text: String) -> void:
 	if server:
 		server.on_chat(_sender(), text)
+
+
+@rpc("any_peer", "call_remote", "reliable", 1)
+func c_sit(bench: int) -> void:
+	if server:
+		server.on_sit(_sender(), bench)
+
+
+@rpc("authority", "call_remote", "reliable", 1)
+func s_sat(origin: Vector3, yaw: float) -> void:
+	if client:
+		client.on_sat(origin, yaw)
 
 
 @rpc("any_peer", "call_remote", "reliable", 1)

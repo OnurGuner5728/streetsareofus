@@ -28,12 +28,13 @@ Pilot bölge: **Kadıköy, İstanbul** (Bahariye / Söğütlüçeşme çevresi, 
 | Sustur / engelle / şikayet | Susturma yerel; engelleme kalıcı ve karşılıklı görünmezlik; şikayet olay numarası ve sohbet bağlamıyla kaydedilir |
 | **Engel kaldırma** | Menü → **Engellenenler**: engellediğin herkes (isim, tarih), iki dokunuşla **Engeli kaldır**. Karşı tarafa bildirim gitmez; birbirinizi bir sonraki snapshot'ta yeniden görürsünüz |
 | Hız sınırları | İstek bekleme süreleri, 3 retten sonra 60 sn, sohbet token-bucket, jest ve şikayet sınırları |
-| **Avatar** | Sekmeli editör (Beden / Yüz / Saç / Üst / Alt / Ayakkabı / Aksesuar) ve **Rastgele** düğmesi. Beden: boy, kilo, kas, omuz, göğüs, kalça, bacak boyu, baş. Yüz: 8 ten tonu, 4 yüz şekli, 6 göz rengi, kaş, 6 sakal/bıyık. 11 saç modeli (kazıtılmış, kısa, yandan ayrık, kıvırcık, afro, küt, uzun, at kuyruğu, topuz, örgü). 10 üst (tişört, uzun kollu, gömlek, polo, atlet, kapüşonlu, kazak, ceket, mont, elbise) düz / çizgili / iki renk; 6 alt (kot, kumaş pantolon, eşofman, şort, etek, uzun etek); 4 ayakkabı; kep, bere, fötr, başörtüsü, bandana; 3 gözlük; sırt / omuz / bez çanta; atkı. Her parçanın rengi seçilir. Diz ve dirsekten bükülen uzuvlar, nefes alma, koşarken öne eğilme. Ağda yalnızca ID ve parametre gider |
+| **Gerçek insanlar** | Avatarlar artık gerçek, rigli insan modelleri: Quaternius **Universal Base Characters** (CC0; kadın ve erkek beden, ~14 bin üçgen, 8 LOD, 65 kemik, parmaklar dahil) ve **Universal Animation Library** (CC0). Animasyonlar `game/tools/bake_avatar_anims.gd` ile iskelete aktarılır (dünya-uzayı retarget; kütüphanedeki dövüş duruşu şehirde doğal dursun diye bacaklar ve eller gevşetilip ayaklar yere oturtulur): bekleme, yürüme, koşu, sprint, zıplama/düşme/iniş, konuşurken el-kol jestleri, banka oturma/kalkma, dans. Oynatma hızı gerçek hıza göre ayarlanır. Üstüne bir `SkeletonModifier3D` başı bakılan yöne çevirir, el sallama ve baş sallamayı hangi animasyon oynarsa oynasın ekler |
+| **Avatar editörü** | Sekmeli (Beden / Yüz / Saç / Üst / Alt / Ayakkabı / Aksesuar) + **Rastgele**. Beden tipi (kadın/erkek), boy (model ölçeği), bacak boyu ve baş (kemik ölçeği), kilo, kas, göğüs, kalça, omuz (shader'da bölgesel şekillendirme). Yüz şekli, 8 ten tonu, 6 göz rengi (iris), kaş (ince/normal/kalın), sakal: kirli sakal, bıyık, keçi sakalı, kısa sakal (boyanır), gür sakal (model). Saç: kazıtılmış, kısa, uzun, topuz (modeller), kıvırcık, afro. Kıyafetler bedenin üstüne shader'la giydirilir: model T-pozunda olduğu için kol boyu = |x|, paça = y; kumaş kalınlığı ve bolluğu (Laplace ile yumuşatılmış bedene göre çukurları doldurur), gömlek patisi ve düğmeleri, kapüşonlu fermuarı, açık ceket önü, kot dokusu, ayakkabı tabanı. Etek, elbise ve mont etekleri, kapüşon, yaka, şapkalar, gözlükler, çantalar ve atkı kemiklere takılı parçalar. Ağda yalnızca ID ve parametre gider |
 | **Gardırop** | Oyun içinde Menü → **Görünüm (kıyafet)**: kendini ayna gibi karşıdan görerek değiştir, **Kaydet ve giy** ile herkes yeni halini görür (vazgeçersen hiçbir şey gitmez) |
 | **Kamera** | **V** (telefonda **Kamera** düğmesi) ya da Menü: **Birinci şahıs → Arkadan (omuz üstü) → Uzaktan**. Üçüncü şahısta kendi karakterini görürsün; fare tekerleği uzaklığı ayarlar, kamera duvara girmez (yay kolu). Seçim hatırlanır |
 | Görsel boy ≠ oyun boyu | 150–205 cm görsel; çarpışma kapsülü 155–195 cm'ye ve dar bir yarıçapa sabitlenir |
 | Kalıcılık | Hesap (ilk kullanımda güven), avatar, son konum, engellemeler, şikayetler, denetim logu |
-| Protokol sürümü | `PROTOCOL_VERSION` (şu an 3) ve zone sürümü eşleşmezse bağlantı reddedilir |
+| Protokol sürümü | `PROTOCOL_VERSION` (şu an 4) ve zone sürümü eşleşmezse bağlantı reddedilir |
 | Botlar ve yük testi | `tools/bots.py smoke` / `commute` / `load` |
 | Atıf | "© OpenStreetMap contributors" oyunda ve menüde her zaman görünür |
 | Telefon | Web export + WebSocket transport + dokunmatik kontroller; `tools/serve_web.py` |
@@ -53,6 +54,9 @@ Pilot bölge: **Kadıköy, İstanbul** (Bahariye / Söğütlüçeşme çevresi, 
 | Radar | Sağ üstte yöne göre dönen minimap: yakındaki kişiler, uzaktakilerin yönü, tramvaylar, duraklar, rota. Dokun ya da Tab: büyük harita |
 | Büyük harita | Kaydır, yakınlaştır, duraklara dokun (sıradaki tramvaylar), hat lejantı, kalabalık ısı hücreleri (64 m, konum değil sayı) |
 | Gerçek gökyüzü | Güneş İstanbul'un **gerçek saatine ve koordinatına** göre; altın saat, alacakaranlık, gece. Gece pencereler, dükkânlar ve lambalar yanar |
+| **Gece ışığı** | Gece kapkaranlık değil: ay ışıklı mavimsi dolgu ışığı, biraz daha pozlama, daha güçlü ay. Her sokak lambasının altında sıcak bir ışık havuzu ve lamba başında hale (iki MultiMesh, additive; her kalite seviyesinde, telefonda da çalışır). Orta/Yüksek'te en yakın 4/10 lambaya gerçek ışık |
+| **Banklara oturma** | Bankın yanında **E** / **Otur**: sunucu en yakın boş yeri (bank başına 2 kişi) doğrular, oturma animasyonu oynar, herkes oturduğunu görür; yürüyünce kalkarsın (kalkış istemci tahmininde de birebir). Oturup konuşurken el-kol jestleri |
+| **Dans** | **J** / **Dans**: 8 saniye dans (yakındaki herkes görür; yürüyünce biter) |
 | **Gerçek hava** | Sunucu Kadıköy'ün anlık havasını **Open-Meteo**'dan 15 dakikada bir alır (anahtarsız; yalnızca bölgenin koordinatı gider) ve herkese aynısını dağıtır: yağmur (kameranın çevresinde GPU'da düşen damlalar), ıslanan ve yavaşça kuruyan sokaklar, asfaltta su birikintileri, kar (kaldırım ve çatılarda birikir), sis, bulut katmanı, kapalı havada gri gök ve yumuşak ışık, fırtınada şimşek ve gök gürültüsü, rüzgârla sallanan ağaçlar. HUD'da "13°C · Yağmurlu" |
 | **Yayalar [NPC]** | Kaldırımlarda yürüyen, ara sıra vitrin önünde duran, oyunculara yol veren yayalar. Plandaki kurala uygun olarak açıkça **NPC** olarak etiketlenir ("yapay bir figür; sohbet edilemez"), gerçek kişi sanılmaz. Hareketleri sunucu saatinin deterministik fonksiyonu: herkes aynı yayayı aynı yerde görür, ağ trafiği yok. Saate göre yoğunluk (gece seyrek) |
 | **Sokak kedileri** | Park etmiş arabaların kaputunda ve banklarda uyuyan, kaldırımda gezinen kediler (herkes için aynı). Yanına git: **E** / **Sev** → mırlar |
@@ -145,6 +149,7 @@ ve oyunu `http://127.0.0.1:8080` adresinde sunar. `/game` yolu oyun sunucusuna
 aktarılır, böylece sayfa ve oyun aynı adresten çalışır:
 
 ```bash
+python tools/serve_web.py --bot --cluster --tunnel --apk  # + Android uygulaması
 python tools/serve_web.py --bot --cluster          # yalnızca bu bilgisayar
 python tools/serve_web.py --bot --cluster --lan    # aynı Wi-Fi'deki telefon
 python tools/serve_web.py --bot --cluster --tunnel # internetten: Cloudflare quick tunnel
@@ -165,6 +170,8 @@ tutulmalı. Menüde "Tam ekran" adres çubuğunu gizler; oyun içi Menü'de
 Görünüm (kıyafet), Kamera, Ses, Engellenenler, Grafik kalitesi ve FPS göstergesi
 var.
 
+**Android uygulaması (APK)** tarayıcıdan belirgin şekilde akıcıdır (tarayıcı katmanı yok, doğal OpenGL ES). `--apk` ile `build/android/streetsareofus.apk` üretilir ve `/streetsareofus.apk` adresinden indirilir; Android tarayıcıdan girenlere menüde **Android uygulamasını indir** düğmesi çıkar (tıklayınca oyunun adresi panoya kopyalanır). Kurmak için telefonda "bilinmeyen kaynaklardan yükleme"ye izin ver; uygulamada **Sunucu** alanına telefon linkini (https://….trycloudflare.com) yapıştır, `wss://…/game`'e kendisi çevirir. APK bu makinenin Android debug anahtarıyla imzalanır (anahtar repoya girmez). Gerekenler: Godot Android şablonları, Android SDK (build-tools), JDK 17+ (Godot editör ayarlarında `export/android/java_sdk_path`).
+
 Masaüstü istemci de bir WebSocket sunucusuna bağlanabilir: sunucu alanına
 `ws://adres:port` yazmak yeter. Bir zone sunucusu tek transport konuşur
 (`--transport=enet` varsayılan, `--transport=ws`).
@@ -181,6 +188,7 @@ Masaüstü istemci de bir WebSocket sunucusuna bağlanabilir: sunucu alanına
 | M, B (iki kez), R + 1–5 | Sustur, engelle, şikayet et |
 | Tab | Büyük harita (dokun/tıkla: rota) |
 | F | Tramvaya bin / durak iste / in |
+| E (bankın yanında), J | Banka otur (yürüyünce kalkarsın), dans et |
 | V, fare tekerleği | Kamera: birinci şahıs / arkadan / uzaktan; üçüncü şahısta uzaklık |
 | F1, F3, Esc | Yardım, ağ bilgisi, menü (Görünüm, Kamera, Ses, Engellenenler, Grafik, FPS) |
 
@@ -188,7 +196,7 @@ Masaüstü istemci de bir WebSocket sunucusuna bağlanabilir: sunucu alanına
 
 ```bash
 "$GODOT" --headless --path game --import      # ilk seferde sınıf önbelleği için
-"$GODOT" --headless --path game -- --test     # 262 kontrol
+"$GODOT" --headless --path game -- --test     # 270 kontrol
 python -m unittest discover -s world-pipeline/tests   # 26 test
 python tools/bots.py smoke                    # 2 bot: tanış, konuş, yaz, el salla, engelle, engeli kaldır, kalıcılık
 python tools/bots.py smoke --transport ws     # aynısı WebSocket üzerinden
@@ -268,9 +276,12 @@ game/                      Godot 4.7 projesi (istemci + headless sunucu)
                            sky_controller, graphics_quality, mesh_merger, prop_view, crowd_view, critters,
                            weather_view, city_sounds, frame_profiler
   zones/<zone_id>/         zone.json, spawn_points.json, metadata, attribution, checksum
+  assets/characters/        CC0 insan modelleri, saçlar, pişmiş animasyon kütüphaneleri ve gövde mesh'leri
+  tools/                   bake_avatar_anims.gd (retarget + gövde verisi), pose_preview.gd
   tests/test_runner.gd
 tools/bots.py              smoke, commute ve yük testleri (--transport enet|ws)
-tools/serve_web.py         telefon için web sürümü + WebSocket sunucusu (+ isteğe bağlı tünel)
+tools/serve_web.py         telefon için web sürümü + WebSocket sunucusu (+ tünel, + Android APK)
+art-src/                   animasyon kütüphanesinin kaynak glTF'i (CC0)
 LICENSES/                  OSM (ODbL) ve üçüncü taraf bileşenler
 ```
 
@@ -335,5 +346,5 @@ Plandaki mesajların karşılıkları (`game/net/net.gd`):
 5. Panoramax adapter'ı (opsiyonel gerçeklik katmanı).
 6. PostgreSQL ve Nakama; `ServerStore` plandaki tabloların birebir karşılığı
    olarak yazıldı.
-7. Sesli sohbet (LiveKit/Mumble), MakeHuman/MPFB avatar hattı, planın
+7. Sesli sohbet (LiveKit/Mumble), gerçek modellerle yayalar (en yakın NPC'ler), planın
    sırasıyla LLM'li NPC diyaloğu.

@@ -26,6 +26,7 @@ const NOTICES := {
 	"you_blocked": "Bu kişiyi engelledin.",
 	"not_in_conversation": "Mesaj için önce bir konuşma isteğinin kabul edilmesi gerekir.",
 	"rate_limited": "Çok hızlı; biraz yavaşla.",
+	"bench_full": "Bu bank dolu.",
 	"blocked": "Engellendi. Artık birbirinizi görmeyeceksiniz. Geri almak için: Menü → Engellenenler.",
 	"unblocked": "%s artık engelli değil; birbirinizi yeniden görebilirsiniz.",
 	"reported": "Şikayet alındı. Olay numarası: %s",
@@ -116,6 +117,9 @@ var _cam_zoom := 1.0
 var _self_view: AvatarView  # you, seen from behind or in the wardrobe
 var _wardrobe_open := false
 var volume := "on"
+var _seat_yaw := 0.0
+var _sit_blend := 0.0
+var _bench_cache := {"at": -INF, "id": -1}
 var _shake := 0.0
 var _tram_hit_at := -INF
 var _tram_warned_at := -INF
@@ -242,6 +246,10 @@ func on_welcome(info: Dictionary) -> void:
 			var hm := str(options.time).split(":")
 			sky.hours_override = float(hm[0]) + (float(hm[1]) / 60.0 if hm.size() > 1 else 0.0)
 		sky.setup(zone, city.get("lamps", PackedVector3Array()), compat)
+		var glow := NightGlow.new()
+		glow.name = "NightGlow"
+		add_child(glow)
+		glow.build(zone, city.get("lamps", PackedVector3Array()))
 		weather_view = WeatherView.new()
 		weather_view.name = "Weather"
 		add_child(weather_view)
@@ -399,7 +407,7 @@ func on_snapshot(data: PackedByteArray) -> void:
 	for e in snap.entities:
 		var r: RemotePlayer = remotes.get(e.id)
 		if r:
-			r.push_sample(server_time, e.pos, e.yaw, e.pitch, e.speed)
+			r.push_sample(server_time, e.pos, e.yaw, e.pitch, e.speed, int(e.flags))
 	if props_view and not (snap.props as Array).is_empty():
 		props_view.push(server_time, snap.props)
 	if bot and not (snap.props as Array).is_empty():
@@ -630,6 +638,40 @@ func _tram_warning() -> void:
 			return
 
 
+## The bench next to you (any free-looking seat within reach), or -1.
+func _nearest_bench() -> int:
+	if body == null or body.has_meta("seat") or not riding.is_empty():
+		return -1
+	var t := now()
+	if t - float(_bench_cache.at) < 0.25:
+		return int(_bench_cache.id)
+	var benches: Array = StreetLayout.for_zone(zone).benches
+	var best := -1
+	var best_d := Protocol.SIT_RANGE
+	for i in benches.size():
+		var b: Dictionary = benches[i]
+		if (b.pos as Vector3).distance_squared_to(body.global_position) > 9.0:
+			continue
+		for side in Protocol.BENCH_SEATS.size():
+			var d := PlayerMotor.seat_origin(b, side).distance_to(body.global_position)
+			if d < best_d:
+				best_d = d
+				best = i
+	_bench_cache = {"at": t, "id": best}
+	return best
+
+
+## The server seated us: same place and state as its body, facing out.
+func on_sat(origin: Vector3, seat_yaw: float) -> void:
+	PlayerMotor.sit(body, origin)
+	_prev_pos = origin
+	_curr_pos = origin
+	_correction = Vector3.ZERO
+	_seat_yaw = seat_yaw
+	yaw = seat_yaw
+	_notice("Banka oturdun. Kalkmak için yürümen yeterli.")
+
+
 func on_notice(code: String, detail: String) -> void:
 	var text: String = NOTICES.get(code, code)
 	if text.contains("%s"):
@@ -835,7 +877,8 @@ func _process(delta: float) -> void:
 		fleet.update(server_now(), night)
 	FrameProfiler.add("fleet", t0)
 	_step_visual = lerpf(_step_visual, 0.0, 1.0 - exp(-12.0 * delta))
-	var cam_pos := render_pos + Vector3(0, _eye_height + _step_visual, 0)
+	_sit_blend = move_toward(_sit_blend, 1.0 if body.has_meta("seat") else 0.0, delta * 1.5)
+	var cam_pos := render_pos + Vector3(0, _eye_height * (1.0 - 0.3 * _sit_blend) + _step_visual, 0)
 	if touch:
 		var size := get_viewport().get_visible_rect().size
 		hud.set_portrait_warning(size.y > size.x)
@@ -937,8 +980,10 @@ func _update_camera(render_pos: Vector3, eye: Vector3, delta: float) -> void:
 		_self_view.visible = third
 		if third:
 			_self_view.global_position = render_pos
-			_self_view.rotation.y = yaw
-			_self_view.animate(speed, delta, pitch)
+			_self_view.rotation.y = _seat_yaw if body.has_meta("seat") else yaw
+			_self_view.sitting = body.has_meta("seat")
+			_self_view.talking = not conversations.is_empty()
+			_self_view.animate(speed, delta, pitch, riding.is_empty() and absf(body.velocity.y) > 1.2)
 	if not third:
 		_bob_phase = fmod(_bob_phase + delta * (1.5 + speed * 2.2), TAU)
 		var bob := sin(_bob_phase * 2.0) * 0.03 * clampf(speed / Protocol.WALK_SPEED, 0.0, 1.5)
@@ -1186,6 +1231,11 @@ func _maybe_screenshot() -> void:
 			pitch = asin(clampf(to.normalized().y, -1.0, 1.0))
 			_screenshot_busy = true
 			await get_tree().create_timer(0.3).timeout
+	if options.has("sit") and not _screenshot_busy and _nearest_bench() >= 0:
+		Net.c_sit.rpc_id(1, _nearest_bench())
+		_screenshot_busy = true
+		await get_tree().create_timer(2.5).timeout
+		yaw = _seat_yaw + PI  # look back at yourself sitting
 	if options.has("wardrobe") and not _screenshot_busy:
 		open_wardrobe()
 		_screenshot_busy = true
@@ -1211,6 +1261,10 @@ func _maybe_screenshot() -> void:
 			_screenshot_busy = true
 			await get_tree().create_timer(0.3).timeout
 	_screenshot_done = true
+	if _self_view:
+		print("[client] self clip %s on_floor=%s vy=%.2f" % [_self_view._clip, body.is_on_floor(), body.velocity.y])
+	for rid in remotes:
+		print("[client] remote %s clip %s" % [remotes[rid].display_name, remotes[rid].view._clip])
 	await RenderingServer.frame_post_draw
 	var err := get_viewport().get_texture().get_image().save_png(path)
 	print("[client] screenshot %s -> %s" % [path, error_string(err)])
@@ -1279,6 +1333,10 @@ func _on_key(key: Key) -> void:
 				request_talk(target)
 			elif _cat_in_reach() >= 0:
 				critters.pet(_cat_in_reach())
+			elif _nearest_bench() >= 0:
+				Net.c_sit.rpc_id(1, _nearest_bench())
+		KEY_J:
+			send_emote("dance")
 		KEY_G:
 			send_emote("wave")
 		KEY_H:
@@ -1347,6 +1405,11 @@ func _on_touch_action(id: String) -> void:
 				respond_incoming(latest, id == "accept")
 		"tram":
 			tram_action()
+		"sit":
+			if _nearest_bench() >= 0:
+				Net.c_sit.rpc_id(1, _nearest_bench())
+		"dance":
+			send_emote("dance")
 		"pet":
 			if _cat_in_reach() >= 0:
 				critters.pet(_cat_in_reach())
@@ -1440,6 +1503,7 @@ func _update_hud(delta: float) -> void:
 	FrameProfiler.add("hud.tram_ctx", t0)
 	if touch:
 		touch.set_context({"target": target > 0, "cat": target <= 0 and _cat_in_reach() >= 0, "talking_to_target": conversations.has(target),
+			"bench": target <= 0 and _nearest_bench() >= 0, "seated": body.has_meta("seat"),
 			"in_conversation": not conversations.is_empty(), "incoming": latest >= 0,
 			"tram_label": tram.get("label", ""), "tram_tint": tram.get("tint", Color("2e86de"))})
 	t0 = FrameProfiler.start()

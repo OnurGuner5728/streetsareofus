@@ -8,7 +8,7 @@ extends Node3D
 ## `hours_override` (0-24, local zone time) pins the clock for screenshots.
 
 const UPDATE_EVERY := 2.0
-const NIGHT_LIGHTS := 8
+const NIGHT_LIGHTS := 10
 const ZONE_UTC_OFFSET := 3.0  # Istanbul
 
 var latitude := 41.0
@@ -74,7 +74,8 @@ func setup(zone: ZoneData, lamps: PackedVector3Array, compatibility: bool) -> vo
 	apply_quality()
 	for i in NIGHT_LIGHTS:
 		var l := OmniLight3D.new()
-		l.omni_range = 16.0
+		l.omni_range = 20.0
+		l.omni_attenuation = 1.4
 		l.light_energy = 0.0
 		l.light_color = Color("ffc98a")
 		l.shadow_enabled = false
@@ -140,7 +141,7 @@ func update_lights(camera_pos: Vector3, delta: float) -> void:
 		l.visible = i < order.size() and i < GraphicsQuality.night_lights()
 		if l.visible:
 			l.global_position = order[i][1] - Vector3(0, 0.3, 0)
-			l.light_energy = 2.2 * night
+			l.light_energy = 3.2 * night
 
 
 func _apply(_unused: float) -> void:
@@ -162,7 +163,7 @@ func _apply(_unused: float) -> void:
 	# Overcast: a dim, diffuse sun, grey sky, more even light, no hard shadows.
 	var overcast := clampf((cloud - 0.35) / 0.65, 0.0, 1.0)
 	golden *= 1.0 - overcast
-	_base_sun = lerpf(1.35, 0.14, night) * (1.0 - 0.35 * golden * (1.0 - night)) * (1.0 - 0.75 * overcast)
+	_base_sun = lerpf(1.35, 0.3, night) * (1.0 - 0.35 * golden * (1.0 - night)) * (1.0 - 0.75 * overcast)
 	sun.light_energy = _base_sun
 	sun.shadow_enabled = GraphicsQuality.shadows() and overcast < 0.8
 	var grey_top := Color("8e959d").lerp(Color("5d6369"), rain)
@@ -172,9 +173,13 @@ func _apply(_unused: float) -> void:
 	_sky.ground_horizon_color = _sky.sky_horizon_color
 	_sky.ground_bottom_color = Color("0b0e12").lerp(Color("6b6f73"), 1.0 - night)
 	_sky.sun_curve = 0.15
-	_base_ambient = lerpf(0.95, 0.25, night) * (1.0 + 0.25 * overcast)
+	# Nights in a lit city are not black: a moonlit, bluish fill (sky light
+	# alone is nearly black at night) and a little more exposure.
+	_base_ambient = lerpf(0.95, 0.55, night) * (1.0 + 0.25 * overcast)
 	environment.ambient_light_energy = _base_ambient
-	environment.ambient_light_sky_contribution = lerpf(0.35, 0.6, overcast)
+	environment.ambient_light_color = Color("cfc8bc").lerp(Color("8d9cbd"), night)
+	environment.ambient_light_sky_contribution = lerpf(lerpf(0.35, 0.6, overcast), 0.12, night)
+	environment.tonemap_exposure = (0.9 if _compat else 1.0) * lerpf(1.0, 1.3, night)
 	environment.fog_light_color = _sky.sky_horizon_color.darkened(0.1)
 	environment.fog_density = GraphicsQuality.fog_density() + rain * 0.006 + fog * 0.03
 

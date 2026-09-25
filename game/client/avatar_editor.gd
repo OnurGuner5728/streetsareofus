@@ -13,8 +13,8 @@ const LABELS := {
 	"eyes": {"brown": "Kahverengi", "dark": "Koyu", "hazel": "Ela", "green": "Yeşil", "blue": "Mavi", "grey": "Gri"},
 	"brows": {"normal": "Normal", "thin": "İnce", "thick": "Kalın"},
 	"beard": {"none": "Yok", "stubble": "Kirli sakal", "mustache": "Bıyık", "goatee": "Keçi sakalı", "short": "Kısa sakal", "full": "Gür sakal"},
-	"hair": {"none": "Yok", "buzz": "Kazıtılmış", "short": "Kısa", "side": "Yandan ayrık", "curly": "Kıvırcık", "afro": "Afro",
-		"bob": "Küt", "long": "Uzun", "ponytail": "At kuyruğu", "bun": "Topuz", "braid": "Örgü"},
+	"hair": {"none": "Yok", "buzz": "Kazıtılmış", "short": "Kısa", "long": "Uzun", "bun": "Topuz", "curly": "Kıvırcık", "afro": "Afro"},
+	"body_type": {"male": "Erkek", "female": "Kadın"},
 	"top": {"tshirt": "Tişört", "longsleeve": "Uzun kollu", "shirt": "Gömlek", "polo": "Polo", "tank": "Atlet",
 		"hoodie": "Kapüşonlu", "sweater": "Kazak", "jacket": "Ceket", "coat": "Mont", "dress": "Elbise"},
 	"pattern": {"plain": "Düz", "stripes": "Çizgili", "two_tone": "İki renk"},
@@ -59,6 +59,7 @@ func _rebuild() -> void:
 	_tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	add_child(_tabs)
 	var body := _page("Beden")
+	_choice(body, "Beden", "appearance", "body_type", AvatarSpec.BODY_TYPES, LABELS.body_type)
 	for spec in SLIDERS:
 		_slider(body, spec[0], spec[1])
 	var note := Label.new()

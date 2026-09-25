@@ -3,7 +3,7 @@ extends RefCounted
 ## Constants shared by client and server. Bump PROTOCOL_VERSION on any
 ## change to RPC signatures or the binary snapshot/input layout.
 
-const PROTOCOL_VERSION := 3
+const PROTOCOL_VERSION := 4
 const CLIENT_BUILD := "0.3.0-alpha"
 const DEFAULT_PORT := 7000
 const DEFAULT_ZONE := "tr_istanbul_kadikoy_001"
@@ -43,7 +43,10 @@ const CHAT_MAX_LEN := 200
 const CHAT_BURST := 5
 const CHAT_REFILL_PER_SEC := 1.0
 const EMOTE_COOLDOWN := 1.0
-const EMOTES := ["wave", "nod"]
+const EMOTES := ["wave", "nod", "dance"]
+## Benches: how close you must be to sit down, and two seats per bench.
+const SIT_RANGE := 2.2
+const BENCH_SEATS := [-0.45, 0.45]
 const REQUEST_KINDS := ["talk"]
 const REPORT_REASONS := ["harassment", "hate", "spam", "impersonation", "other"]
 

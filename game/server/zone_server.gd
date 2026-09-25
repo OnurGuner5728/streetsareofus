@@ -41,6 +41,10 @@ class Player:
 	var riding := {}  # {line, vehicle, slot, boarded_at, stop_request}
 	var board_times: Array = []
 	var tram_hit_at := -INF
+	var last_input_at := 0.0  # server time of the last input packet
+	var seat := -1  # bench * 2 + side while sitting
+	var seat_yaw := 0.0
+	var joined_at := 0.0
 
 
 var zone: ZoneData
@@ -57,6 +61,7 @@ var tick := 0
 
 var _grid := {}  # Vector2i -> Array[int]
 var _last_save := 0.0
+var _seats := {}  # seat id -> peer
 var _stats := {"ticks": 0, "tick_us": 0, "tick_us_max": 0, "sim_us": 0, "sim_steps": 0, "idle_steps": 0, "dropped": 0, "gap_filled": 0, "snap_us": 0, "snap_bytes": 0, "snap_entities": 0, "snaps": 0, "trams_us": 0, "motor_us": 0, "props_us": 0, "at": 0.0}
 var _started_at := 0.0
 
@@ -132,6 +137,7 @@ func _on_peer_disconnected(peer: int) -> void:
 	if not players.has(peer):
 		return
 	var pl: Player = players[peer]
+	_release_seat(pl)
 	_save_location(pl)
 	players.erase(peer)
 	_dispatch(social.on_disconnect(peer))
@@ -141,7 +147,9 @@ func _on_peer_disconnected(peer: int) -> void:
 	pl.body.queue_free()
 	store.audit("leave", {"account": pl.account_id, "peer": peer})
 	store.flush()
-	log_line("%s left (%d online)" % [pl.display_name, players.size()])
+	# How long the player had been silent tells a timeout from a clean close.
+	log_line("%s left (%d online; in game %.0f s, last input %.1f s ago)" % [pl.display_name, players.size(),
+		now() - pl.joined_at, now() - pl.last_input_at])
 
 
 # --- join --------------------------------------------------------------------
@@ -171,6 +179,8 @@ func on_hello(peer: int, payload: Dictionary) -> void:
 	pl.display_name = display_name
 	pl.avatar = AvatarSpec.sanitize(payload.get("avatar"))
 	pl.blocked_accounts = store.blocked_by(account_id).duplicate()
+	pl.joined_at = now()
+	pl.last_input_at = now()
 	pl.body = PlayerMotor.make_body(pl.avatar)
 	pl.body.name = "Player_%d" % peer
 	add_child(pl.body)
@@ -261,6 +271,8 @@ func _reject(peer: int, reason: String) -> void:
 # --- simulation --------------------------------------------------------------
 
 func on_inputs(peer: int, data: PackedByteArray) -> void:
+	if players.has(peer):
+		(players[peer] as Player).last_input_at = now()
 	var pl: Player = players.get(peer)
 	if pl == null:
 		return
@@ -354,6 +366,8 @@ func _simulate(pl: Player) -> void:
 		pl.last_processed_seq = inp.seq
 		pl.input_credit -= 1.0
 		processed += 1
+	if pl.seat >= 0 and not pl.body.has_meta("seat"):
+		_release_seat(pl)  # stood up by moving
 	if processed > 0:
 		pl.starved_ticks = 0
 		return
@@ -401,7 +415,9 @@ func _send_snapshots() -> void:
 					flags |= SnapshotCodec.FLAG_SPRINT
 				if not other.riding.is_empty():
 					flags |= SnapshotCodec.FLAG_RIDING
-				entities.append({"id": other_id, "pos": other_pos, "yaw": other.yaw, "pitch": other.pitch,
+				if other.seat >= 0:
+					flags |= SnapshotCodec.FLAG_SITTING
+				entities.append({"id": other_id, "pos": other_pos, "yaw": other.seat_yaw if other.seat >= 0 else other.yaw, "pitch": other.pitch,
 					"speed": Vector2(other.body.velocity.x, other.body.velocity.z).length(), "flags": flags})
 		for known_id in pl.known.keys():
 			if not interested.has(known_id):
@@ -690,6 +706,43 @@ func on_report(peer: int, target: int, reason: String) -> void:
 	store.audit("report", {"id": incident, "reporter": a.account_id, "target": b.account_id})
 	_dispatch([SocialRules._notice(peer, "reported", incident)])
 	log_line("report %s: %s -> %s (%s)" % [incident, a.display_name, b.display_name, reason])
+
+
+## Sit on the nearest free seat of a bench next to the player.
+func on_sit(peer: int, bench: int) -> void:
+	var pl: Player = players.get(peer)
+	var benches: Array = StreetLayout.for_zone(zone).benches
+	if pl == null or not pl.riding.is_empty() or bench < 0 or bench >= benches.size():
+		return
+	var b: Dictionary = benches[bench]
+	var best := -1
+	var best_d := Protocol.SIT_RANGE
+	for side in Protocol.BENCH_SEATS.size():
+		var id: int = bench * 2 + side
+		if _seats.has(id) and _seats[id] != peer:
+			continue
+		var d := PlayerMotor.seat_origin(b, side).distance_to(pl.body.global_position)
+		if d < best_d:
+			best_d = d
+			best = side
+	if best < 0:
+		Net.s_notice.rpc_id(peer, "bench_full", "")
+		return
+	_release_seat(pl)
+	var origin := PlayerMotor.seat_origin(b, best)
+	PlayerMotor.sit(pl.body, origin)
+	pl.seat = bench * 2 + best
+	pl.seat_yaw = float(b.yaw)
+	_seats[pl.seat] = peer
+	Net.s_sat.rpc_id(peer, origin, pl.seat_yaw)
+
+
+func _release_seat(pl: Player) -> void:
+	if pl.seat >= 0:
+		_seats.erase(pl.seat)
+		pl.seat = -1
+	if pl.body and pl.body.has_meta("seat"):
+		pl.body.remove_meta("seat")
 
 
 func on_avatar(peer: int, raw: Dictionary) -> void:

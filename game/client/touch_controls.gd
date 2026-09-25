@@ -79,6 +79,10 @@ func _buttons() -> Array:
 		list.append({"id": "person", "label": "Kişi", "pos": Vector2(w - 140, h - 200), "r": 26.0})
 	elif _context.get("cat", false):
 		list.append({"id": "pet", "label": "Sev", "pos": Vector2(w - 62, h - 170), "r": 34.0, "tint": Color("d9893a")})
+	elif _context.get("bench", false):
+		list.append({"id": "sit", "label": "Otur", "pos": Vector2(w - 62, h - 170), "r": 34.0, "tint": Color("8a6d4b")})
+	if not _context.get("seated", false):
+		list.append({"id": "dance", "label": "Dans", "pos": Vector2(w - 300, h - 50), "r": 26.0})
 	if _context.get("in_conversation", false):
 		list.append({"id": "chat", "label": "Yaz", "pos": Vector2(w - 228, h - 130), "r": 30.0, "tint": Color("2f9e6f")})
 	var tram_label: String = _context.get("tram_label", "")

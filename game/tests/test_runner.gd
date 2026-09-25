@@ -14,7 +14,7 @@ func _ready() -> void:
 		test_store, test_spawn_picker, test_zone_load,
 		test_world_collision, test_motor_walks_and_is_blocked, test_replay_matches_realtime,
 		test_client_and_server_worlds_agree, test_step_up, test_tram_shoves_and_blocks, test_props, test_crowd,
-		test_terrain,
+		test_terrain, test_bench_sitting,
 		test_transit_network, test_transit_timetable, test_walking_routes, test_route_prefers_tram,
 	]
 	for t in tests:
@@ -97,6 +97,11 @@ func test_names() -> void:
 	check(AvatarSpec.sanitize_name("<script>") == "", "markup rejected")
 	check(AvatarSpec.sanitize_name("x".repeat(25)) == "", "too long")
 	check(AvatarSpec.sanitize_name(42) == "", "non-string rejected")
+	# Server addresses pasted into the menu (the phone link works in the app too).
+	check(Net.normalize_address(" https://a-b.trycloudflare.com/ ") == "wss://a-b.trycloudflare.com/game", "tunnel link -> wss")
+	check(Net.normalize_address("a-b.trycloudflare.com") == "wss://a-b.trycloudflare.com/game", "bare tunnel host -> wss")
+	check(Net.normalize_address("http://192.168.1.5:8080") == "ws://192.168.1.5:8080/game", "LAN page -> ws")
+	check(Net.normalize_address("192.168.1.5:7000") == "192.168.1.5:7000", "host:port stays ENet")
 
 
 func test_input_codec() -> void:
@@ -203,7 +208,7 @@ func test_social_conversation() -> void:
 	check(limited, "chat is rate limited")
 	check(rpcs(s.emote(1, "wave", 5.0), 2) == ["s_emote"], "emote reaches nearby")
 	check(s.emote(1, "wave", 5.2).is_empty(), "emote cooldown")
-	check(s.emote(1, "dance", 9.0).is_empty(), "unknown emote ignored")
+	check(s.emote(1, "cartwheel", 9.0).is_empty(), "unknown emote ignored")
 	fx = s.update(10.0, func(_a, _b): return 31.0)
 	check(rpcs(fx, 1) == ["s_conversation_close"] and rpcs(fx, 2) == ["s_conversation_close"], "walking away ends it")
 	check(not s.in_conversation(1, 2), "conversation gone")
@@ -850,3 +855,19 @@ func test_route_prefers_tram() -> void:
 	var walk_in: Dictionary = plan.legs[0]
 	check(float(walk_in.seconds) + 4.0 <= float(tram.depart) - (float(tram.depart) - 20.0) + 25.0,
 		"the plan leaves time to reach the stop")
+
+
+func test_bench_sitting() -> void:
+	var body := PlayerMotor.make_body(AvatarSpec.defaults())
+	add_child(body)
+	var bench := {"pos": Vector3(10, 2, 5), "yaw": 0.0}
+	var origin := PlayerMotor.seat_origin(bench, 0)
+	near(origin.z, 5.0 - 0.29, 0.001, "feet in front of the bench (it faces -Z)")
+	PlayerMotor.sit(body, origin)
+	for i in 10:
+		PlayerMotor.step(body, SnapshotCodec.quantize_input(i, 0, 0, 0.3, 0, 0))
+	check(body.has_meta("seat") and body.global_position.is_equal_approx(origin), "seated body stays put (no gravity, no drift)")
+	PlayerMotor.step(body, SnapshotCodec.quantize_input(11, 0, 1, 0, 0, 0))
+	check(not body.has_meta("seat"), "moving stands up")
+	check(body.global_position.distance_to(origin) > 0.0, "and walks off")
+	body.free()

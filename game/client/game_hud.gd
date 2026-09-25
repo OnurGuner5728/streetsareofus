@@ -18,11 +18,11 @@ signal wardrobe_changed(avatar: Dictionary)
 signal wardrobe_closed(save: bool, avatar: Dictionary)
 
 const HELP := """[b]Hareket[/b]  WASD · Shift koş · Space zıpla · Fare bak
-[b]Sosyal[/b]  bakıyorken:  E konuşma isteği · G el salla · H selam ver
+[b]Sosyal[/b]  bakıyorken:  E konuşma isteği · G el salla · H selam ver · J dans
           M sustur/aç · B engelle (iki kez) · R şikayet et
 [b]Gelen istek[/b]  Y kabul · N reddet (ya da hiçbir şey yapma)
 [b]Sohbet[/b]  Enter yaz · X sohbetten ayrıl
-[b]Şehir[/b]  Tab harita (dokun: rota çiz) · F tramvaya bin / durak iste / in · V kamera (tekerlek: uzaklık)
+[b]Şehir[/b]  Tab harita (dokun: rota çiz) · F tramvaya bin / durak iste / in · V kamera (tekerlek: uzaklık) · E bankın yanında: otur
           E kediyi sev · koşarak topa gir: şut · raylarda durma!
 F1 yardım · F3 ağ bilgisi · Esc menü (engellenenler, grafik, FPS)"""
 

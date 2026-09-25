@@ -37,6 +37,19 @@ static func make_body(avatar: Dictionary) -> CharacterBody3D:
 	return body
 
 
+## Where a seated body's feet go for a bench seat: a little in front of it
+## (the sitting animation keeps the hips 34 cm behind the feet).
+static func seat_origin(bench: Dictionary, side: int) -> Vector3:
+	var basis := Basis(Vector3.UP, float(bench.yaw))
+	return (bench.pos as Vector3) + basis * Vector3(Protocol.BENCH_SEATS[side], 0.0, -0.29)
+
+
+static func sit(body: CharacterBody3D, origin: Vector3) -> void:
+	body.set_meta("seat", origin)
+	body.global_position = origin
+	body.velocity = Vector3.ZERO
+
+
 ## Sizes the capsule for an avatar (clamped: looks never change how you play).
 static func fit_capsule(body: CharacterBody3D, avatar: Dictionary) -> void:
 	var col: CollisionShape3D = body.get_node("Capsule")
@@ -49,6 +62,14 @@ static func fit_capsule(body: CharacterBody3D, avatar: Dictionary) -> void:
 ## `input` is a quantized input dictionary from SnapshotCodec; its "wt" is
 ## the server tick at which trams are placed. Returns EVENT_* flags.
 static func step(body: CharacterBody3D, input: Dictionary, transit: TransitNetwork = null) -> int:
+	# Seated on a bench: stay put until the player moves or jumps. Server and
+	# client prediction both run this, so standing up is predicted exactly.
+	if body.has_meta("seat"):
+		if input.mx != 0 or input.my != 0 or int(input.buttons) & BUTTON_JUMP:
+			body.remove_meta("seat")
+		else:
+			body.velocity = Vector3.ZERO
+			return 0
 	var v := body.velocity
 	var grounded := is_grounded(body)
 	var buttons: int = input.buttons

@@ -30,10 +30,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 GAME = ROOT / "game"
 BUILD = ROOT / "build" / "web"
+APK = ROOT / "build" / "android" / "streetsareofus.apk"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bots import godot_binary  # noqa: E402
 
 MIME = {
+    ".apk": "application/vnd.android.package-archive",
     ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".wasm": "application/wasm",
     ".pck": "application/octet-stream", ".png": "image/png", ".svg": "image/svg+xml",
     ".json": "application/json", ".ico": "image/x-icon",
@@ -72,6 +74,8 @@ class WebHost:
                     await self._respond(writer, 400, b"WebSocket only")
                     return
                 await self._proxy(head, reader, writer)
+            elif method in ("GET", "HEAD") and path == "/streetsareofus.apk":
+                await self._apk(writer, method == "HEAD")
             elif method == "POST" and path == "/client-log":
                 await self._client_log(reader, writer, headers)
             elif method in ("GET", "HEAD"):
@@ -121,6 +125,22 @@ class WebHost:
         writer.write(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
         await writer.drain()
 
+    async def _apk(self, writer, head_only: bool) -> None:
+        """The Android app (tools/serve_web.py --apk builds it)."""
+        if not APK.is_file():
+            await self._respond(writer, 404, b"No Android build yet: run tools/serve_web.py --apk")
+            return
+        size = APK.stat().st_size
+        writer.write((f"HTTP/1.1 200 OK\r\nContent-Type: {MIME['.apk']}\r\nContent-Length: {size}\r\n"
+                      f"Content-Disposition: attachment; filename=\"streetsareofus.apk\"\r\n"
+                      f"Cache-Control: no-cache\r\nConnection: close\r\n\r\n").encode())
+        if not head_only:
+            with APK.open("rb") as f:
+                while chunk := f.read(1 << 20):
+                    writer.write(chunk)
+                    await writer.drain()
+        await writer.drain()
+
     async def _static(self, writer, path: str, head_only: bool, gzip_ok: bool) -> None:
         rel = path.lstrip("/") or "index.html"
         file = (self.root / rel).resolve()
@@ -162,6 +182,33 @@ def export_web() -> None:
         sys.exit("web export failed (export templates for this Godot version installed?)")
     size = sum(f.stat().st_size for f in BUILD.iterdir()) / 1e6
     print(f"web build ready in {BUILD} ({size:.0f} MB before compression)")
+
+
+def export_apk() -> None:
+    """Android build, signed with this machine's Android debug key (fine for
+    installing on your own phone; the key never enters the repository)."""
+    APK.parent.mkdir(parents=True, exist_ok=True)
+    keystore = Path.home() / ".android" / "debug.keystore"
+    env = dict(os.environ)
+    if keystore.is_file():
+        env.update({"GODOT_ANDROID_KEYSTORE_RELEASE_PATH": str(keystore),
+                    "GODOT_ANDROID_KEYSTORE_RELEASE_USER": "androiddebugkey",
+                    "GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD": "android"})
+    print("exporting Android build ...")
+    result = subprocess.run([godot_binary(), "--headless", "--path", str(GAME), "--export-release", "Android", str(APK)],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
+    if not APK.is_file() or APK.stat().st_mtime < time.time() - 600:
+        print("\n".join(l for l in (result.stdout + result.stderr).splitlines() if "ERROR" in l or "WARNING" in l))
+        sys.exit("Android export failed (Android templates, SDK and a JDK set in Godot's editor settings?)")
+    print(f"Android build ready: {APK} ({APK.stat().st_size / 1e6:.0f} MB) -> /streetsareofus.apk")
+
+
+def needs_apk() -> bool:
+    if not APK.is_file():
+        return True
+    built = APK.stat().st_mtime
+    watched = list(GAME.rglob("*.gd")) + [GAME / "project.godot", GAME / "export_presets.cfg"]
+    return any(p.stat().st_mtime > built for p in watched if ".godot" not in p.parts)
 
 
 def needs_export() -> bool:
@@ -253,10 +300,13 @@ def main() -> int:
     parser.add_argument("--export", action="store_true", help="re-export even if the build looks current")
     parser.add_argument("--lan", action="store_true", help="listen on all interfaces, not just localhost")
     parser.add_argument("--tunnel", action="store_true", help="public URL via a Cloudflare quick tunnel")
+    parser.add_argument("--apk", action="store_true", help="also build the Android app (served at /streetsareofus.apk)")
     args = parser.parse_args()
 
     if args.export or needs_export():
         export_web()
+    if args.apk and (args.export or needs_apk()):
+        export_apk()
     procs = [spawn("server", [godot_binary(), "--headless", "--path", str(GAME), "--", "--server",
                               "--transport=ws", f"--port={args.game_port}", f"--zone={args.zone}",
                               *(["--cluster"] if args.cluster else []),
