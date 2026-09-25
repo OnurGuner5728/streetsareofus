@@ -9,6 +9,8 @@ extends Node
 ## No arguments opens the menu.
 
 var _current: Node = null
+var _reconnects := 0
+const MAX_RECONNECTS := 3
 
 
 func _ready() -> void:
@@ -29,6 +31,8 @@ func _ready() -> void:
 		get_window().content_scale_size = Vector2i(854, 480)
 	if args.has("test"):
 		_run_tests()
+	elif args.has("avatar-gallery"):
+		_avatar_gallery(int(args.get("avatar-gallery", "1")), str(args.get("screenshot", "")))
 	elif args.has("server"):
 		_start_server(args)
 	elif args.has("connect"):
@@ -95,7 +99,9 @@ func _show_menu(message: String) -> void:
 	menu.play_requested.connect(_on_play_requested)
 
 
-func _on_play_requested(settings: Dictionary, host_locally: bool) -> void:
+func _on_play_requested(settings: Dictionary, host_locally: bool, reconnecting := false) -> void:
+	if not reconnecting:
+		_reconnects = 0
 	var address := str(settings.server)
 	if host_locally:
 		address = "127.0.0.1:%d" % Protocol.DEFAULT_PORT
@@ -107,6 +113,7 @@ func _on_play_requested(settings: Dictionary, host_locally: bool) -> void:
 		"address": address, "name": settings.name, "avatar": settings.avatar,
 		"spawn_mode": settings.spawn_mode, "mouse_sensitivity": settings.get("mouse_sensitivity", 0.0025),
 		"quality": settings.get("quality", "auto"), "show_fps": settings.get("show_fps", false),
+		"camera": settings.get("camera", "first"), "volume": settings.get("volume", "on"),
 		"account_id": identity.account_id, "account_secret": identity.account_secret,
 	})
 
@@ -124,7 +131,7 @@ func _start_client_from_args(args: Dictionary) -> void:
 		"account_id": identity.account_id, "account_secret": identity.account_secret,
 		"quit_after": float(args.get("quit-after", 0.0)),
 	}
-	for key in ["screenshot", "screenshot-after", "yaw", "pitch", "time", "tram-shot", "open-map", "route-to", "perf", "quality", "block-test", "look-npc", "look-sign"]:
+	for key in ["screenshot", "screenshot-after", "yaw", "pitch", "time", "tram-shot", "open-map", "route-to", "perf", "quality", "block-test", "look-npc", "look-sign", "camera", "wardrobe"]:
 		if args.has(key):
 			opts[key.replace("-", "_")] = args[key]
 	_start_game(opts)
@@ -143,6 +150,17 @@ func _on_game_finished(message: String) -> void:
 		print("[client] %s" % message)
 		get_tree().quit(1)
 		return
+	# A dropped connection (phone switched networks, tunnel hiccup): come back
+	# where you were, a few times, without a trip through the menu.
+	var game := _current as GameClient
+	if game and game.lost_connection and _reconnects < MAX_RECONNECTS and game.options.get("bot", "") == "":
+		_reconnects += 1
+		var settings := LocalProfile.load_settings()
+		settings.spawn_mode = "resume"
+		_show_menu("Bağlantı koptu; yeniden bağlanılıyor (%d/%d)…" % [_reconnects, MAX_RECONNECTS])
+		await get_tree().create_timer(2.0).timeout
+		_on_play_requested(settings, false, true)
+		return
 	Net.stop_local_server()
 	_show_menu(message)
 
@@ -150,17 +168,52 @@ func _on_game_finished(message: String) -> void:
 static func _random_avatar(seed_value: int) -> Dictionary:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = seed_value
-	var av := AvatarSpec.defaults()
-	for key in av.body:
-		av.body[key] = rng.randf()
-	av.appearance.skin = AvatarSpec.SKINS.keys()[rng.randi() % AvatarSpec.SKINS.size()]
-	av.appearance.hair = AvatarSpec.HAIR_STYLES[rng.randi() % AvatarSpec.HAIR_STYLES.size()]
-	av.appearance.hair_color = "#" + Color.from_hsv(rng.randf_range(0.02, 0.1), 0.6, rng.randf_range(0.1, 0.6)).to_html(false)
-	av.clothing.top = AvatarSpec.TOPS[rng.randi() % AvatarSpec.TOPS.size()]
-	av.clothing.bottom = AvatarSpec.BOTTOMS[rng.randi() % AvatarSpec.BOTTOMS.size()]
-	for key in ["top_color", "bottom_color", "shoes_color"]:
-		av.clothing[key] = "#" + Color.from_hsv(rng.randf(), rng.randf_range(0.2, 0.8), rng.randf_range(0.3, 0.9)).to_html(false)
-	return av
+	return AvatarSpec.random(rng)
+
+
+## Debug: six random avatars side by side (seeded), saved as a screenshot.
+func _avatar_gallery(seed_value: int, path: String) -> void:
+	var stage := Node3D.new()
+	_swap(stage)
+	var env := Environment.new()
+	env.background_mode = Environment.BG_COLOR
+	env.background_color = Color("24303e")
+	env.ambient_light_color = Color("8894a8")
+	env.ambient_light_energy = 0.7
+	env.tonemap_mode = Environment.TONE_MAPPER_AGX
+	var world_env := WorldEnvironment.new()
+	world_env.environment = env
+	stage.add_child(world_env)
+	var light := DirectionalLight3D.new()
+	light.rotation_degrees = Vector3(-35, 25, 0)
+	light.shadow_enabled = true
+	light.light_energy = 1.6
+	stage.add_child(light)
+	var floor_mesh := MeshInstance3D.new()
+	var plane := PlaneMesh.new()
+	plane.size = Vector2(20, 10)
+	floor_mesh.mesh = plane
+	stage.add_child(floor_mesh)
+	var rng := RandomNumberGenerator.new()
+	for i in 6:
+		rng.seed = seed_value * 100 + i
+		var view := AvatarView.new()
+		stage.add_child(view)
+		view.build(AvatarSpec.random(rng))
+		view.position = Vector3(-3.75 + i * 1.5, 0, 0)
+		view.rotation.y = PI + 0.35 * (i % 3 - 1)  # face the camera
+		view.animate(0.0, 0.016)
+	var cam := Camera3D.new()
+	cam.position = Vector3(0, 1.1, 5.2)
+	cam.fov = 50
+	stage.add_child(cam)
+	cam.make_current()
+	if path != "":
+		for k in 10:
+			await get_tree().process_frame
+		await RenderingServer.frame_post_draw
+		get_viewport().get_texture().get_image().save_png(path)
+		get_tree().quit()
 
 
 # --- tests -------------------------------------------------------------------

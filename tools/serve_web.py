@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import gzip
+import json
 import os
 import re
 import shutil
@@ -23,6 +24,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -37,6 +39,7 @@ MIME = {
     ".json": "application/json", ".ico": "image/x-icon",
 }
 COMPRESSIBLE = {".html", ".js", ".wasm", ".pck", ".json", ".svg"}
+CLIENT_LOG = ROOT / "build" / "client_logs.jsonl"
 
 
 class WebHost:
@@ -69,6 +72,8 @@ class WebHost:
                     await self._respond(writer, 400, b"WebSocket only")
                     return
                 await self._proxy(head, reader, writer)
+            elif method == "POST" and path == "/client-log":
+                await self._client_log(reader, writer, headers)
             elif method in ("GET", "HEAD"):
                 await self._static(writer, path, method == "HEAD", "gzip" in headers.get("accept-encoding", ""))
             else:
@@ -99,6 +104,22 @@ class WebHost:
                     dst.close()
 
         await asyncio.gather(pump(reader, up_writer), pump(up_reader, writer))
+
+    async def _client_log(self, reader, writer, headers: dict) -> None:
+        """Errors and lifecycle events the web page reports (see html/head_include
+        in game/export_presets.cfg), so a phone's crash is visible here. No IPs."""
+        length = min(int(headers.get("content-length", "0") or 0), 4096)
+        body = await asyncio.wait_for(reader.readexactly(length), 10) if length > 0 else b""
+        try:
+            entry = json.loads(body.decode("utf-8", "replace"))
+        except ValueError:
+            entry = {"k": "raw", "m": body[:500].decode("utf-8", "replace")}
+        line = json.dumps({"at": time.strftime("%H:%M:%S"), **entry}, ensure_ascii=False)
+        with CLIENT_LOG.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+        print(f"[client-log] {entry.get('k')}: {str(entry.get('m', ''))[:300]}", flush=True)
+        writer.write(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+        await writer.drain()
 
     async def _static(self, writer, path: str, head_only: bool, gzip_ok: bool) -> None:
         rel = path.lstrip("/") or "index.html"
@@ -148,7 +169,7 @@ def needs_export() -> bool:
     if not index.exists():
         return True
     built = index.stat().st_mtime
-    watched = list(GAME.rglob("*.gd")) + list(GAME.rglob("*.json")) + [GAME / "project.godot"]
+    watched = list(GAME.rglob("*.gd")) + list(GAME.rglob("*.json")) + [GAME / "project.godot", GAME / "export_presets.cfg"]
     return any(p.stat().st_mtime > built for p in watched if ".godot" not in p.parts)
 
 

@@ -28,7 +28,9 @@ Pilot bölge: **Kadıköy, İstanbul** (Bahariye / Söğütlüçeşme çevresi, 
 | Sustur / engelle / şikayet | Susturma yerel; engelleme kalıcı ve karşılıklı görünmezlik; şikayet olay numarası ve sohbet bağlamıyla kaydedilir |
 | **Engel kaldırma** | Menü → **Engellenenler**: engellediğin herkes (isim, tarih), iki dokunuşla **Engeli kaldır**. Karşı tarafa bildirim gitmez; birbirinizi bir sonraki snapshot'ta yeniden görürsünüz |
 | Hız sınırları | İstek bekleme süreleri, 3 retten sonra 60 sn, sohbet token-bucket, jest ve şikayet sınırları |
-| Avatar | Boy, kilo, kas, omuz, ten, saç, üst, alt, ayakkabı; ağda yalnızca ID ve parametre gider |
+| **Avatar** | Sekmeli editör (Beden / Yüz / Saç / Üst / Alt / Ayakkabı / Aksesuar) ve **Rastgele** düğmesi. Beden: boy, kilo, kas, omuz, göğüs, kalça, bacak boyu, baş. Yüz: 8 ten tonu, 4 yüz şekli, 6 göz rengi, kaş, 6 sakal/bıyık. 11 saç modeli (kazıtılmış, kısa, yandan ayrık, kıvırcık, afro, küt, uzun, at kuyruğu, topuz, örgü). 10 üst (tişört, uzun kollu, gömlek, polo, atlet, kapüşonlu, kazak, ceket, mont, elbise) düz / çizgili / iki renk; 6 alt (kot, kumaş pantolon, eşofman, şort, etek, uzun etek); 4 ayakkabı; kep, bere, fötr, başörtüsü, bandana; 3 gözlük; sırt / omuz / bez çanta; atkı. Her parçanın rengi seçilir. Diz ve dirsekten bükülen uzuvlar, nefes alma, koşarken öne eğilme. Ağda yalnızca ID ve parametre gider |
+| **Gardırop** | Oyun içinde Menü → **Görünüm (kıyafet)**: kendini ayna gibi karşıdan görerek değiştir, **Kaydet ve giy** ile herkes yeni halini görür (vazgeçersen hiçbir şey gitmez) |
+| **Kamera** | **V** (telefonda **Kamera** düğmesi) ya da Menü: **Birinci şahıs → Arkadan (omuz üstü) → Uzaktan**. Üçüncü şahısta kendi karakterini görürsün; fare tekerleği uzaklığı ayarlar, kamera duvara girmez (yay kolu). Seçim hatırlanır |
 | Görsel boy ≠ oyun boyu | 150–205 cm görsel; çarpışma kapsülü 155–195 cm'ye ve dar bir yarıçapa sabitlenir |
 | Kalıcılık | Hesap (ilk kullanımda güven), avatar, son konum, engellemeler, şikayetler, denetim logu |
 | Protokol sürümü | `PROTOCOL_VERSION` (şu an 3) ve zone sürümü eşleşmezse bağlantı reddedilir |
@@ -61,6 +63,7 @@ Pilot bölge: **Kadıköy, İstanbul** (Bahariye / Söğütlüçeşme çevresi, 
 | Dokular | Tamamı prosedürel shader: parke taşı, Arnavut kaldırımı, yamalı asfalt ve şerit çizgileri, kenar taşları, zebra, çim |
 | Mimari | Pencere tipleri binaya göre değişir, çerçeve, denizlik, kat bantları, dükkân camları, balkon, cumba, tente, çatı parapeti, su deposu, klima |
 | Tempo | Yürüme 2,4 m/s, koşu 5,2 m/s: şehir büyüklüğünü hissettirir, tramvay işe yarar |
+| Ses ayarı | Menü → **Ses: Açık / Kısık / Kapalı** (hatırlanır). Ayak sesleri yumuşak ve kısık; yürürken seyrek, koşarken sık |
 
 ### Fizik
 
@@ -129,6 +132,13 @@ ortamda ya da denemek için `--weather=off|clear|cloudy|rain|storm|fog|snow`.
 
 ### Telefondan oynamak
 
+Bağlantı koparsa istemci aynı hesapla, kaldığı yerden **kendiliğinden yeniden
+bağlanır** (3 deneme). Menüdeki **Bağlantıyı kes** iki dokunuş ister (yanlışlıkla
+çıkılmasın). Tarayıcıdaki hatalar, sekmenin arka plana geçmesi, sayfanın
+kapanması ve oturum sonu (süre, fps, kalite) sunucuya küçük bir kayıt olarak
+gelir: `build/client_logs.jsonl` ve konsolda `[client-log]` satırları (IP
+tutulmaz). "Oyun kapandı" gibi durumlar buradan incelenir.
+
 Tarayıcılar UDP kullanamadığı için telefon sürümü WebSocket ile konuşur. Tek
 komut web export'u alır (kaynak değiştiyse), WebSocket zone sunucusunu başlatır
 ve oyunu `http://127.0.0.1:8080` adresinde sunar. `/game` yolu oyun sunucusuna
@@ -148,11 +158,12 @@ Python'a gelen bağlantı izni vermesi gerekir. Web export'u için Godot'nun
 **web** export şablonları kurulu olmalı.
 
 Telefonda: sol başparmak joystick, sağ taraf sürükleyerek bakış, sağdaki
-düğmeler Zıpla / Koş / El salla / Selam; birine bakınca Konuş ve Kişi (sustur,
+düğmeler Zıpla / Koş / El salla / Selam, üstte Kamera ve Menü; birine bakınca Konuş ve Kişi (sustur,
 engelle, şikayet), sohbet açılınca Yaz ve Ayrıl, gelen istekte Kabul / Reddet,
 kedinin yanında Sev, tramvay yanında Bin / Durak iste / İn. Ekran yatay
 tutulmalı. Menüde "Tam ekran" adres çubuğunu gizler; oyun içi Menü'de
-Engellenenler, Grafik kalitesi ve FPS göstergesi var.
+Görünüm (kıyafet), Kamera, Ses, Engellenenler, Grafik kalitesi ve FPS göstergesi
+var.
 
 Masaüstü istemci de bir WebSocket sunucusuna bağlanabilir: sunucu alanına
 `ws://adres:port` yazmak yeter. Bir zone sunucusu tek transport konuşur
@@ -170,13 +181,14 @@ Masaüstü istemci de bir WebSocket sunucusuna bağlanabilir: sunucu alanına
 | M, B (iki kez), R + 1–5 | Sustur, engelle, şikayet et |
 | Tab | Büyük harita (dokun/tıkla: rota) |
 | F | Tramvaya bin / durak iste / in |
-| F1, F3, Esc | Yardım, ağ bilgisi, menü (Engellenenler, Grafik, FPS) |
+| V, fare tekerleği | Kamera: birinci şahıs / arkadan / uzaktan; üçüncü şahısta uzaklık |
+| F1, F3, Esc | Yardım, ağ bilgisi, menü (Görünüm, Kamera, Ses, Engellenenler, Grafik, FPS) |
 
 ## Testler
 
 ```bash
 "$GODOT" --headless --path game --import      # ilk seferde sınıf önbelleği için
-"$GODOT" --headless --path game -- --test     # 254 kontrol
+"$GODOT" --headless --path game -- --test     # 262 kontrol
 python -m unittest discover -s world-pipeline/tests   # 26 test
 python tools/bots.py smoke                    # 2 bot: tanış, konuş, yaz, el salla, engelle, engeli kaldır, kalıcılık
 python tools/bots.py smoke --transport ws     # aynısı WebSocket üzerinden
@@ -186,7 +198,9 @@ python tools/bots.py load --bots 20           # sunucu tick/bant genişliği ist
 
 Test sunucuları gerçek havayı çekmez (`--weather=clear`).
 
-Godot testleri şunları kapsar: avatar ve isim temizleme, ikili codec (input
+Godot testleri şunları kapsar: avatar ve isim temizleme (yeni alanlar, eski
+"kep" saçı, avatar değişince kapsülün sınırlar içinde yeniden boyutlanması),
+ikili codec (input
 dünya tick'i dahil, 16 bit sarma), nesne pozlarının santim/derece
 hassasiyetinde taşınması, tüm sosyal kurallar, kalıcılık ve engel kaldırma,
 spawn, zone yükleme, çarpışma, duvarın oyuncuyu durdurması, **replay'in gerçek

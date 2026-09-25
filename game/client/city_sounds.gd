@@ -36,7 +36,7 @@ func setup(game: GameClient) -> void:
 	_rng.seed = hash(game.display_name)
 	_ambient = _player2d(-16.0)
 	_rain = _player2d(-80.0)
-	_steps = _player2d(-14.0)
+	_steps = _player2d(-28.0)
 	_ui = _player2d(-8.0)
 	for i in 4:
 		var p := AudioStreamPlayer3D.new()
@@ -87,17 +87,20 @@ func chime() -> void:
 		_ui.play()
 
 
-## Called every frame with the local player's horizontal speed.
+## Called every frame with the local player's horizontal speed. A soft
+## step under the ambience: about 1.8 steps a second walking, 2.7 running.
 func footsteps(speed: float, grounded: bool, delta: float) -> void:
-	if not ready_to_play or not grounded or speed < 0.4:
+	if not ready_to_play or not grounded or speed < 0.6:
+		_step_phase = 0.6  # the first step lands soon after starting
 		return
-	var cadence := 1.6 + speed * 0.35  # steps per second
+	var running := speed > Protocol.WALK_SPEED + 0.5
+	var cadence := 2.7 if running else 1.8
 	_step_phase += delta * cadence
 	if _step_phase >= 1.0:
 		_step_phase -= 1.0
 		_steps.stream = _samples.step
-		_steps.pitch_scale = _rng.randf_range(0.85, 1.15) * (1.1 if speed > 3.5 else 1.0)
-		_steps.volume_db = -16.0 + minf(speed, 5.0)
+		_steps.pitch_scale = _rng.randf_range(0.9, 1.1)
+		_steps.volume_db = (-23.0 if running else -28.0) + _rng.randf_range(-1.5, 1.0)
 		_steps.play()
 
 
@@ -196,7 +199,7 @@ func _one_shot(sample: String, at: Vector3, db: float, pitch: float) -> void:
 # --- synthesis -----------------------------------------------------------------------
 
 func _generate() -> void:
-	var specs := [["step", 0.14], ["thump", 0.25], ["clang", 0.7], ["chime", 0.7], ["bell", 1.4], ["sparrow", 0.5], ["gull", 1.1],
+	var specs := [["step", 0.12], ["thump", 0.25], ["clang", 0.7], ["chime", 0.7], ["bell", 1.4], ["sparrow", 0.5], ["gull", 1.1],
 		["rumble", 2.0], ["ambient", 6.0], ["rain", 3.0], ["thunder", 3.5], ["purr", 1.8]]
 	for spec in specs:
 		var data := PackedFloat32Array()
@@ -218,8 +221,10 @@ func _fill(sound: String, out: PackedFloat32Array) -> void:
 		var s := 0.0
 		match sound:
 			"step":
-				lp += (_rng.randf_range(-1.0, 1.0) - lp) * 0.25
-				s = lp * exp(-t * 38.0) * 1.6
+				# A dull heel thud with a little scuff of grit on top.
+				lp += (_rng.randf_range(-1.0, 1.0) - lp) * 0.06
+				lp2 += (lp - lp2) * 0.3
+				s = sin(TAU * 75.0 * t) * exp(-t * 55.0) * 0.6 + lp2 * exp(-t * 30.0) * 1.1
 			"thump":
 				lp += (_rng.randf_range(-1.0, 1.0) - lp) * 0.08
 				s = (sin(TAU * 95.0 * t) * 0.7 + lp * 1.5) * exp(-t * 22.0)

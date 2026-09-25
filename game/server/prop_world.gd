@@ -14,6 +14,9 @@ const RESET_AFTER := 300.0
 const RESET_CLEAR := 25.0
 const PLAYER_RADIUS := 0.32
 const BALL_RADIUS := 0.11
+## Grass and asphalt slow a rolling ball (m/s²); more than gravity pulls it
+## down a 10 % slope, so balls come to rest on Kadıköy's hills.
+const ROLL_RESIST := 1.2
 
 var layout: PropLayout
 var transit: TransitNetwork
@@ -202,6 +205,8 @@ func track(tick: int, players: Array) -> void:
 	for id in _awake.keys():
 		var b: RigidBody3D = bodies[id]
 		_pos[id] = b.global_position
+		if layout.props[id].kind == "ball":
+			_roll(b)
 		_last_active[id] = tick
 		_displaced[id] = true
 		_rest_since[id] = now
@@ -221,6 +226,21 @@ func track(tick: int, players: Array) -> void:
 				break
 		if not near:
 			_send_home(id, tick)
+
+
+func _roll(b: RigidBody3D) -> void:
+	var p := b.global_position
+	if p.y - transit.terrain.height(p.x, p.z) > BALL_RADIUS + 0.06:
+		return  # in the air
+	# As an impulse, so it adds to (never cancels) a kick given this tick,
+	# which the body's velocity does not show until the physics step.
+	var v := b.linear_velocity
+	var flat := Vector3(v.x, 0.0, v.z)
+	var speed := flat.length()
+	if speed < 0.001:
+		return
+	var slow := speed if speed < 0.06 else minf(speed, ROLL_RESIST * Protocol.DT)
+	b.apply_central_impulse(-flat / speed * slow * b.mass)
 
 
 func _send_home(id: int, tick: int) -> void:

@@ -29,15 +29,21 @@ static func make_body(avatar: Dictionary) -> CharacterBody3D:
 	body.collision_mask = Protocol.LAYER_WORLD  # players never block each other
 	body.floor_snap_length = 0.3
 	body.floor_max_angle = deg_to_rad(50.0)
-	var shape := CapsuleShape3D.new()
-	shape.height = AvatarSpec.gameplay_height(avatar)
-	shape.radius = AvatarSpec.capsule_radius(avatar)
 	var col := CollisionShape3D.new()
 	col.name = "Capsule"
-	col.shape = shape
-	col.position.y = shape.height / 2.0  # body origin sits at the feet
+	col.shape = CapsuleShape3D.new()
 	body.add_child(col)
+	fit_capsule(body, avatar)
 	return body
+
+
+## Sizes the capsule for an avatar (clamped: looks never change how you play).
+static func fit_capsule(body: CharacterBody3D, avatar: Dictionary) -> void:
+	var col: CollisionShape3D = body.get_node("Capsule")
+	var shape: CapsuleShape3D = col.shape
+	shape.height = AvatarSpec.gameplay_height(avatar)
+	shape.radius = AvatarSpec.capsule_radius(avatar)
+	col.position.y = shape.height / 2.0  # body origin sits at the feet
 
 
 ## `input` is a quantized input dictionary from SnapshotCodec; its "wt" is

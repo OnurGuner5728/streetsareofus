@@ -44,7 +44,7 @@ func setup(entity_id: int, info: Dictionary) -> void:
 
 
 func set_avatar(new_avatar: Dictionary) -> void:
-	view.build(new_avatar)
+	view.build(new_avatar, GraphicsQuality.level > GraphicsQuality.LOW)
 	avatar = view.avatar
 	_label.position.y = view.visual_height + 0.25
 	_bubble.position.y = view.visual_height + 0.55

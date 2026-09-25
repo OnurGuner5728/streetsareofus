@@ -11,13 +11,18 @@ signal blocked_list_requested
 signal unblock_requested(account_id: String)
 signal quality_requested(key: String)
 signal fps_toggled(show: bool)
+signal camera_requested
+signal volume_requested
+signal wardrobe_requested
+signal wardrobe_changed(avatar: Dictionary)
+signal wardrobe_closed(save: bool, avatar: Dictionary)
 
 const HELP := """[b]Hareket[/b]  WASD · Shift koş · Space zıpla · Fare bak
 [b]Sosyal[/b]  bakıyorken:  E konuşma isteği · G el salla · H selam ver
           M sustur/aç · B engelle (iki kez) · R şikayet et
 [b]Gelen istek[/b]  Y kabul · N reddet (ya da hiçbir şey yapma)
 [b]Sohbet[/b]  Enter yaz · X sohbetten ayrıl
-[b]Şehir[/b]  Tab harita (dokun: rota çiz) · F tramvaya bin / durak iste / in
+[b]Şehir[/b]  Tab harita (dokun: rota çiz) · F tramvaya bin / durak iste / in · V kamera (tekerlek: uzaklık)
           E kediyi sev · koşarak topa gir: şut · raylarda durma!
 F1 yardım · F3 ağ bilgisi · Esc menü (engellenenler, grafik, FPS)"""
 
@@ -47,6 +52,10 @@ var _blocked_rows: VBoxContainer
 var _quality_button: Button
 var _fps_button: Button
 var _quality_key := "auto"
+var _camera_button: Button
+var _volume_button: Button
+var _wardrobe: PanelContainer
+var _wardrobe_editor: AvatarEditor
 var touch_mode := false
 
 const REPORT_LABELS := [["harassment", "Taciz"], ["hate", "Nefret söylemi"], ["spam", "Spam"], ["impersonation", "Taklit"], ["other", "Diğer"]]
@@ -147,15 +156,25 @@ func _ready() -> void:
 	_pause.visible = false
 	root.add_child(_pause)
 	var box := VBoxContainer.new()
-	_place(box, Control.PRESET_CENTER, Vector2(-130, -140))
+	_place(box, Control.PRESET_CENTER, Vector2(-130, -205))
 	box.custom_minimum_size = Vector2(260, 0)
 	box.add_theme_constant_override("separation", 6)
 	_pause.add_child(box)
 	_menu_button(box, "Devam et", resume_requested.emit)
+	_menu_button(box, "Görünüm (kıyafet)", wardrobe_requested.emit)
+	_camera_button = _menu_button(box, "Kamera: Birinci şahıs", camera_requested.emit)
+	_volume_button = _menu_button(box, "Ses: Açık", volume_requested.emit)
 	_menu_button(box, "Engellenenler", blocked_list_requested.emit)
 	_quality_button = _menu_button(box, "", _cycle_quality)
 	_fps_button = _menu_button(box, "", func(): set_fps_visible(not _fps.visible); fps_toggled.emit(_fps.visible))
-	_menu_button(box, "Bağlantıyı kes", disconnect_requested.emit)
+	# Two taps, so a stray touch on a phone never ends the session.
+	var leave := _menu_button(box, "Bağlantıyı kes", func(): pass)
+	leave.pressed.connect(func():
+		if leave.text == "Bağlantıyı kes":
+			leave.text = "Emin misin? Tekrar dokun"
+			get_tree().create_timer(3.0).timeout.connect(func(): leave.text = "Bağlantıyı kes")
+		else:
+			disconnect_requested.emit())
 	_build_person_menu(root)
 	_build_blocked_panel(root)
 	_fps = _label(root, 13, Control.PRESET_TOP_LEFT, Vector2(16, 58))
@@ -270,6 +289,58 @@ func is_blocked_panel_open() -> bool:
 	return _blocked.visible
 
 
+func set_camera_name(text: String) -> void:
+	_camera_button.text = "Kamera: " + text
+
+
+func set_volume_name(text: String) -> void:
+	_volume_button.text = "Ses: " + text
+
+
+## The in-game wardrobe: the avatar editor on the right, you on the left.
+func open_wardrobe(current: Dictionary) -> void:
+	if _wardrobe:
+		_wardrobe.queue_free()
+	_wardrobe = PanelContainer.new()
+	_wardrobe.set_anchors_preset(Control.PRESET_RIGHT_WIDE)
+	_wardrobe.offset_left = -minf(440.0, get_viewport().get_visible_rect().size.x * 0.6)
+	_wardrobe.offset_top = 8
+	_wardrobe.offset_bottom = -30  # above the attribution line
+	_wardrobe.offset_right = -8
+	get_child(0).add_child(_wardrobe)
+	var box := VBoxContainer.new()
+	_wardrobe.add_child(box)
+	_wardrobe_editor = AvatarEditor.new()
+	_wardrobe_editor.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	box.add_child(_wardrobe_editor)
+	_wardrobe_editor.setup(current)
+	_wardrobe_editor.changed.connect(func(av: Dictionary): wardrobe_changed.emit(av))
+	var row := HBoxContainer.new()
+	box.add_child(row)
+	_menu_button(row, "Vazgeç", func(): close_wardrobe(false))
+	_menu_button(row, "Kaydet ve giy", func(): close_wardrobe(true))
+
+
+func close_wardrobe(save: bool) -> void:
+	if _wardrobe == null:
+		return
+	var chosen := _wardrobe_editor.avatar
+	_wardrobe.queue_free()
+	_wardrobe = null
+	wardrobe_closed.emit(save, chosen)
+
+
+func is_wardrobe_open() -> bool:
+	return _wardrobe != null
+
+
+## How much of the screen width the wardrobe panel covers (0 when closed).
+func wardrobe_fraction() -> float:
+	if _wardrobe == null:
+		return 0.0
+	return absf(_wardrobe.offset_left) / maxf(1.0, get_viewport().get_visible_rect().size.x)
+
+
 func set_quality_key(key: String) -> void:
 	_quality_key = key
 	_quality_button.text = "Grafik: %s" % GraphicsQuality.NAMES[GraphicsQuality.from_key(key)]
@@ -312,7 +383,7 @@ func close_person_menu() -> void:
 
 
 func is_modal_open() -> bool:
-	return _person.visible or _pause.visible or _blocked.visible
+	return _person.visible or _pause.visible or _blocked.visible or _wardrobe != null
 
 
 func _on_block_pressed() -> void:

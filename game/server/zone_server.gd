@@ -698,11 +698,7 @@ func on_avatar(peer: int, raw: Dictionary) -> void:
 		return
 	pl.avatar_changed_at = now()
 	pl.avatar = AvatarSpec.sanitize(raw)
-	var capsule: CollisionShape3D = pl.body.get_node("Capsule")
-	var shape: CapsuleShape3D = capsule.shape
-	shape.height = AvatarSpec.gameplay_height(pl.avatar)
-	shape.radius = AvatarSpec.capsule_radius(pl.avatar)
-	capsule.position.y = shape.height / 2.0
+	PlayerMotor.fit_capsule(pl.body, pl.avatar)
 	store.update_profile(pl.account_id, pl.display_name, pl.avatar)
 	Net.s_avatar.rpc_id(peer, peer, pl.avatar)
 	for other in players.values():

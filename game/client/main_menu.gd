@@ -5,10 +5,6 @@ extends Control
 signal play_requested(settings: Dictionary, host_locally: bool)
 
 const SPAWN_MODES := [["social", "Birileriyle karşılaşabileceğim bir yer"], ["random", "Tamamen rastgele bir yer"], ["resume", "Kaldığım yerden devam"]]
-const HAIR_LABELS := {"none": "Yok", "short": "Kısa", "long": "Uzun", "bun": "Topuz", "cap": "Şapka"}
-const TOP_LABELS := {"tshirt": "Tişört", "hoodie": "Kapüşonlu", "jacket": "Ceket"}
-const BOTTOM_LABELS := {"jeans": "Kot", "trousers": "Kumaş pantolon", "shorts": "Şort", "skirt": "Etek"}
-const BODY_SLIDERS := [["height", "Boy"], ["weight", "Kilo"], ["muscle", "Kas"], ["shoulders", "Omuz"]]
 
 var settings := {}
 var _name: LineEdit
@@ -17,7 +13,6 @@ var _zone: OptionButton = null
 var _spawn: OptionButton
 var _status: Label
 var _preview: AvatarView
-var _height_label: Label
 var _zones := PackedStringArray()
 
 
@@ -138,6 +133,11 @@ func _build() -> void:
 	var light := DirectionalLight3D.new()
 	light.rotation_degrees = Vector3(-30, 30, 0)
 	stage.add_child(light)
+	var fill := DirectionalLight3D.new()
+	fill.rotation_degrees = Vector3(-10, -140, 0)
+	fill.light_energy = 0.45
+	fill.light_color = Color("c9d8ff")
+	stage.add_child(fill)
 	var cam := Camera3D.new()
 	cam.position = Vector3(0, 1.05, 4.2)
 	cam.fov = 34
@@ -145,64 +145,16 @@ func _build() -> void:
 	_preview = AvatarView.new()
 	stage.add_child(_preview)
 
-	# Right: avatar controls.
-	var right := VBoxContainer.new()
-	right.custom_minimum_size = Vector2(320, 0)
-	right.add_theme_constant_override("separation", 6)
-	columns.add_child(right)
-	var avatar_title := Label.new()
-	avatar_title.text = "Görünüm"
-	avatar_title.add_theme_font_size_override("font_size", 24)
-	right.add_child(avatar_title)
-	var av: Dictionary = settings.avatar
-	for spec in BODY_SLIDERS:
-		var key: String = spec[0]
-		var row := HBoxContainer.new()
-		right.add_child(row)
-		var label := Label.new()
-		label.text = spec[1]
-		label.custom_minimum_size = Vector2(110, 0)
-		row.add_child(label)
-		if key == "height":
-			_height_label = label
-		var slider := HSlider.new()
-		slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		slider.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-		slider.min_value = 0.0
-		slider.max_value = 1.0
-		slider.step = 0.01
-		slider.value = float(av.body[key])
-		slider.value_changed.connect(func(v): _set_avatar("body", key, v))
-		row.add_child(slider)
-	var skins := AvatarSpec.SKINS.keys()
-	var skin_row := HBoxContainer.new()
-	right.add_child(skin_row)
-	var skin_opt := _option(skin_row, "Ten", skins, str(av.appearance.skin))
-	skin_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	for i in skins.size():
-		skin_opt.set_item_text(i, "Ton %d" % (i + 1))
-	skin_opt.item_selected.connect(func(i): _set_avatar("appearance", "skin", skins[i]))
-	_choice_with_color(right, "Saç", AvatarSpec.HAIR_STYLES, HAIR_LABELS, "appearance", "hair", "hair_color")
-	_choice_with_color(right, "Üst", AvatarSpec.TOPS, TOP_LABELS, "clothing", "top", "top_color")
-	_choice_with_color(right, "Alt", AvatarSpec.BOTTOMS, BOTTOM_LABELS, "clothing", "bottom", "bottom_color")
-	var shoes_row := HBoxContainer.new()
-	var shoes_label := Label.new()
-	shoes_label.text = "Ayakkabı"
-	shoes_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	shoes_row.add_child(shoes_label)
-	var shoes := ColorPickerButton.new()
-	shoes.color = Color(str(av.clothing.shoes_color))
-	shoes.edit_alpha = false
-	shoes.custom_minimum_size = Vector2(72, 34)
-	shoes.color_changed.connect(func(c): _set_avatar("clothing", "shoes_color", "#" + c.to_html(false)))
-	shoes_row.add_child(shoes)
-	right.add_child(shoes_row)
-	var note := Label.new()
-	note.text = "Boy ve kilo yalnızca görünüştür; oyun içi çarpışma ve göz yüksekliği herkes için dar bir aralıkta tutulur."
-	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	note.add_theme_font_size_override("font_size", 12)
-	note.modulate = Color("8792a0")
-	right.add_child(note)
+	# Right: every avatar option, in tabs.
+	var editor := AvatarEditor.new()
+	editor.custom_minimum_size = Vector2(340, 0)
+	editor.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	editor.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	columns.add_child(editor)
+	editor.setup(settings.avatar)
+	editor.changed.connect(func(av: Dictionary):
+		settings.avatar = av
+		_refresh_preview())
 
 
 func _process(delta: float) -> void:
@@ -211,35 +163,10 @@ func _process(delta: float) -> void:
 		_preview.animate(0.0, delta)
 
 
-## A style dropdown and its colour on one row, to keep the column short.
-func _choice_with_color(parent: Control, title: String, ids: Array, labels: Dictionary, group: String, key: String, color_key: String) -> void:
-	var av: Dictionary = settings.avatar
-	var row := HBoxContainer.new()
-	var opt := _option(row, title, ids, str(av[group][key]))
-	opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	for i in ids.size():
-		opt.set_item_text(i, labels.get(ids[i], ids[i]))
-	opt.item_selected.connect(func(i): _set_avatar(group, key, ids[i]))
-	var picker := ColorPickerButton.new()
-	picker.tooltip_text = title + " rengi"
-	picker.color = Color(str(av[group][color_key]))
-	picker.edit_alpha = false
-	picker.custom_minimum_size = Vector2(72, 34)
-	picker.color_changed.connect(func(c): _set_avatar(group, color_key, "#" + c.to_html(false)))
-	row.add_child(picker)
-	parent.add_child(row)
-
-
-func _set_avatar(group: String, key: String, value: Variant) -> void:
-	settings.avatar[group][key] = value
-	_refresh_preview()
-
-
 func _refresh_preview() -> void:
 	settings.avatar = AvatarSpec.sanitize(settings.avatar)
 	_preview.build(settings.avatar)
 	_preview.position.y = -0.05 - (AvatarSpec.visual_height(settings.avatar) - 1.7) * 0.5
-	_height_label.text = "Boy %d cm" % roundi(AvatarSpec.visual_height(settings.avatar) * 100.0)
 
 
 func _on_play(host_locally: bool) -> void:

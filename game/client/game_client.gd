@@ -11,6 +11,12 @@ const MAX_PENDING_INPUTS := 90
 const SNAP_CORRECTION_ABOVE := 3.0
 const CORRECTION_DECAY := 10.0
 const MAX_TICKS_PER_FRAME := 2
+## First person, or following behind (close, over the shoulder / far).
+const CAMERA_MODES := ["first", "near", "far"]
+const CAMERA_NAMES := {"first": "Birinci şahıs", "near": "Arkadan", "far": "Uzaktan"}
+const CAMERA_DISTANCE := {"near": 2.4, "far": 5.5}
+const VOLUMES := {"on": 0.0, "low": -10.0, "off": -80.0}
+const VOLUME_NAMES := {"on": "Açık", "low": "Kısık", "off": "Kapalı"}
 
 const NOTICES := {
 	"too_far": "Konuşma isteği için daha yakına gel (4 m).",
@@ -104,6 +110,12 @@ var _step_visual := 0.0  # eases the camera up kerbs and platforms
 var _flashing := false
 var _early_weather := {}
 var _early_props := PackedByteArray()
+var camera_mode := "first"
+var _cam_dist := 0.0
+var _cam_zoom := 1.0
+var _self_view: AvatarView  # you, seen from behind or in the wardrobe
+var _wardrobe_open := false
+var volume := "on"
 var _shake := 0.0
 var _tram_hit_at := -INF
 var _tram_warned_at := -INF
@@ -154,6 +166,9 @@ func _finish(message: String) -> void:
 		return
 	_finished = true
 	log_line("finished: %s" % message)
+	if bot == null:
+		ClientLog.event("finished", "%s (in game %.0f s, fps %d, quality %s)" % [message,
+			now() - _joined_at if joined else 0.0, Engine.get_frames_per_second(), GraphicsQuality.NAMES[GraphicsQuality.level]])
 	joined = false
 	set_physics_process(false)
 	set_process(false)
@@ -178,7 +193,13 @@ func _on_connection_failed() -> void:
 	_finish("Sunucuya bağlanılamadı.")
 
 
+## True when the session ended because the connection dropped (main.gd
+## then reconnects by itself).
+var lost_connection := false
+
+
 func _on_server_disconnected() -> void:
+	lost_connection = joined
 	_finish("Sunucu bağlantısı koptu.")
 
 
@@ -260,6 +281,16 @@ func on_welcome(info: Dictionary) -> void:
 		add_child(camera)
 		camera.make_current()
 		apply_quality(GraphicsQuality.level)
+		if bot == null:
+			_self_view = AvatarView.new()
+			_self_view.name = "Self"
+			_self_view.top_level = true
+			_self_view.visible = false
+			add_child(_self_view)
+			_self_view.build(avatar)
+			var wanted := str(options.get("camera", "first"))
+			camera_mode = wanted if CAMERA_MODES.has(wanted) else "first"
+			set_volume(str(options.get("volume", "on")))
 		crowd_view.setup(self)
 		critters.setup(self)
 		if bot == null:
@@ -277,6 +308,11 @@ func on_welcome(info: Dictionary) -> void:
 				settings.show_fps = show
 				LocalProfile.save_settings(settings))
 			hud.set_quality_key(GraphicsQuality.key_of(_quality_setting))
+			hud.camera_requested.connect(cycle_camera)
+			hud.volume_requested.connect(cycle_volume)
+			hud.wardrobe_requested.connect(open_wardrobe)
+			hud.wardrobe_changed.connect(_on_wardrobe_changed)
+			hud.wardrobe_closed.connect(_on_wardrobe_closed)
 			hud.set_fps_visible(bool(options.get("show_fps", false)))
 			if _touch_mode:
 				hud.apply_touch_layout()
@@ -315,6 +351,8 @@ func on_welcome(info: Dictionary) -> void:
 	_joined_at = now()
 	if loading:
 		loading.queue_free()
+	if bot == null:
+		ClientLog.event("joined", "%s as %s, quality %s" % [zone.zone_id, display_name, GraphicsQuality.NAMES[GraphicsQuality.level]])
 	# Messages that arrived while the city was being built.
 	if not _early_weather.is_empty():
 		on_weather(_early_weather)
@@ -391,6 +429,10 @@ func on_avatar(id: int, new_avatar: Dictionary) -> void:
 	if id == my_id:
 		avatar = new_avatar
 		_eye_height = AvatarSpec.eye_height(avatar)
+		if body:
+			PlayerMotor.fit_capsule(body, avatar)
+		if _self_view and not _wardrobe_open:
+			_self_view.build(avatar)
 	elif remotes.has(id):
 		remotes[id].set_avatar(new_avatar)
 
@@ -456,6 +498,8 @@ func on_emote(from_id: int, kind: String) -> void:
 		return
 	if remotes.has(from_id):
 		remotes[from_id].view.play_emote(kind)
+	elif from_id == my_id and _self_view:
+		_self_view.play_emote(kind)
 	if from_id != my_id:
 		log_line("%s did %s" % [_name_of(from_id), kind])
 		_notice("%s %s." % [_name_of(from_id), "el salladı" if kind == "wave" else "selam verdi"])
@@ -800,15 +844,7 @@ func _process(delta: float) -> void:
 		yaw = wrapf(yaw - look.x, -PI, PI)
 		pitch = clampf(pitch - look.y, -1.45, 1.45)
 	if camera:
-		# A little walking sway and a wider view when running.
-		var speed := Vector2(body.velocity.x, body.velocity.z).length() if riding.is_empty() else 0.0
-		_bob_phase = fmod(_bob_phase + delta * (1.5 + speed * 2.2), TAU)
-		var bob := sin(_bob_phase * 2.0) * 0.03 * clampf(speed / Protocol.WALK_SPEED, 0.0, 1.5)
-		_shake = maxf(0.0, _shake - delta * 1.5)
-		var jolt := Vector3(sin(now() * 71.0), sin(now() * 53.0), 0.0) * 0.05 * _shake
-		camera.global_position = cam_pos + Vector3(0, bob, 0)
-		camera.rotation = Vector3(pitch + jolt.y, yaw + jolt.x, sin(_bob_phase) * 0.004 * speed)
-		camera.fov = lerpf(camera.fov, 75.0 + (7.0 if speed > Protocol.WALK_SPEED + 0.5 else 0.0), 1.0 - exp(-6.0 * delta))
+		_update_camera(render_pos, cam_pos, delta)
 	t0 = FrameProfiler.start()
 	if sky:
 		sky.update_lights(cam_pos, delta)
@@ -890,6 +926,119 @@ func _perf_probe(delta: float) -> void:
 	_perf = {"frames": 0, "time": 0.0, "worst": 0.0, "at": now()}
 
 
+## First person with a little walking sway, or a follow camera on a spring
+## arm (it never ends up inside a wall), or the wardrobe's mirror view.
+func _update_camera(render_pos: Vector3, eye: Vector3, delta: float) -> void:
+	var speed := Vector2(body.velocity.x, body.velocity.z).length() if riding.is_empty() else 0.0
+	_shake = maxf(0.0, _shake - delta * 1.5)
+	var jolt := Vector3(sin(now() * 71.0), sin(now() * 53.0), 0.0) * 0.05 * _shake
+	var third := _self_view != null and (camera_mode != "first" or _wardrobe_open)
+	if _self_view:
+		_self_view.visible = third
+		if third:
+			_self_view.global_position = render_pos
+			_self_view.rotation.y = yaw
+			_self_view.animate(speed, delta, pitch)
+	if not third:
+		_bob_phase = fmod(_bob_phase + delta * (1.5 + speed * 2.2), TAU)
+		var bob := sin(_bob_phase * 2.0) * 0.03 * clampf(speed / Protocol.WALK_SPEED, 0.0, 1.5)
+		camera.global_position = eye + Vector3(0, bob, 0)
+		camera.rotation = Vector3(pitch + jolt.y, yaw + jolt.x, sin(_bob_phase) * 0.004 * speed)
+		camera.fov = lerpf(camera.fov, 75.0 + (7.0 if speed > Protocol.WALK_SPEED + 0.5 else 0.0), 1.0 - exp(-6.0 * delta))
+		camera.h_offset = 0.0
+		_cam_dist = 0.0
+		return
+	var pivot: Vector3
+	var back: Vector3
+	var want: float
+	if _wardrobe_open:
+		# In front of yourself, a little to the side: a mirror.
+		pivot = render_pos + Vector3(0, _self_view.visual_height * 0.55, 0)
+		back = Basis(Vector3.UP, yaw + 0.35) * Vector3.FORWARD
+		want = 2.6
+	else:
+		var side := 0.35 if camera_mode == "near" else 0.0
+		pivot = eye + Basis(Vector3.UP, yaw) * Vector3(side, 0.2, 0)
+		back = Basis.from_euler(Vector3(pitch, yaw, 0)) * Vector3.BACK
+		want = float(CAMERA_DISTANCE[camera_mode]) * _cam_zoom
+	# Spring arm: stop in front of walls; pull in fast, ease back out.
+	var reach := want
+	var ray := PhysicsRayQueryParameters3D.create(pivot, pivot + back * (want + 0.3), Protocol.LAYER_WORLD)
+	var hit := get_world_3d().direct_space_state.intersect_ray(ray)
+	if not hit.is_empty():
+		reach = maxf(0.25, pivot.distance_to(hit.position) - 0.3)
+	_cam_dist = lerpf(_cam_dist, reach, 1.0 - exp(-(20.0 if reach < _cam_dist else 5.0) * delta))
+	camera.global_position = pivot + back * _cam_dist
+	camera.h_offset = 0.0
+	if _wardrobe_open:
+		camera.look_at(pivot, Vector3.UP)
+		# Keep yourself in the free part of the screen, left of the panel.
+		var view := get_viewport().get_visible_rect().size
+		camera.h_offset = hud.wardrobe_fraction() * _cam_dist * tan(deg_to_rad(camera.fov * 0.5)) * view.x / maxf(1.0, view.y)
+	else:
+		camera.rotation = Vector3(pitch + jolt.y, yaw + jolt.x, 0.0)
+	camera.fov = lerpf(camera.fov, 70.0, 1.0 - exp(-6.0 * delta))
+
+
+func cycle_camera() -> void:
+	camera_mode = CAMERA_MODES[(CAMERA_MODES.find(camera_mode) + 1) % CAMERA_MODES.size()]
+	_cam_zoom = 1.0
+	_notice("Kamera: %s" % CAMERA_NAMES[camera_mode])
+	if hud:
+		hud.set_camera_name(CAMERA_NAMES[camera_mode])
+	var settings := LocalProfile.load_settings()
+	settings.camera = camera_mode
+	LocalProfile.save_settings(settings)
+
+
+func set_volume(key: String) -> void:
+	volume = key if VOLUMES.has(key) else "on"
+	AudioServer.set_bus_volume_db(0, VOLUMES[volume])
+	if hud:
+		hud.set_volume_name(VOLUME_NAMES[volume])
+
+
+func cycle_volume() -> void:
+	var keys := VOLUMES.keys()
+	set_volume(keys[(keys.find(volume) + 1) % keys.size()])
+	var settings := LocalProfile.load_settings()
+	settings.volume = volume
+	LocalProfile.save_settings(settings)
+
+
+## The wardrobe: change your look in the game; you see yourself as in a mirror.
+func open_wardrobe() -> void:
+	if _self_view == null:
+		return
+	_wardrobe_open = true
+	hud.set_paused(false)
+	hud.open_wardrobe(avatar)
+	if city_map:
+		city_map.visible = false
+	if touch == null:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+
+func _on_wardrobe_changed(preview: Dictionary) -> void:
+	_self_view.build(preview)
+
+
+func _on_wardrobe_closed(save: bool, chosen: Dictionary) -> void:
+	_wardrobe_open = false
+	if city_map:
+		city_map.visible = true
+	if save and chosen != avatar:
+		Net.c_avatar.rpc_id(1, chosen)
+		var settings := LocalProfile.load_settings()
+		settings.avatar = chosen
+		LocalProfile.save_settings(settings)
+		_notice("Yeni görünümün kaydedildi; herkes seni böyle görecek.")
+	else:
+		_self_view.build(avatar)
+	if touch == null:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
 ## Applies a GraphicsQuality level to everything already built.
 func apply_quality(level: int) -> void:
 	GraphicsQuality.level = clampi(level, GraphicsQuality.LOW, GraphicsQuality.HIGH)
@@ -919,7 +1068,7 @@ func set_quality_setting(key: String) -> void:
 ## On "auto", steps quality down when the frame rate stays poor for a few
 ## seconds; below LOW it renders the 3D view at a lower resolution.
 func _auto_quality(delta: float) -> void:
-	if _quality_setting != GraphicsQuality.AUTO or now() - _joined_at < 8.0:
+	if _headless or camera == null or _quality_setting != GraphicsQuality.AUTO or now() - _joined_at < 8.0:
 		return
 	_fps_window.frames += 1
 	_fps_window.time += delta
@@ -932,6 +1081,7 @@ func _auto_quality(delta: float) -> void:
 	if int(_fps_window.slow) < 2:
 		return
 	_fps_window.slow = 0
+	ClientLog.event("slow", "fps %.0f at quality %s, scale %.1f" % [fps, GraphicsQuality.NAMES[GraphicsQuality.level], _render_scale])
 	if GraphicsQuality.level > GraphicsQuality.LOW:
 		apply_quality(GraphicsQuality.level - 1)
 		_notice("Akıcılık için görüntü kalitesi %s yapıldı (Menü'den değiştirebilirsin)." % GraphicsQuality.NAMES[GraphicsQuality.level])
@@ -1036,6 +1186,10 @@ func _maybe_screenshot() -> void:
 			pitch = asin(clampf(to.normalized().y, -1.0, 1.0))
 			_screenshot_busy = true
 			await get_tree().create_timer(0.3).timeout
+	if options.has("wardrobe") and not _screenshot_busy:
+		open_wardrobe()
+		_screenshot_busy = true
+		await get_tree().create_timer(0.8).timeout
 	if options.has("tram_shot") and fleet:
 		# Debug framing: wait for a tram to come close, then look at it.
 		var best := {}
@@ -1072,6 +1226,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		var sens := float(options.get("mouse_sensitivity", 0.0025))
 		yaw = wrapf(yaw - event.relative.x * sens, -PI, PI)
 		pitch = clampf(pitch - event.relative.y * sens, -1.45, 1.45)
+	elif event is InputEventMouseButton and event.pressed and camera_mode != "first" and not _map_open() \
+			and event.button_index in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
+		_cam_zoom = clampf(_cam_zoom * (0.9 if event.button_index == MOUSE_BUTTON_WHEEL_UP else 1.1), 0.5, 1.6)
 	elif event is InputEventMouseButton and event.pressed and not hud.is_modal_open() and touch == null and not _map_open():
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	elif event is InputEventKey and event.pressed and not event.echo:
@@ -1089,6 +1246,10 @@ func _on_key(key: Key) -> void:
 		else:
 			city_map.open_big()
 		return
+	if hud.is_wardrobe_open():
+		if key == KEY_ESCAPE:
+			hud.close_wardrobe(false)
+		return
 	if key == KEY_ESCAPE:
 		_set_paused(not hud.is_paused())
 		return
@@ -1102,6 +1263,8 @@ func _on_key(key: Key) -> void:
 	match key:
 		KEY_F:
 			tram_action()
+		KEY_V:
+			cycle_camera()
 		KEY_F1:
 			hud.toggle_help()
 		KEY_F3:
@@ -1187,6 +1350,8 @@ func _on_touch_action(id: String) -> void:
 		"pet":
 			if _cat_in_reach() >= 0:
 				critters.pet(_cat_in_reach())
+		"camera":
+			cycle_camera()
 
 
 ## What the tram button does right now, for the touch UI and hints.
@@ -1231,7 +1396,9 @@ func _on_person_action(what: String) -> void:
 func _cat_in_reach() -> int:
 	if critters == null or critters.client == null or camera == null:
 		return -1
-	return critters.cat_near(camera.global_position - Vector3(0, 1.0, 0), -camera.global_transform.basis.z, 2.2)
+	var flat := -camera.global_transform.basis.z
+	flat.y = 0.0
+	return critters.cat_near(body.global_position + Vector3(0, 0.6, 0), flat.normalized(), 2.2)
 
 
 func _latest_incoming() -> int:
@@ -1247,13 +1414,14 @@ func _look_target() -> int:
 		return -1
 	var origin := camera.global_position
 	var forward := -camera.global_transform.basis.z
+	var eye := body.global_position + Vector3(0, _eye_height, 0)
 	var best := -1
 	var best_along := INF
 	for id in remotes:
 		var r: RemotePlayer = remotes[id]
-		if origin.distance_to(r.global_position + Vector3(0, 1.0, 0)) > Protocol.INTERACTION_RANGE + 0.5:
+		if eye.distance_to(r.global_position + Vector3(0, 1.0, 0)) > Protocol.INTERACTION_RANGE + 0.5:
 			continue
-		var pts := Geometry3D.get_closest_points_between_segments(origin, origin + forward * 6.0,
+		var pts := Geometry3D.get_closest_points_between_segments(origin, origin + forward * (6.0 + _cam_dist),
 			r.global_position + Vector3(0, 0.2, 0), r.global_position + Vector3(0, r.height(), 0))
 		# Of everyone under the crosshair, the nearest one is the one you see.
 		var along := origin.distance_to(pts[0])
@@ -1295,7 +1463,7 @@ func _update_hud(delta: float) -> void:
 		hud.set_target(line)
 	elif _cat_in_reach() >= 0:
 		hud.set_target("Sokak kedisi  ·  " + ("sevmek için Sev'e dokun" if touch else "sevmek için [E]"))
-	elif crowd_view and crowd_view.crowd and camera 			and crowd_view.look_target(camera.global_position, -camera.global_transform.basis.z, Protocol.INTERACTION_RANGE) >= 0:
+	elif crowd_view and crowd_view.crowd and camera 			and crowd_view.look_target(camera.global_position, -camera.global_transform.basis.z, Protocol.INTERACTION_RANGE + _cam_dist) >= 0:
 		hud.set_target("Yaya  [NPC]  ·  yapay bir figür; sohbet edilemez")
 	else:
 		hud.set_target("")

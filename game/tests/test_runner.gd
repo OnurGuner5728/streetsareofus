@@ -66,6 +66,28 @@ func test_avatar_sanitize() -> void:
 	a.body.height = 0.0
 	near(AvatarSpec.visual_height(a), 1.50, 0.001, "shortest visual height")
 	near(AvatarSpec.gameplay_height(a), AvatarSpec.GAMEPLAY_HEIGHT_MIN, 0.001, "gameplay height clamped low")
+	# Newer fields: unknown styles fall back, the old "cap" hairstyle becomes a cap.
+	var b := AvatarSpec.sanitize({"appearance": {"hair": "cap", "beard": "wizard", "eyes": "green"},
+		"clothing": {"shoes": "skates", "pattern": "stripes"}, "accessories": {"glasses": "monocle", "bag": "tote"}})
+	check(b.accessories.headwear == "cap" and b.appearance.hair == "short", "legacy cap hair becomes headwear")
+	check(b.appearance.beard == "none" and b.clothing.shoes == "sneakers", "unknown beard/shoes fall back")
+	check(b.appearance.eyes == "green" and b.clothing.pattern == "stripes" and b.accessories.bag == "tote", "known options kept")
+	check(b.accessories.glasses == "none", "unknown glasses fall back")
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 7
+	var r := AvatarSpec.random(rng)
+	check(r == AvatarSpec.sanitize(r), "random avatars are already sanitized")
+	# Changing avatars resizes the capsule, but only within the gameplay clamp.
+	var body := PlayerMotor.make_body(a)
+	var tall := AvatarSpec.defaults()
+	tall.body.height = 1.0
+	tall.body.weight = 1.0
+	PlayerMotor.fit_capsule(body, tall)
+	var shape: CapsuleShape3D = body.get_node("Capsule").shape
+	near(shape.height, AvatarSpec.GAMEPLAY_HEIGHT_MAX, 0.001, "capsule height follows the new avatar")
+	near(shape.radius, AvatarSpec.RADIUS_MAX, 0.001, "capsule radius clamped")
+	near(body.get_node("Capsule").position.y, shape.height / 2.0, 0.001, "capsule stands on the feet")
+	body.free()
 
 
 func test_names() -> void:
@@ -606,7 +628,7 @@ func test_props() -> void:
 	for turn in 16:
 		var a := turn * TAU / 16.0
 		var clear := true
-		for h: float in [0.25, 0.9]:
+		for h: float in [0.35, 0.9]:
 			var from := home + Vector3(sin(a), 0, cos(a)) * 3.5 + Vector3(0, h, 0)
 			var to := home + Vector3(0, h, 0) - Vector3(sin(a), 0, cos(a)) * 1.0
 			for side: float in [-0.35, 0.35]:
@@ -616,7 +638,8 @@ func test_props() -> void:
 		if clear:
 			approach = a
 			break
-	var start := home + Vector3(sin(approach), 0, cos(approach)) * 3.5 + Vector3(0, -PropWorld.BALL_RADIUS + 0.05, 0)
+	var run_up := home + Vector3(sin(approach), 0, cos(approach)) * 3.5
+	var start := zone.terrain.on_ground(Vector2(run_up.x, run_up.z), 0.05)
 	pl.body.global_position = start
 	pl.buttons = PlayerMotor.BUTTON_SPRINT
 	await get_tree().physics_frame

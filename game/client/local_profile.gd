@@ -33,6 +33,8 @@ static func load_settings() -> Dictionary:
 		"mouse_sensitivity": 0.0025,
 		"quality": "auto",
 		"show_fps": false,
+		"camera": "first",
+		"volume": "on",
 	}
 	var data: Variant = _read(SETTINGS_PATH)
 	if typeof(data) == TYPE_DICTIONARY:

@@ -69,6 +69,7 @@ func _buttons() -> Array:
 		{"id": "wave", "label": "El salla", "pos": Vector2(w - 150, h - 120), "r": 30.0},
 		{"id": "nod", "label": "Selam", "pos": Vector2(w - 228, h - 50), "r": 28.0},
 		{"id": "menu", "label": "Menü", "pos": Vector2(w - 40, 40), "r": 26.0},
+		{"id": "camera", "label": "Kamera", "pos": Vector2(w - 104, 40), "r": 26.0},
 	]
 	if _context.get("target", false):
 		if _context.get("talking_to_target", false):
