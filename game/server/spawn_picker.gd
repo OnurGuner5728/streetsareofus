@@ -10,10 +10,12 @@ const MIN_GAP := 2.5
 
 var points: Array = []
 var rng := RandomNumberGenerator.new()
+var zone: ZoneData
 
 
-func _init(zone: ZoneData) -> void:
-	points = zone.spawn_points
+func _init(z: ZoneData) -> void:
+	zone = z
+	points = z.spawn_points
 	rng.randomize()
 
 
@@ -26,7 +28,7 @@ func pick(mode: String, others: Array) -> Vector3:
 	var best_score := -INF
 	for i in samples:
 		var p: Dictionary = points[rng.randi() % points.size()]
-		var pos := ZoneData.to_godot(float(p.e), float(p.n), 0.05)
+		var pos := zone.ground(float(p.e), float(p.n), 0.05)
 		var score := float(p.static_score) + rng.randf() * (0.1 if social else 0.35)
 		if social:
 			score += SOCIAL_WEIGHT * proximity_term(pos, others)

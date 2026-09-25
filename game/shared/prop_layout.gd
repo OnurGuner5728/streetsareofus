@@ -18,6 +18,7 @@ const MAX_BINS := 36
 
 ## [{id, kind, pos: Vector3 (bottom centre), yaw, tint: Color}]
 var props: Array = []
+var _terrain: Terrain
 
 
 static func for_zone(z: ZoneData) -> PropLayout:
@@ -29,14 +30,17 @@ static func for_zone(z: ZoneData) -> PropLayout:
 
 
 func _init(zone: ZoneData) -> void:
+	_terrain = zone.terrain
 	var streets := StreetLayout.for_zone(zone)
 	_balls(zone, streets)
 	_bins(zone, streets)
 	_cafes(zone, streets)
 
 
+## `pos` is only used for x and z: props rest on the ground there.
 func _add(kind: String, pos: Vector3, yaw: float, tint := Color.WHITE) -> void:
-	props.append({"id": props.size(), "kind": kind, "pos": pos, "yaw": yaw, "tint": tint})
+	var at := _terrain.on_ground(Vector2(pos.x, pos.z), 0.01)
+	props.append({"id": props.size(), "kind": kind, "pos": at, "yaw": yaw, "tint": tint})
 
 
 func _clear(streets: StreetLayout, p: Vector2, radius: float) -> bool:

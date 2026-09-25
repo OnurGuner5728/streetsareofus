@@ -17,9 +17,15 @@ const ROOFS := ["6f6a64", "7b746c", "8a8580", "5d5a57", "757069", "a4553b"]
 const AWNINGS := ["b03a2e", "2e7d4f", "1f5f99", "c77d20", "6d3b8f", "8a8a8a", "a52a4a"]
 ## Pure decoration, hidden on GraphicsQuality.LOW.
 const DETAIL_PROPS := ["BayWindows", "Awnings", "WaterTanks", "AirConditioners", "CatenaryArms"]
+## Longest straight piece of anything draped over the ground.
+const DRAPE_STEP := 3.0
+
+## The zone's ground while the city is being built (everything is draped on it).
+static var _t := Terrain.new()
 
 
 static func build(zone: ZoneData, vis: Node3D) -> Dictionary:
+	_t = zone.terrain
 	var ctx := StreetLayout.for_zone(zone)
 	_ground(ctx, vis)
 	_areas(ctx, vis)
@@ -41,12 +47,15 @@ static func build(zone: ZoneData, vis: Node3D) -> Dictionary:
 # --- ground, areas, roads ------------------------------------------------------------
 
 static func _ground(ctx: StreetLayout, vis: Node3D) -> void:
-	var plane := PlaneMesh.new()
-	plane.size = Vector2(ctx.zone.size_m + 800.0, ctx.zone.size_m + 800.0)
 	var ground := MeshInstance3D.new()
 	ground.name = "Ground"
-	ground.mesh = plane
 	ground.material_override = CityMaterials.get_shader("pavers")
+	if _t.flat:
+		var plane := PlaneMesh.new()
+		plane.size = Vector2(ctx.zone.size_m + 800.0, ctx.zone.size_m + 800.0)
+		ground.mesh = plane
+	else:
+		ground.mesh = _terrain_mesh(ctx.half)
 	vis.add_child(ground)
 	var edge := StandardMaterial3D.new()
 	edge.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
@@ -55,8 +64,10 @@ static func _ground(ctx: StreetLayout, vis: Node3D) -> void:
 	edge.cull_mode = BaseMaterial3D.CULL_DISABLED
 	var h := ctx.half
 	var s := ctx.zone.size_m
-	for spec in [[Vector3(h, 1.5, 0), Vector3(0.05, 3, s)], [Vector3(-h, 1.5, 0), Vector3(0.05, 3, s)],
-			[Vector3(0, 1.5, h), Vector3(s, 3, 0.05)], [Vector3(0, 1.5, -h), Vector3(s, 3, 0.05)]]:
+	var mid := (_t.low + _t.high) / 2.0 + 1.5
+	var tall := _t.high - _t.low + 3.0
+	for spec in [[Vector3(h, mid, 0), Vector3(0.05, tall, s)], [Vector3(-h, mid, 0), Vector3(0.05, tall, s)],
+			[Vector3(0, mid, h), Vector3(s, tall, 0.05)], [Vector3(0, mid, -h), Vector3(s, tall, 0.05)]]:
 		var box := BoxMesh.new()
 		box.size = spec[1]
 		box.material = edge
@@ -65,6 +76,86 @@ static func _ground(ctx: StreetLayout, vis: Node3D) -> void:
 		mi.position = spec[0]
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		vis.add_child(mi)
+
+
+## The terrain's triangles with smooth normals, plus a skirt reaching 400 m
+## past the zone edge at the edge's height so the horizon has no gap.
+static func _terrain_mesh(half: float) -> Mesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var tris := _t.triangles()
+	for v in tris:
+		st.set_normal(_t.normal(v.x, v.z))
+		st.add_vertex(v)
+	var far := half + 400.0
+	var steps := _t.size - 1
+	for k in steps:
+		var a := -half + k * _t.spacing
+		var b := a + _t.spacing
+		for edge in [[Vector2(a, -half), Vector2(b, -half), Vector2(0, -1)], [Vector2(b, half), Vector2(a, half), Vector2(0, 1)],
+				[Vector2(half, a), Vector2(half, b), Vector2(1, 0)], [Vector2(-half, b), Vector2(-half, a), Vector2(-1, 0)]]:
+			var p: Vector2 = edge[0]
+			var q: Vector2 = edge[1]
+			var out: Vector2 = edge[2]
+			var p2 := p + out * (far - half)
+			var q2 := q + out * (far - half)
+			var hp := _t.height(p.x, p.y)
+			var hq := _t.height(q.x, q.y)
+			var quad := [Vector3(p.x, hp, p.y), Vector3(q.x, hq, q.y), Vector3(q2.x, hq, q2.y), Vector3(p2.x, hp, p2.y)]
+			for idx in [[0, 1, 2], [0, 2, 3]]:
+				var tri := [quad[idx[0]], quad[idx[1]], quad[idx[2]]]
+				# Wind every skirt triangle to face up.
+				if ((tri[1] - tri[0]) as Vector3).cross(tri[2] - tri[0]).y > 0.0:
+					tri = [tri[0], tri[2], tri[1]]
+				for v in tri:
+					st.set_normal(Vector3.UP)
+					st.add_vertex(v)
+	return st.commit()
+
+
+## Splits a longer polyline so draped strips follow the ground between points.
+static func densify(pts: PackedVector2Array, step := DRAPE_STEP) -> PackedVector2Array:
+	if _t.flat or pts.size() < 2:
+		return pts
+	var out := PackedVector2Array()
+	for i in pts.size() - 1:
+		var n := maxi(1, ceili(pts[i].distance_to(pts[i + 1]) / step))
+		for k in n:
+			out.append(pts[i].lerp(pts[i + 1], float(k) / n))
+	out.append(pts[pts.size() - 1])
+	return out
+
+
+## A flat area (park, square, car park) laid on the ground: cut along the
+## terrain grid so every piece lies on one ground cell, lifted by `lift`.
+static func _add_draped_polygon(st: SurfaceTool, poly: PackedVector2Array, lift: float, color: Color) -> bool:
+	if _t.flat:
+		return WorldBuilder._add_flat_polygon(st, poly, lift, color)
+	var box := Rect2(poly[0], Vector2.ZERO)
+	for p in poly:
+		box = box.expand(p)
+	var any := false
+	var step := _t.spacing
+	var i0 := floori((box.position.x + _t.half) / step)
+	var j0 := floori((box.position.y + _t.half) / step)
+	var i1 := floori((box.end.x + _t.half) / step)
+	var j1 := floori((box.end.y + _t.half) / step)
+	for j in range(j0, j1 + 1):
+		for i in range(i0, i1 + 1):
+			var x0 := -_t.half + i * step
+			var z0 := -_t.half + j * step
+			# Each cell is two ground triangles; cut the area by both.
+			for tri in [[Vector2(x0, z0), Vector2(x0 + step, z0), Vector2(x0 + step, z0 + step)],
+					[Vector2(x0, z0), Vector2(x0 + step, z0 + step), Vector2(x0, z0 + step)]]:
+				for piece in Geometry2D.intersect_polygons(poly, PackedVector2Array(tri)):
+					var idx := Geometry2D.triangulate_polygon(piece)
+					for k in range(0, idx.size(), 3):
+						var a := _t.on_ground(piece[idx[k]], lift)
+						var b := _t.on_ground(piece[idx[k + 1]], lift)
+						var c := _t.on_ground(piece[idx[k + 2]], lift)
+						WorldBuilder._add_tri(st, a, b, c, _t.normal(a.x, a.z), color)
+						any = true
+	return any
 
 
 static func _areas(ctx: StreetLayout, vis: Node3D) -> void:
@@ -81,13 +172,13 @@ static func _areas(ctx: StreetLayout, vis: Node3D) -> void:
 		var poly := WorldBuilder.footprint_xz(area.polygon)
 		var kind := str(area.kind)
 		if GREEN_AREAS.has(kind):
-			used.g = WorldBuilder._add_flat_polygon(green, poly, 0.03, GREEN_AREAS[kind]) or used.g
+			used.g = _add_draped_polygon(green, poly, 0.04, GREEN_AREAS[kind]) or used.g
 		elif kind == "plaza":
-			used.s = WorldBuilder._add_flat_polygon(stone, poly, 0.035, Color.WHITE) or used.s
+			used.s = _add_draped_polygon(stone, poly, 0.045, Color.WHITE) or used.s
 		elif kind == "parking":
-			used.t = WorldBuilder._add_flat_polygon(tar, poly, 0.03, Color(1, 1, 1, 0)) or used.t
+			used.t = _add_draped_polygon(tar, poly, 0.04, Color(1, 1, 1, 0)) or used.t
 		elif kind == "water":
-			used.w = WorldBuilder._add_flat_polygon(water, poly, 0.02, Color("2f5f86")) or used.w
+			used.w = _add_draped_polygon(water, poly, 0.03, Color("2f5f86")) or used.w
 	var specs := [[green, used.g, CityMaterials.get_shader("grass")], [stone, used.s, CityMaterials.get_shader("cobbles")],
 		[tar, used.t, CityMaterials.get_shader("asphalt")], [water, used.w, CityMaterials.solid(Color("2f5f86"), 0.1, 0.2)]]
 	for spec in specs:
@@ -107,18 +198,18 @@ static func _roads(ctx: StreetLayout, vis: Node3D) -> void:
 		tools[key] = st
 	for road in ctx.zone.roads:
 		var kind := str(road.kind)
-		var pts := WorldBuilder.footprint_xz(road.points)
+		var pts := densify(WorldBuilder.footprint_xz(road.points))
 		var w := float(road.width)
 		if ASPHALT_KINDS.has(kind):
 			var marked := MARKED_KINDS.has(kind) and w >= 7.0
-			ribbon(tools.asphalt, pts, w, 0.04, Color(1, 1, 1, 1.0 if marked else 0.0))
+			ribbon(tools.asphalt, pts, w, 0.06, Color(1, 1, 1, 1.0 if marked else 0.0))
 			if kind != "service" and kind != "busway":
 				for side in [-1.0, 1.0]:
 					_curb(ctx, tools.curb, pts, side * (w / 2.0 + 0.08))
 		elif COBBLE_KINDS.has(kind):
-			ribbon(tools.cobbles, pts, w, 0.05, Color.WHITE)
+			ribbon(tools.cobbles, pts, w, 0.07, Color.WHITE)
 		else:
-			ribbon(tools.pavers, pts, w, 0.06, Color.WHITE)
+			ribbon(tools.pavers, pts, w, 0.08, Color.WHITE)
 	var mats := {"asphalt": CityMaterials.get_shader("asphalt"), "cobbles": CityMaterials.get_shader("cobbles"),
 		"pavers": CityMaterials.get_shader("pavers"), "curb": CityMaterials.solid(Color("a8a39a"), 0.85)}
 	for key in tools:
@@ -130,8 +221,9 @@ static func _roads(ctx: StreetLayout, vis: Node3D) -> void:
 		vis.add_child(mi)
 
 
-## Flat strip along a polyline. UV.x = metres along, UV.y = 0..1 across.
-static func ribbon(st: SurfaceTool, pts: PackedVector2Array, width: float, y: float, color: Color, lateral := 0.0) -> void:
+## Strip along a polyline, draped on the ground and lifted by `lift`.
+## UV.x = metres along, UV.y = 0..1 across. Densify the polyline first.
+static func ribbon(st: SurfaceTool, pts: PackedVector2Array, width: float, lift: float, color: Color, lateral := 0.0) -> void:
 	if pts.size() < 2:
 		return
 	var left := offset_polyline(pts, lateral + width / 2.0)
@@ -139,13 +231,14 @@ static func ribbon(st: SurfaceTool, pts: PackedVector2Array, width: float, y: fl
 	var along := 0.0
 	for i in pts.size() - 1:
 		var seg := pts[i].distance_to(pts[i + 1])
-		var a := Vector3(left[i].x, y, left[i].y)
-		var b := Vector3(right[i].x, y, right[i].y)
-		var c := Vector3(right[i + 1].x, y, right[i + 1].y)
-		var d := Vector3(left[i + 1].x, y, left[i + 1].y)
+		var a := _t.on_ground(left[i], lift)
+		var b := _t.on_ground(right[i], lift)
+		var c := _t.on_ground(right[i + 1], lift)
+		var d := _t.on_ground(left[i + 1], lift)
+		var up := _t.normal(pts[i].x, pts[i].y)
 		var uv := PackedVector2Array([Vector2(along, 0), Vector2(along, 1), Vector2(along + seg, 1)])
-		WorldBuilder._add_tri(st, a, b, c, Vector3.UP, color, uv)
-		WorldBuilder._add_tri(st, a, c, d, Vector3.UP, color,
+		WorldBuilder._add_tri(st, a, b, c, up, color, uv)
+		WorldBuilder._add_tri(st, a, c, d, up, color,
 			PackedVector2Array([Vector2(along, 0), Vector2(along + seg, 1), Vector2(along + seg, 0)]))
 		along += seg
 
@@ -188,7 +281,7 @@ static func _curb(ctx: StreetLayout, st: SurfaceTool, pts: PackedVector2Array, o
 static func _emit_curb(st: SurfaceTool, run: PackedVector2Array, inward: float) -> void:
 	if run.size() < 2:
 		return
-	var top := 0.13
+	var top := 0.15
 	for i in run.size() - 1:
 		var a := run[i]
 		var b := run[i + 1]
@@ -197,12 +290,12 @@ static func _emit_curb(st: SurfaceTool, run: PackedVector2Array, inward: float) 
 		var a2 := a - n * 0.16
 		var b2 := b - n * 0.16
 		# Top face.
-		WorldBuilder._add_tri(st, Vector3(a.x, top, a.y), Vector3(b.x, top, b.y), Vector3(b2.x, top, b2.y), Vector3.UP, Color.WHITE)
-		WorldBuilder._add_tri(st, Vector3(a.x, top, a.y), Vector3(b2.x, top, b2.y), Vector3(a2.x, top, a2.y), Vector3.UP, Color.WHITE)
+		WorldBuilder._add_tri(st, _t.on_ground(a, top), _t.on_ground(b, top), _t.on_ground(b2, top), Vector3.UP, Color.WHITE)
+		WorldBuilder._add_tri(st, _t.on_ground(a, top), _t.on_ground(b2, top), _t.on_ground(a2, top), Vector3.UP, Color.WHITE)
 		# Face towards the road.
 		var face := Vector3(n.x, 0, n.y)
-		WorldBuilder._add_tri(st, Vector3(a.x, 0.03, a.y), Vector3(b.x, top, b.y), Vector3(b.x, 0.03, b.y), face, Color.WHITE)
-		WorldBuilder._add_tri(st, Vector3(a.x, 0.03, a.y), Vector3(a.x, top, a.y), Vector3(b.x, top, b.y), face, Color.WHITE)
+		WorldBuilder._add_tri(st, _t.on_ground(a, 0.03), _t.on_ground(b, top), _t.on_ground(b, 0.03), face, Color.WHITE)
+		WorldBuilder._add_tri(st, _t.on_ground(a, 0.03), _t.on_ground(a, top), _t.on_ground(b, top), face, Color.WHITE)
 
 
 static func _crossings(ctx: StreetLayout, vis: Node3D) -> void:
@@ -225,13 +318,13 @@ static func _crossings(ctx: StreetLayout, vis: Node3D) -> void:
 		var along: Vector2 = (best[1] - best[0]).normalized()
 		var across := Vector2(-along.y, along.x)
 		var half_w: float = float(best[2]) / 2.0 - 0.4
-		var y := 0.046
+		var lift := 0.075
 		var corners := [p - along * 1.5 - across * half_w, p + along * 1.5 - across * half_w,
 			p + along * 1.5 + across * half_w, p - along * 1.5 + across * half_w]
 		var uvs := [Vector2(0, 0), Vector2(1, 0), Vector2(1, 1), Vector2(0, 1)]
 		for tri in [[0, 1, 2], [0, 2, 3]]:
-			WorldBuilder._add_tri(st, Vector3(corners[tri[0]].x, y, corners[tri[0]].y), Vector3(corners[tri[1]].x, y, corners[tri[1]].y),
-				Vector3(corners[tri[2]].x, y, corners[tri[2]].y), Vector3.UP, Color.WHITE,
+			WorldBuilder._add_tri(st, _t.on_ground(corners[tri[0]], lift), _t.on_ground(corners[tri[1]], lift),
+				_t.on_ground(corners[tri[2]], lift), _t.normal(p.x, p.y), Color.WHITE,
 				PackedVector2Array([uvs[tri[0]], uvs[tri[1]], uvs[tri[2]]]))
 		any = true
 	if any:
@@ -253,9 +346,10 @@ static func _tracks(ctx: StreetLayout, vis: Node3D) -> void:
 	for poly in ctx.tracks:
 		var inside := _inside_run(ctx, poly)
 		for piece in inside:
-			ribbon(bed, piece, 2.2, 0.058, Color.WHITE)
+			var dense := densify(piece)
+			ribbon(bed, dense, 2.2, 0.085, Color.WHITE)
 			for side in [-1.0, 1.0]:
-				ribbon(rails, piece, 0.08, 0.078, Color.WHITE, side * RAIL_GAUGE / 2.0)
+				ribbon(rails, dense, 0.08, 0.105, Color.WHITE, side * RAIL_GAUGE / 2.0)
 	for spec in [[bed, CityMaterials.solid(Color("4a4844"), 0.95), "TrackBed"], [rails, CityMaterials.solid(Color("8a8c8e"), 0.45, 0.55), "Rails"]]:
 		var mi := MeshInstance3D.new()
 		mi.name = spec[2]
@@ -291,9 +385,10 @@ static func _catenary(ctx: StreetLayout, vis: Node3D) -> void:
 		var polys: Array = [line.path] if line.loop else [line.right_track, line.left_track]
 		for poly in polys:
 			for piece in _inside_run(ctx, WorldBuilder.footprint_xz(Array(poly).map(func(p): return [p.x, p.y]))):
-				for i in piece.size() - 1:
-					wires.add_vertex(Vector3(piece[i].x, 5.6, piece[i].y))
-					wires.add_vertex(Vector3(piece[i + 1].x, 5.6, piece[i + 1].y))
+				var dense := densify(piece, 8.0)
+				for i in dense.size() - 1:
+					wires.add_vertex(_t.on_ground(dense[i], 5.6))
+					wires.add_vertex(_t.on_ground(dense[i + 1], 5.6))
 					any_wire = true
 		var s := 10.0
 		while s < line.length:
@@ -308,10 +403,10 @@ static func _catenary(ctx: StreetLayout, vis: Node3D) -> void:
 				continue
 			var across := Vector2(right.x, -right.y)  # EN -> XZ
 			var yaw := atan2(-across.y, across.x)  # local X of the arm along `across`
-			pole_xf.append(Transform3D(Basis(), Vector3(pole.x, 3.3, pole.y)))
+			pole_xf.append(Transform3D(Basis(), _t.on_ground(pole, 3.3)))
 			var span := 3.6 if not line.loop else 2.5
 			var mid := pole_en + (right * -side_off * 0.5 if line.loop else Vector2.ZERO)
-			arm_xf.append(Transform3D(Basis(Vector3.UP, yaw).scaled(Vector3(span, 1, 1)), Vector3(mid.x, 6.0, -mid.y)))
+			arm_xf.append(Transform3D(Basis(Vector3.UP, yaw).scaled(Vector3(span, 1, 1)), Vector3(mid.x, _t.height_en(pole_en) + 6.0, -mid.y)))
 	var pole_mesh := CylinderMesh.new()
 	pole_mesh.top_radius = 0.08
 	pole_mesh.bottom_radius = 0.11
@@ -439,7 +534,7 @@ static func _shop_signs(ctx: StreetLayout, vis: Node3D) -> void:
 					n = -n
 				if _faces_street(ctx, a, b, n):
 					best_d = d
-					best = [q, n]
+					best = [q, n, _t.ground_under(poly)]
 		if best.is_empty():
 			continue
 		var at: Vector2 = best[0]
@@ -461,7 +556,8 @@ static func _shop_signs(ctx: StreetLayout, vis: Node3D) -> void:
 		sign.modulate = SIGN_COLOURS.get(kind, Color("f4f1ea"))
 		sign.width = 520.0
 		sign.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		sign.position = Vector3(at.x + out.x * 0.15, 3.3, at.y + out.y * 0.15)  # above the awnings
+		# Above the awnings, which hang from the building's lowest ground.
+		sign.position = Vector3(at.x + out.x * 0.15, float(best[2]) + 3.3, at.y + out.y * 0.15)
 		sign.rotation.y = atan2(out.x, out.y)  # Label3D reads towards +Z
 		set_range(sign, 45.0)
 		holder.add_child(sign)
@@ -506,7 +602,7 @@ static func _street_signs(ctx: StreetLayout, vis: Node3D) -> void:
 			if ctx.building_clearance(pole) < 0.4 or ctx.near_track(pole, 2.5) or not ctx.inside_zone(pole, 3.0):
 				continue
 		any = true
-		var base := Vector3(pole.x, 0.0, pole.y)
+		var base := _t.on_ground(pole)
 		m.box("s", Vector3(0.06, 2.9, 0.06), base + Vector3(0, 1.45, 0), Color("3b3f44"))
 		var level := 0
 		for street_name in names:
@@ -576,6 +672,9 @@ static func _buildings(ctx: StreetLayout, vis: Node3D) -> void:
 			roofs[chunk] = SurfaceTool.new()
 			roofs[chunk].begin(Mesh.PRIMITIVE_TRIANGLES)
 		var key := str(b.id)
+		# Heights are counted from the lowest ground under the building; walls
+		# carry on a metre below it so no gap shows on the uphill side.
+		var ref := _t.ground_under(poly)
 		var bottom := float(b.min_height)
 		var top := float(b.height)
 		var kind := str(b.kind)
@@ -595,11 +694,12 @@ static func _buildings(ctx: StreetLayout, vis: Node3D) -> void:
 				continue
 			var n := Vector3(-edge.y, 0.0, edge.x).normalized()
 			var info := Vector2(top, length)
-			_wall_quad(wst, p0, p1, bottom, top + parapet, n, facade, length, info)
+			var wall_from := bottom if bottom > 0.1 else -1.0
+			_wall_quad(wst, p0, p1, wall_from, top + parapet, n, facade, length, info, ref)
 			if parapet > 0.0:
 				# Inner face of the parapet, 20 cm in.
 				var inset := Vector2(n.x, n.z) * -0.2
-				_wall_quad(wst, p1 + inset, p0 + inset, top, top + parapet, -n, facade, length, Vector2(0, length))
+				_wall_quad(wst, p1 + inset, p0 + inset, top, top + parapet, -n, facade, length, Vector2(0, length), ref)
 			if bottom > 0.1 or length < 4.0 or not _faces_street(ctx, p0, p1, Vector2(n.x, n.z)):
 				continue
 			var dir := edge / length
@@ -613,11 +713,11 @@ static func _buildings(ctx: StreetLayout, vis: Node3D) -> void:
 				var h := WorldBuilder._hash01("%s:%d:%d" % [key, i, k])
 				if shop:
 					var col := Color(str(AWNINGS[int(h * AWNINGS.size())]))
-					awning_xf.append(Transform3D(Basis(Vector3.UP, yaw), Vector3(base.x + out.x * 0.6, 2.75, base.y + out.y * 0.6)))
+					awning_xf.append(Transform3D(Basis(Vector3.UP, yaw), Vector3(base.x + out.x * 0.6, ref + 2.75, base.y + out.y * 0.6)))
 					awning_col.append(col)
 				for f in range(1, floors):
 					var hf := WorldBuilder._hash01("%s:%d:%d:%d" % [key, i, k, f])
-					var y := f * 3.1
+					var y := ref + f * 3.1
 					if style < 0.45 and hf < 0.55:
 						balcony_xf.append(Transform3D(Basis(Vector3.UP, yaw), Vector3(base.x + out.x * 0.55, y, base.y + out.y * 0.55)))
 						balcony_col.append(Color(facade.r, facade.g, facade.b).lightened(0.05))
@@ -625,19 +725,19 @@ static func _buildings(ctx: StreetLayout, vis: Node3D) -> void:
 						bay_xf.append(Transform3D(Basis(Vector3.UP, yaw), Vector3(base.x + out.x * 0.4, y + 0.2, base.y + out.y * 0.4)))
 						bay_col.append(facade)
 		var roof_color := Color(str(ROOFS[int(WorldBuilder._hash01(key + "roof") * ROOFS.size())]))
-		if not WorldBuilder._add_flat_polygon(roofs[chunk], poly, top, roof_color):
-			WorldBuilder._add_flat_polygon(roofs[chunk], Geometry2D.convex_hull(poly), top, roof_color)
+		if not WorldBuilder._add_flat_polygon(roofs[chunk], poly, ref + top, roof_color):
+			WorldBuilder._add_flat_polygon(roofs[chunk], Geometry2D.convex_hull(poly), ref + top, roof_color)
 		if bottom > 0.1:
-			WorldBuilder._add_flat_polygon(roofs[chunk], poly, bottom, roof_color.darkened(0.3), Vector3.DOWN)
+			WorldBuilder._add_flat_polygon(roofs[chunk], poly, ref + bottom, roof_color.darkened(0.3), Vector3.DOWN)
 		# Istanbul roofs: water tanks and air conditioners.
 		if parapet > 0.0 and absf(area) > 60.0:
 			var r := WorldBuilder._hash01(key + "tank")
 			var spot := center + Vector2(cos(r * TAU), sin(r * TAU)) * 1.5
 			if Geometry2D.is_point_in_polygon(spot, poly) and r < 0.6:
-				tank_xf.append(Transform3D(Basis(), Vector3(spot.x, top + 0.8, spot.y)))
+				tank_xf.append(Transform3D(Basis(), Vector3(spot.x, ref + top + 0.8, spot.y)))
 			var spot2 := center - Vector2(cos(r * TAU), sin(r * TAU)) * 2.0
 			if Geometry2D.is_point_in_polygon(spot2, poly) and r > 0.3:
-				ac_xf.append(Transform3D(Basis(Vector3.UP, r * TAU), Vector3(spot2.x, top + 0.35, spot2.y)))
+				ac_xf.append(Transform3D(Basis(Vector3.UP, r * TAU), Vector3(spot2.x, ref + top + 0.35, spot2.y)))
 	var wall_mat := CityMaterials.get_shader("walls")
 	var roof_mat := CityMaterials.get_shader("roof")
 	for chunk in walls:
@@ -664,12 +764,14 @@ static func _buildings(ctx: StreetLayout, vis: Node3D) -> void:
 	_multimesh(vis, ac, CityMaterials.solid(Color("c7cacc"), 0.6), ac_xf, [], 140.0, "AirConditioners")
 
 
+## A wall from y0 to y1 above `base` (the building's ground). UV.y stays
+## relative to the building, so floors and windows line up on any slope.
 static func _wall_quad(st: SurfaceTool, p0: Vector2, p1: Vector2, y0: float, y1: float, n: Vector3,
-		col: Color, length: float, info: Vector2) -> void:
-	var a0 := Vector3(p0.x, y0, p0.y)
-	var a1 := Vector3(p0.x, y1, p0.y)
-	var b0 := Vector3(p1.x, y0, p1.y)
-	var b1 := Vector3(p1.x, y1, p1.y)
+		col: Color, length: float, info: Vector2, base := 0.0) -> void:
+	var a0 := Vector3(p0.x, base + y0, p0.y)
+	var a1 := Vector3(p0.x, base + y1, p0.y)
+	var b0 := Vector3(p1.x, base + y0, p1.y)
+	var b1 := Vector3(p1.x, base + y1, p1.y)
 	WorldBuilder._add_tri(st, a0, b1, b0, n, col,
 		PackedVector2Array([Vector2(0, y0), Vector2(length, y1), Vector2(length, y0)]), info)
 	WorldBuilder._add_tri(st, a0, a1, b1, n, col,
@@ -822,7 +924,7 @@ static func _cars(ctx: StreetLayout, vis: Node3D) -> void:
 	var cols := []
 	var sign_xfs := []
 	for c in ctx.cars:
-		var xf := Transform3D(Basis(Vector3.UP, float(c.yaw)), c.pos)
+		var xf := Transform3D(c.basis, c.pos)
 		xfs.append(xf)
 		cols.append(c.color)
 		if c.taxi:

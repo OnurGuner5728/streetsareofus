@@ -17,6 +17,7 @@ Pilot bölge: **Kadıköy, İstanbul** (Bahariye / Söğütlüçeşme çevresi, 
 | OSM → oynanabilir 3B dünya | `world-pipeline/` OSM'den zone paketi üretir; Godot bina, yol, park ve ağaçları kurar |
 | Görsel ≠ çarpışma geometrisi | Binalar konveks prizmalar, pencereler shader'da; ağaç gövdeleri sunucuda da var |
 | lat/lon → yerel metre | Zone merkezli ENU; kayıtlı konumlar 64-bit enlem/boylam |
+| **Gerçek arazi (DEM)** | Kadıköy'ün gerçek yükseklik verisi (SRTM 30 m, OpenTopoData): bölgede **32 m** fark, Moda yönüne yokuşlar, Söğütlüçeşme vadisine iniş. Radar verisindeki çatı tümsekleri yumuşatılır. Zemin çarpışması, görünen zemin ve zemine konan her şey aynı üçgenleri izler (test: 2 cm içinde). Binalar en alçak zemin noktalarına oturur, yokuş tarafında duvar toprağa girer; yollar, raylar, parklar, kaldırım taşları, arabalar (eğime göre yatık), peronlar ve tramvaylar (yokuşta burunları kalkar) araziyi izler |
 | Dedicated authoritative sunucu | İstemci konum değil input gönderir; hareketi sunucu hesaplar |
 | Tahmin + düzeltme + interpolasyon | Aynı `PlayerMotor` her iki tarafta; uzak oyuncular geçmişte interpolasyonla çizilir |
 | Interest management | 64 m grid; 50 / 120 / 300 m katmanları farklı sıklıkta gönderilir |
@@ -51,7 +52,7 @@ Pilot bölge: **Kadıköy, İstanbul** (Bahariye / Söğütlüçeşme çevresi, 
 | Büyük harita | Kaydır, yakınlaştır, duraklara dokun (sıradaki tramvaylar), hat lejantı, kalabalık ısı hücreleri (64 m, konum değil sayı) |
 | Gerçek gökyüzü | Güneş İstanbul'un **gerçek saatine ve koordinatına** göre; altın saat, alacakaranlık, gece. Gece pencereler, dükkânlar ve lambalar yanar |
 | **Gerçek hava** | Sunucu Kadıköy'ün anlık havasını **Open-Meteo**'dan 15 dakikada bir alır (anahtarsız; yalnızca bölgenin koordinatı gider) ve herkese aynısını dağıtır: yağmur (kameranın çevresinde GPU'da düşen damlalar), ıslanan ve yavaşça kuruyan sokaklar, asfaltta su birikintileri, kar (kaldırım ve çatılarda birikir), sis, bulut katmanı, kapalı havada gri gök ve yumuşak ışık, fırtınada şimşek ve gök gürültüsü, rüzgârla sallanan ağaçlar. HUD'da "13°C · Yağmurlu" |
-| **Yayalar [NPC]** | Kaldırımlarda yürüyen, ara sıra vitrin önünde duran yayalar. Plandaki kurala uygun olarak açıkça **NPC** olarak etiketlenir ("yapay bir figür; sohbet edilemez"), gerçek kişi sanılmaz. Hareketleri sunucu saatinin deterministik fonksiyonu: herkes aynı yayayı aynı yerde görür, ağ trafiği yok. Saate göre yoğunluk (gece seyrek) |
+| **Yayalar [NPC]** | Kaldırımlarda yürüyen, ara sıra vitrin önünde duran, oyunculara yol veren yayalar. Plandaki kurala uygun olarak açıkça **NPC** olarak etiketlenir ("yapay bir figür; sohbet edilemez"), gerçek kişi sanılmaz. Hareketleri sunucu saatinin deterministik fonksiyonu: herkes aynı yayayı aynı yerde görür, ağ trafiği yok. Saate göre yoğunluk (gece seyrek) |
 | **Sokak kedileri** | Park etmiş arabaların kaputunda ve banklarda uyuyan, kaldırımda gezinen kediler (herkes için aynı). Yanına git: **E** / **Sev** → mırlar |
 | **Güvercinler** | Meydan, park ve durak önlerinde yem arayan sürüler; biri yaklaşınca (koşarak daha uzaktan) havalanır, başka yere konar |
 | **Tabelalar** | OSM'deki 394 gerçek işletmenin adı (kafe, restoran, eczane "ECZANE", banka, dükkân) bulunduğu binanın sokağa bakan cephesinde; kavşaklarda mavi **İstanbul sokak levhaları** ("Bahariye Cd.", "Nail Bey Sk.") |
@@ -82,9 +83,9 @@ Pilot bölge: **Kadıköy, İstanbul** (Bahariye / Söğütlüçeşme çevresi, 
 | Betik yükü | Radar dönüşü transform ile (12 Hz yeniden çizim), dokunmatik düğmeler yalnızca değişince çizilir, HUD 10 Hz, sokak adı ızgara indeksiyle, tramvay zaman tablosu paketli dizilerle (`state()` 66 → 32 µs), uzak tramvay ve oyuncular daha seyrek güncellenir |
 | FPS göstergesi | Menü → **FPS göstergesi** (kalite ve çözünürlükle birlikte) |
 
-Bilerek yapılmayanlar (planda sonraki adımlar): yükseklik verisi (DEM, zemin
-şu an düz), zone'lar arası geçiş (zone kenarı şimdilik görünmez duvar),
-Nakama/PostgreSQL, Panoramax sokak görüntüsü, sesli sohbet, LLM'li NPC, CI.
+Bilerek yapılmayanlar (planda sonraki adımlar): zone'lar arası geçiş (zone
+kenarı şimdilik görünmez duvar), Nakama/PostgreSQL, Panoramax sokak görüntüsü,
+sesli sohbet, LLM'li NPC, CI.
 
 ## Gereksinimler
 
@@ -175,8 +176,8 @@ Masaüstü istemci de bir WebSocket sunucusuna bağlanabilir: sunucu alanına
 
 ```bash
 "$GODOT" --headless --path game --import      # ilk seferde sınıf önbelleği için
-"$GODOT" --headless --path game -- --test     # 248 kontrol
-python -m unittest discover -s world-pipeline/tests   # 22 test
+"$GODOT" --headless --path game -- --test     # 254 kontrol
+python -m unittest discover -s world-pipeline/tests   # 26 test
 python tools/bots.py smoke                    # 2 bot: tanış, konuş, yaz, el salla, engelle, engeli kaldır, kalıcılık
 python tools/bots.py smoke --transport ws     # aynısı WebSocket üzerinden
 python tools/bots.py commute                  # 2 yolcu bot: durağa koş, tramvaya bin, durak iste, in
@@ -193,7 +194,9 @@ zamanlı simülasyonla aynı sonucu vermesi**, **istemci ile sunucu fizik
 dünyalarının aynı input'la aynı yolu izlemesi**, **basamak çıkma** (25 cm
 evet, 60 cm hayır), **tramvayın raydakini yana fırlatması ve bunun
 deterministik olması**, duran tramvayın katı olması, **koşan oyuncunun topu
-tekmelemesi**, yayaların binalara girmeden ve sıçramadan yürümesi, tramvay
+tekmelemesi**, yayaların binalara girmeden ve sıçramadan yürümesi, **arazi
+çarpışmasının `Terrain.height()` ile örtüşmesi, binaların zemine oturması,
+yokuş çıkılabilmesi**, tramvay
 zaman tablosu tutarlılığı ve rota planlayıcının asla yürümekten yavaş tramvay
 seçmemesi.
 
@@ -204,11 +207,11 @@ Smoke testi, localhost'ta tahmin düzeltmesi 25 cm'yi geçerse de başarısız o
 | Senaryo | Sunucu tick (bütçe 33 ms) | Snapshot trafiği | En büyük tahmin düzeltmesi |
 |---|---|---|---|
 | 2 bot, smoke | 0,5 ms | 1,6 KB/s | 0,000 m |
-| 12 bot tek noktada (en kötü durum; 119 fizik nesnesi, 22 tramvay gövdesi) | 5,0 ms | 45 KB/s toplam | 0,04–0,24 m |
+| 12 bot tek noktada (en kötü durum; arazi, 119 fizik nesnesi, 22 tramvay gövdesi) | 6,6 ms | 45 KB/s toplam | 0,1 m |
 
-İstemci (Compatibility renderer, 854×480, telefon benzeri ayar): Orta kalitede
-çizim çağrısı 444 → 237; Düşük kalitede 137 çizim çağrısı ve 5 kat daha az
-üçgen.
+İstemci (Compatibility renderer, 854×480, telefon benzeri ayar, Iris Xe): Orta
+kalitede çizim çağrısı 444 → 237; Düşük kalitede ~140 çizim çağrısı, arazi
+dahil 130 fps.
 
 ## Yol boyunca öğrenilenler
 
@@ -270,6 +273,11 @@ python world-pipeline/build_zone.py osm --zone-id tr_istanbul_moda_001 \
     --name "Moda, İstanbul" --lat 40.9840 --lon 29.0260
 ```
 
+Yükseklik verisi OpenTopoData'dan (SRTM, olmazsa ASTER) ya da Open-Meteo'dan
+(Copernicus 90 m) çekilir ve `world-pipeline/cache/` altında saklanır; düz zemin
+için `--flat`. Zone içeriği değiştiğinde `--version` artırılmalı (Kadıköy şu an
+v3): sunucu ve istemci farklı sürümdeyse bağlantı açık bir mesajla reddedilir.
+
 Kıyı çizgisi içeren bölgelerde deniz poligonu henüz üretilmiyor; pipeline bu
 durumda uyarı verir. Pilot bölge bu yüzden kıyıdan içeride seçildi.
 
@@ -293,7 +301,8 @@ Plandaki mesajların karşılıkları (`game/net/net.gd`):
 - Oyuncular birbirinin ve serbest nesnelerin içinden geçer (nesneleri sunucu
   iter; itme istemcide yaklaşık bir gidiş-dönüş gecikmesiyle görünür).
 - Yayalar oyunculardan kaçınmaz; güvercinler her istemcide ayrı simüle edilir.
-- Zemin düz: kaldırımlar yükseltilmemiş, yokuşlar yok (DEM sıradaki adım).
+- Kaldırımlar yükseltilmemiş (yol ile kaldırım aynı yüzeyde; kenar taşı yalnızca görsel).
+- Binalar düz tabanlı: dik yokuşta alt kattaki dükkân camları yokuş tarafında toprağa girer.
 - Rota planlayıcı tek tramvay yolculuğu planlar; aktarmalı rota henüz yok.
 - Üretilen hatlar gerçek değildir ve öyle etiketlenir; T3 gerçek hattır ama
   bölgenin yalnızca Altıyol–Bahariye kısmında binilebilir.
@@ -302,8 +311,8 @@ Plandaki mesajların karşılıkları (`game/net/net.gd`):
 
 ## Sıradaki adımlar (plan sırasıyla)
 
-1. NASADEM/SRTM yükseklik verisi ve yükseltilmiş kaldırımlar (zone formatında
-   `terrain` alanı hazır; `StreetLayout` ve `PlayerMotor` basamak çıkma hazır).
+1. Yükseltilmiş kaldırımlar ve basamaklı OSM yolları (`steps`); `PlayerMotor`
+   basamak çıkma hazır.
 2. Zone geçişi: komşu zone'ları önceden yükleme ve directory üzerinden transfer
    token'ı.
 3. Dünyayı parça parça kurmak (şu an bağlanırken kısa bir takılma var).

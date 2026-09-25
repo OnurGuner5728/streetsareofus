@@ -145,7 +145,7 @@ func _place_cats(zone: ZoneData, streets: StreetLayout) -> void:
 		k += 1
 		var start: Vector2 = w.path[0]
 		var end: Vector2 = w.path[mini(6, w.path.size() - 1)]
-		_cat_specs.append({"kind": "walk", "a": start, "b": end, "speed": 0.45, "phase": k * 13.0, "pos": Vector3(start.x, 0, -start.y),
+		_cat_specs.append({"kind": "walk", "a": start, "b": end, "speed": 0.45, "phase": k * 13.0, "pos": zone.ground(start.x, start.y),
 			"yaw": 0.0, "coat": k % coats})
 
 
@@ -174,7 +174,7 @@ func _update_cats(t: float) -> void:
 			moving = true
 			heading = a - b
 		var p := a.lerp(b, f)
-		spec.pos = Vector3(p.x, 0.0, -p.y)
+		spec.pos = Vector3(p.x, client.zone.terrain.height_en(p), -p.y)
 		var h := heading.normalized()
 		_cats.set_instance_transform(i, Transform3D(Basis(Vector3.UP, atan2(-h.x, h.y)), spec.pos))
 		_cats.set_instance_custom_data(i, Color(float(i) * 2.3, 2.0 if moving else 0.0, float(spec.coat), 0.0))
@@ -218,7 +218,8 @@ func _place_flocks(zone: ZoneData, streets: StreetLayout) -> void:
 		var offsets := []
 		for k in BIRDS_PER_FLOCK:
 			offsets.append(Vector3(_rng.randf_range(-2.2, 2.2), 0.0, _rng.randf_range(-2.2, 2.2)))
-		_flocks.append({"home": Vector3(home.x, 0.0, home.y), "at": Vector3(home.x, 0.0, home.y), "state": "ground",
+		var ground := zone.terrain.on_ground(home)
+		_flocks.append({"home": ground, "at": ground, "state": "ground",
 			"t": 0.0, "from": Vector3.ZERO, "to": Vector3.ZERO, "offsets": offsets, "yaws": offsets.map(func(_o): return _rng.randf() * TAU)})
 
 
@@ -234,7 +235,7 @@ func _update_birds(delta: float, people: Array) -> void:
 					flock.from = flock.at
 					var a := _rng.randf() * TAU
 					var land: Vector3 = flock.home + Vector3(cos(a), 0, sin(a)) * _rng.randf_range(4.0, 16.0)
-					flock.to = land
+					flock.to = client.zone.terrain.on_ground(Vector2(land.x, land.z))
 					break
 		else:
 			flock.t = float(flock.t) + delta

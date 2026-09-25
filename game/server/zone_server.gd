@@ -206,7 +206,9 @@ func _choose_spawn(pl: Player, mode: String) -> Dictionary:
 			var at := str(options.spawn_at).split(",")
 			p = {"e": float(at[0]), "n": float(at[1])}
 		var offset := Vector3((players.size() % 4) * 1.5, 0, (players.size() / 4) * 1.5)
-		return {"pos": ZoneData.to_godot(float(p.e), float(p.n), 0.05) + offset, "yaw": 0.0, "how": "cluster"}
+		var at := zone.ground(float(p.e), float(p.n), 0.05) + offset
+		at.y = zone.terrain.height(at.x, at.z) + 0.05
+		return {"pos": at, "yaw": 0.0, "how": "cluster"}
 	if mode == "resume":
 		var loc := store.last_location(pl.account_id, zone.zone_id, zone.version)
 		if not loc.is_empty():
@@ -224,9 +226,10 @@ func _choose_spawn(pl: Player, mode: String) -> Dictionary:
 ## ground or a platform, not in a car, bench or wall), else [].
 func standing_spot(body: CharacterBody3D, en: Vector2) -> Array:
 	var space := get_world_3d().direct_space_state
-	var top := Vector3(en.x, 3.0, -en.y)
+	var ground := zone.terrain.height_en(en)
+	var top := Vector3(en.x, ground + 3.0, -en.y)
 	var hit := space.intersect_ray(PhysicsRayQueryParameters3D.create(top, top - Vector3(0, 4.5, 0), Protocol.LAYER_WORLD))
-	if hit.is_empty() or hit.position.y > 0.5 or hit.normal.y < 0.7:
+	if hit.is_empty() or hit.position.y > ground + 0.5 or hit.normal.y < 0.7:
 		return []
 	var spot := Vector3(en.x, hit.position.y + 0.03, -en.y)
 	if body.test_move(Transform3D(Basis(), spot), Vector3.ZERO):
@@ -516,7 +519,7 @@ func _alight(pl: Player, st: Dictionary, reason: String) -> void:
 	var platform := line.platform(stop, dir) + heading * ((int(pl.riding.slot) % 6) - 2.5) * 0.8
 	# Narrow streets: never drop anyone into a wall; slide back towards the track.
 	var track := line.track_point(float(line.stops[stop].s), dir)
-	var pos := TransitNetwork.en_to_godot(platform, StreetLayout.PLATFORM_HEIGHT + 0.03)
+	var pos := zone.ground(platform.x, platform.y, StreetLayout.PLATFORM_HEIGHT + 0.03)
 	for k in 5:
 		var spot := standing_spot(pl.body, platform.lerp(track, k / 4.0 * 0.6))
 		if not spot.is_empty():

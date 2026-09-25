@@ -77,11 +77,8 @@ func update(t: float, night: float) -> void:
 		var sections: Array = veh.sections
 		for i in sections.size():
 			var s := float(st.s) + float(offsets[i]) * dir
-			var p := line.track_point(s, dir, float(st.side))
-			var h := line.tangent_at(s) * dir
 			var node: Node3D = sections[i]
-			node.global_transform = Transform3D(
-				Basis.looking_at(Vector3(h.x, 0.0, -h.y), Vector3.UP), Vector3(p.x, 0.0, -p.y))
+			node.global_transform = transit.section_transform(line, s, dir, float(st.side), line.section_length())
 		var closed: bool = not st.dwelling
 		if veh.doors_closed != closed:
 			veh.doors_closed = closed

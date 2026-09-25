@@ -30,18 +30,33 @@ static func _build_collision(zone: ZoneData, root: Node3D) -> void:
 
 	var s := zone.size_m
 	var h := zone.half_size()
-	_add_box(body, Vector3(0, -0.5, 0), Vector3(s + 200.0, 1.0, s + 200.0))
+	var terrain := zone.terrain
+	if terrain.flat:
+		_add_box(body, Vector3(0, -0.5, 0), Vector3(s + 200.0, 1.0, s + 200.0))
+	else:
+		# The real lie of the land: the same triangles Terrain.height() follows.
+		var ground := ConcavePolygonShape3D.new()
+		ground.set_faces(terrain.triangles())
+		ground.backface_collision = true
+		var cs := CollisionShape3D.new()
+		cs.name = "Ground"
+		cs.shape = ground
+		body.add_child(cs)
 	# Zone edges are walls until zone handoff exists.
-	var y := BOUNDARY_HEIGHT / 2.0
-	_add_box(body, Vector3(h + 0.5, y, 0), Vector3(1.0, BOUNDARY_HEIGHT, s + 2.0))
-	_add_box(body, Vector3(-h - 0.5, y, 0), Vector3(1.0, BOUNDARY_HEIGHT, s + 2.0))
-	_add_box(body, Vector3(0, y, h + 0.5), Vector3(s + 2.0, BOUNDARY_HEIGHT, 1.0))
-	_add_box(body, Vector3(0, y, -h - 0.5), Vector3(s + 2.0, BOUNDARY_HEIGHT, 1.0))
+	var y := terrain.low - 5.0 + (BOUNDARY_HEIGHT + terrain.high - terrain.low) / 2.0
+	var wall_h := BOUNDARY_HEIGHT + terrain.high - terrain.low + 5.0
+	_add_box(body, Vector3(h + 0.5, y, 0), Vector3(1.0, wall_h, s + 2.0))
+	_add_box(body, Vector3(-h - 0.5, y, 0), Vector3(1.0, wall_h, s + 2.0))
+	_add_box(body, Vector3(0, y, h + 0.5), Vector3(s + 2.0, wall_h, 1.0))
+	_add_box(body, Vector3(0, y, -h - 0.5), Vector3(s + 2.0, wall_h, 1.0))
 
 	for b in zone.buildings:
 		var poly := footprint_xz(b.footprint)
-		var bottom := float(b.min_height)
-		var top := float(b.height)
+		# Floors are counted from the lowest ground under the building; on a
+		# slope the walls carry on into the hillside below that.
+		var ground_ref := terrain.ground_under(poly)
+		var bottom := ground_ref + float(b.min_height) if float(b.min_height) > 0.1 else ground_ref - 1.0
+		var top := ground_ref + float(b.height)
 		var parts: Array = Geometry2D.decompose_polygon_in_convex(poly)
 		if parts.is_empty():
 			parts = [Geometry2D.convex_hull(poly)]
@@ -68,7 +83,8 @@ static func _build_collision(zone: ZoneData, root: Node3D) -> void:
 		if g.shelter:
 			_add_box_xf(body, xf * Transform3D(Basis(), Vector3(1.1, 1.3, 0)), Vector3(0.12, 2.5, 3.5))  # shelter back
 	for c in layout.cars:
-		_add_box_xf(body, Transform3D(Basis(Vector3.UP, float(c.yaw)), c.pos + Vector3(0, StreetLayout.CAR_SIZE.y / 2.0, 0)), StreetLayout.CAR_SIZE)
+		var car_basis: Basis = c.basis
+		_add_box_xf(body, Transform3D(car_basis, c.pos + car_basis.y * StreetLayout.CAR_SIZE.y / 2.0), StreetLayout.CAR_SIZE)
 	for bench in layout.benches:
 		var seat := StreetLayout.BENCH_SIZE
 		_add_box_xf(body, Transform3D(Basis(Vector3.UP, float(bench.yaw)), bench.pos + Vector3(0, seat.y / 2.0, 0)), seat)
@@ -119,7 +135,7 @@ static func footprint_xz(points: Array) -> PackedVector2Array:
 static func tree_points(zone: ZoneData) -> Array:
 	var out := []
 	for t in zone.trees:
-		out.append(Vector3(float(t[0]), 0.0, -float(t[1])))
+		out.append(zone.ground(float(t[0]), float(t[1])))
 	for area in zone.areas:
 		if not TREE_KINDS.has(area.kind):
 			continue
@@ -135,7 +151,7 @@ static func tree_points(zone: ZoneData) -> Array:
 				var p := Vector2(x + (_hash01(key + "x") - 0.5) * 4.0, z + (_hash01(key + "z") - 0.5) * 4.0)
 				if _hash01(key) < 0.75 and Geometry2D.is_point_in_polygon(p, poly) \
 						and _edge_distance(p, poly) > 1.5 and not _on_road(zone, p):
-					out.append(Vector3(p.x, 0.0, p.y))
+					out.append(zone.terrain.on_ground(p))
 				z += TREE_SPACING
 			x += TREE_SPACING
 	return out

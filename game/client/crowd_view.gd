@@ -3,6 +3,7 @@ extends Node3D
 ## Draws the Crowd (ambient NPC pedestrians): one MultiMesh for everyone,
 ## legs and arms swung by the vertex shader, clothes picked from palettes by
 ## per-instance data. How many walk depends on the hour and on quality.
+## Pedestrians step aside for real people (a visual nudge off their route).
 
 const NEAR := 55.0
 const COUNT_BY_QUALITY := [24, 50, 90]
@@ -61,6 +62,8 @@ var _count := 0
 var _frame := 0
 var _last := []  # last position per walker (Vector3), for the near/far split
 var _cadence := PackedFloat32Array()
+var _aside := PackedVector2Array()  # current sidestep per walker (XZ)
+const GIVE_WAY := 1.1  # metres at which a pedestrian starts stepping aside
 
 
 func setup(game: GameClient) -> void:
@@ -77,6 +80,7 @@ func setup(game: GameClient) -> void:
 		_mm.set_instance_custom_data(i, Color(float(i) * 1.7, 0.0, float(w.looks[0] + w.looks[1] * 8), float(w.looks[2] + w.looks[3] * 4)))
 		_last.append(Vector3(0, -100, 0))
 		_cadence.append(0.0)
+		_aside.append(Vector2.ZERO)
 	var mmi := MultiMeshInstance3D.new()
 	mmi.name = "Crowd"
 	mmi.multimesh = _mm
@@ -96,6 +100,15 @@ func update(now_server: float, hours: float) -> void:
 		_count = target
 		_mm.visible_instance_count = _count
 	var cam := client.camera.global_position if client.camera else Vector3.ZERO
+	# Where real people are, to give way to them.
+	var people := PackedVector2Array()
+	if client.body:
+		people.append(Vector2(client.body.global_position.x, client.body.global_position.z))
+	for r in client.remotes.values():
+		var rp := (r as Node3D).global_position
+		if rp.distance_to(cam) < NEAR:
+			people.append(Vector2(rp.x, rp.z))
+	var dt := minf(get_process_delta_time(), 0.1)
 	for i in _count:
 		# People near the camera move every frame, the rest a few times a second.
 		if (_last[i] as Vector3).distance_to(cam) > NEAR and (i + _frame) % 6 != 0:
@@ -104,7 +117,19 @@ func update(now_server: float, hours: float) -> void:
 		var pose := w.pose(now_server)
 		var p: Vector2 = pose[0]
 		var h: Vector2 = pose[1]
-		var pos := Vector3(p.x, 0.0, -p.y)
+		var xz := Vector2(p.x, -p.y)
+		var want := Vector2.ZERO
+		if (_last[i] as Vector3).distance_to(cam) < NEAR:
+			for q in people:
+				var away := xz + _aside[i] - q
+				var d := away.length()
+				if d < GIVE_WAY and d > 0.001:
+					# Sideways relative to their walk, towards whichever side they are on.
+					var side := Vector2(h.y, h.x)
+					want += side * signf(side.dot(away) + 0.001) * (GIVE_WAY - d) * 1.4
+		_aside[i] = _aside[i].lerp(want.limit_length(1.2), 1.0 - exp(-4.0 * dt))
+		xz += _aside[i]
+		var pos := Vector3(xz.x, client.zone.terrain.height(xz.x, xz.y), xz.y)
 		_last[i] = pos
 		_mm.set_instance_transform(i, Transform3D(Basis(Vector3.UP, atan2(-h.x, h.y)).scaled(Vector3.ONE * w.size), pos))
 		var cadence := w.speed * 4.6 if pose[2] else 0.0

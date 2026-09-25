@@ -22,6 +22,7 @@ const CAR_HALF_WIDTH := 1.2
 
 var lines: Array = []  # of TransitLine
 var zone_half := 256.0
+var terrain := Terrain.new()  # set by ZoneData; flat until then
 var _state_cache := {}  # Vector3i(line, vehicle, tick) -> state
 var _coarse_tick := -1000000
 var _coarse: Array = []  # [line, vehicle, pos (EN)] at _coarse_tick
@@ -406,7 +407,8 @@ func boxes_near(tick: int, p: Vector2, radius: float) -> Array:
 			var s := float(st.s) + float(off) * dir
 			var c := line.track_point(s, dir, float(st.side))
 			var h := line.tangent_at(s) * dir
-			out.append([Vector2(c.x, -c.y), Vector2(h.x, -h.y), line.section_length() / 2.0 + 0.1, CAR_HALF_WIDTH, float(st.speed)])
+			out.append([Vector2(c.x, -c.y), Vector2(h.x, -h.y), line.section_length() / 2.0 + 0.1, CAR_HALF_WIDTH, float(st.speed),
+				terrain.height_en(c)])
 	return out
 
 
@@ -421,7 +423,18 @@ func rider_position(line_index: int, vehicle: int, slot: int, t: float) -> Vecto
 	var s := float(st.s) + along * int(st.dir)
 	var heading := line.tangent_at(s) * int(st.dir)
 	var p := line.track_point(s, int(st.dir)) + Vector2(heading.y, -heading.x) * side
-	return en_to_godot(p, FLOOR_HEIGHT)
+	return en_to_godot(p, terrain.height_en(p) + FLOOR_HEIGHT)
+
+
+## A tram section's pose: on the rails at arc length s, pitched with the
+## slope between its two ends (length `span`). -Z points along travel.
+func section_transform(line: TransitLine, s: float, dir: int, side: float, span: float) -> Transform3D:
+	var c := line.track_point(s, dir, side)
+	var h := line.tangent_at(s) * dir
+	var front := terrain.height_en(line.track_point(s + dir * span / 2.0, dir, side))
+	var back := terrain.height_en(line.track_point(s - dir * span / 2.0, dir, side))
+	var forward := Vector3(h.x, (front - back) / maxf(span, 0.1), -h.y)
+	return Transform3D(Basis.looking_at(forward, Vector3.UP), Vector3(c.x, (front + back) / 2.0, -c.y))
 
 
 ## Vehicle (state dict) dwelling at an in-zone stop within `radius` of p, where

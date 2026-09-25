@@ -14,6 +14,7 @@ func _ready() -> void:
 		test_store, test_spawn_picker, test_zone_load,
 		test_world_collision, test_motor_walks_and_is_blocked, test_replay_matches_realtime,
 		test_client_and_server_worlds_agree, test_step_up, test_tram_shoves_and_blocks, test_props, test_crowd,
+		test_terrain,
 		test_transit_network, test_transit_timetable, test_walking_routes, test_route_prefers_tram,
 	]
 	for t in tests:
@@ -397,7 +398,7 @@ func test_client_and_server_worlds_agree() -> void:
 		var other := PlayerMotor.make_body(AvatarSpec.defaults())
 		worlds[1].add_child(other)
 		var sp: Dictionary = zone.spawn_points[i]
-		other.global_position = ZoneData.to_godot(float(sp.e), float(sp.n), 0.05)
+		other.global_position = zone.ground(float(sp.e), float(sp.n), 0.05)
 		crowd.append(other)
 	await get_tree().physics_frame
 	await get_tree().physics_frame
@@ -412,7 +413,7 @@ func test_client_and_server_worlds_agree() -> void:
 		for w in worlds:
 			var b := PlayerMotor.make_body(AvatarSpec.defaults())
 			w.add_child(b)
-			b.global_position = ZoneData.to_godot(float(sp.e), float(sp.n), 0.05)
+			b.global_position = zone.ground(float(sp.e), float(sp.n), 0.05)
 			bodies.append(b)
 		await get_tree().physics_frame
 		var heading := rng.randf() * TAU
@@ -517,7 +518,7 @@ func test_tram_shoves_and_blocks() -> void:
 	for run in 2:
 		var body := PlayerMotor.make_body(AvatarSpec.defaults())
 		holder.add_child(body)
-		body.global_position = TransitNetwork.en_to_godot(en, 0.05)
+		body.global_position = zone.ground(en.x, en.y, 0.05)
 		await get_tree().physics_frame
 		for k in 75:
 			var inp := SnapshotCodec.quantize_input(k + 1, 0, 0, 0.0, 0, 0, tick0 + k)
@@ -552,7 +553,7 @@ func test_tram_shoves_and_blocks() -> void:
 		var start_en: Vector2 = (st.pos as Vector2) + right * 3.2
 		var body := PlayerMotor.make_body(AvatarSpec.defaults())
 		holder.add_child(body)
-		body.global_position = TransitNetwork.en_to_godot(start_en, 0.05)
+		body.global_position = zone.ground(start_en.x, start_en.y, 0.05)
 		await get_tree().physics_frame
 		var toward := (st.pos as Vector2) - start_en
 		var heading := atan2(-toward.x, toward.y)
@@ -633,6 +634,63 @@ func test_props() -> void:
 	check(moved > 2.0, "a running player kicks the ball (%.1f m)" % moved)
 	check(moving_seen, "a moving prop is reported for snapshots")
 	check(world.displaced_poses().size() >= 1, "displaced props are remembered for joiners")
+	vp.queue_free()
+
+
+## The real lie of the land: the collider is exactly where Terrain.height()
+## says, buildings stand on it, and a player can walk uphill.
+func test_terrain() -> void:
+	var zone := ZoneData.load_zone("tr_istanbul_kadikoy_001")
+	var t := zone.terrain
+	check(not t.flat and t.high - t.low > 10.0, "Kadıköy has real relief (%.1f m)" % (t.high - t.low))
+	near(t.height(-t.half, -t.half), t.heights[0], 0.001, "height() hits the north-west sample")
+	var vp := SubViewport.new()
+	vp.own_world_3d = true
+	add_child(vp)
+	var holder := Node3D.new()
+	vp.add_child(holder)
+	WorldBuilder.build(zone, holder, false)
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	var space := holder.get_world_3d().direct_space_state
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 5
+	var worst := 0.0
+	var probes := 0
+	for k in 60:
+		var x := rng.randf_range(-240.0, 240.0)
+		var z := rng.randf_range(-240.0, 240.0)
+		var ray := PhysicsRayQueryParameters3D.create(Vector3(x, 200, z), Vector3(x, -50, z), Protocol.LAYER_WORLD)
+		var hit := space.intersect_ray(ray)
+		# Only where nothing stands on the ground (buildings, cars...).
+		if hit.is_empty() or absf(hit.position.y - t.height(x, z)) > 0.5:
+			continue
+		probes += 1
+		worst = maxf(worst, absf(hit.position.y - t.height(x, z)))
+	check(probes > 15 and worst < 0.02, "ground collider matches height() (%d probes, worst %.3f m)" % [probes, worst])
+	var b: Dictionary = zone.buildings[10]
+	var poly := WorldBuilder.footprint_xz(b.footprint)
+	var c := Vector2.ZERO
+	for p in poly:
+		c += p
+	c /= poly.size()
+	var roof := space.intersect_ray(PhysicsRayQueryParameters3D.create(Vector3(c.x, 300, c.y), Vector3(c.x, -50, c.y), Protocol.LAYER_WORLD))
+	if Geometry2D.is_point_in_polygon(c, poly) and not roof.is_empty():
+		near(roof.position.y, t.ground_under(poly) + float(b.height), 0.05, "roof stands on the building's ground")
+	# Walk up the steepest nearby slope for three seconds.
+	var start := Vector2(-150, 40)
+	var up := Vector2(t.height(start.x + 1, start.y) - t.height(start.x - 1, start.y), t.height(start.x, start.y + 1) - t.height(start.x, start.y - 1))
+	var body := PlayerMotor.make_body(AvatarSpec.defaults())
+	holder.add_child(body)
+	body.global_position = t.on_ground(start, 0.05)
+	await get_tree().physics_frame
+	var yaw := atan2(-up.x, -up.y)
+	for k in 90:
+		PlayerMotor.step(body, SnapshotCodec.quantize_input(k + 1, 0, 1, yaw, 0, 0))
+	var climbed := body.global_position.y - t.height(start.x, start.y)
+	var ground_gap := body.global_position.y - t.height(body.global_position.x, body.global_position.z)
+	check(up.length() < 0.01 or climbed > 0.05, "walking uphill gains height (%.2f m)" % climbed)
+	check(absf(ground_gap) < 0.1, "feet stay on the ground on a slope (%.3f m)" % ground_gap)
 	vp.queue_free()
 
 

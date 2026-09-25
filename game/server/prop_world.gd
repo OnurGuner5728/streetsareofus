@@ -69,9 +69,8 @@ func _on_sleep_changed(id: int) -> void:
 
 
 func _any_prop_near(en: Vector2, radius: float) -> bool:
-	var q := Vector3(en.x, 0.0, -en.y)
 	for i in _pos.size():
-		var d := _pos[i] - q
+		var d := _pos[i] - Vector3(en.x, _pos[i].y, -en.y)
 		if absf(d.x) < radius and absf(d.z) < radius:
 			return true
 	return false
@@ -150,9 +149,7 @@ func update_trams(t: float) -> void:
 			continue
 		var dir: int = st.dir
 		var s := float(st.s) + float(entry[2]) * dir
-		var c := line.track_point(s, dir, float(st.side))
-		var h := line.tangent_at(s) * dir
-		ab.global_transform = Transform3D(Basis.looking_at(Vector3(h.x, 0.0, -h.y), Vector3.UP), Vector3(c.x, 0.0, -c.y))
+		ab.global_transform = transit.section_transform(line, s, dir, float(st.side), line.section_length())
 
 
 ## Whatever a player moves into is pushed along at (a share of) their

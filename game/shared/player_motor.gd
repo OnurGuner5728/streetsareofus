@@ -121,14 +121,14 @@ static func _step_up(body: CharacterBody3D, start: Transform3D, motion: Vector3)
 ## sideways off the track.
 static func _collide_trams(body: CharacterBody3D, transit: TransitNetwork, tick: int) -> int:
 	var pos := body.global_position
-	if pos.y > 3.6:
-		return 0
 	var radius := 0.3
 	var capsule := body.get_node_or_null("Capsule") as CollisionShape3D
 	if capsule:
 		radius = (capsule.shape as CapsuleShape3D).radius
 	var events := 0
 	for box in transit.boxes_near(tick, Vector2(pos.x, pos.z), TRAM_REACH):
+		if body.global_position.y - float(box[5]) > 3.6:
+			continue  # above the roof
 		var p := Vector2(body.global_position.x, body.global_position.z)
 		var c: Vector2 = box[0]
 		var a: Vector2 = box[1]

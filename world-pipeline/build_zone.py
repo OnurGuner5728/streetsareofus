@@ -15,7 +15,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from zonegen import osm  # noqa: E402
+from zonegen import osm, terrain  # noqa: E402
 from zonegen.package import write_package  # noqa: E402
 from zonegen.spawn import compute_spawn_points  # noqa: E402
 from zonegen.synthetic import build_synthetic_zone  # noqa: E402
@@ -32,6 +32,11 @@ def cmd_osm(args) -> int:
     raw = osm.load_or_fetch(HERE / "cache" / f"{args.zone_id}.overpass.json", bbox, args.refresh)
     data = osm.parse(raw)
     zone = builder.build(data)
+    if not args.flat:
+        dem = terrain.load_or_fetch(HERE / "cache" / f"{args.zone_id}.dem.json", builder.proj, args.size,
+                                    16.0, 48.0, args.refresh)
+        zone["terrain"] = terrain.build_terrain(dem, args.size)
+        print(f"  terrain: {zone['terrain']['relief_m']} m of relief above {zone['terrain']['base_m']} m ({dem['source']})")
     zone["transit"] = build_transit(data, builder.proj, zone)
     spawns = compute_spawn_points(zone)
     if not spawns:
@@ -46,6 +51,12 @@ def cmd_osm(args) -> int:
         "acquired_via": "Overpass API bbox query",
         "acquired_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
     }]
+    if zone["terrain"].get("type") == "grid":
+        sources.append({
+            "source": "elevation", "license": "public domain (NASA SRTM / ASTER GDEM) or CC BY 4.0 (Copernicus DEM)",
+            "attribution": "Yükseklik: " + zone["terrain"].get("source", "DEM"),
+            "acquired_via": "OpenTopoData / Open-Meteo elevation API",
+        })
     out = write_package(Path(args.out), zone, spawns, sources, builder.stats, builder.warnings)
     _report(out, zone, spawns, builder.stats, builder.warnings)
     return 0
@@ -89,7 +100,8 @@ def main(argv=None) -> int:
     p_osm.add_argument("--name", help="human readable zone name shown in game")
     p_osm.add_argument("--size", type=float, default=512.0, help="cell edge length in metres")
     p_osm.add_argument("--version", type=int, default=2)
-    p_osm.add_argument("--refresh", action="store_true", help="ignore the cached extract")
+    p_osm.add_argument("--refresh", action="store_true", help="ignore the cached extract and elevation")
+    p_osm.add_argument("--flat", action="store_true", help="skip elevation data (flat ground)")
     p_osm.add_argument("--out", default=str(DEFAULT_OUT))
     p_osm.set_defaults(func=cmd_osm)
 

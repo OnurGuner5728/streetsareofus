@@ -117,12 +117,12 @@ func _replan() -> void:
 	if client.fleet:
 		client.fleet.set_highlight(int(tram.line) if not tram.is_empty() else -1, int(tram.get("dir", 0)))
 	_beam.visible = true
-	_beam.position = ZoneData.to_godot(_goal.x, _goal.y, 35.0)
+	_beam.position = client.zone.ground(_goal.x, _goal.y, 35.0)
 	_board_marker.visible = not tram.is_empty()
 	if not tram.is_empty():
 		var line: TransitNetwork.TransitLine = client.transit.lines[tram.line]
 		var plat := line.platform(int(tram.from), int(tram.dir))
-		_board_marker.position = ZoneData.to_godot(plat.x, plat.y, 3.2)
+		_board_marker.position = client.zone.ground(plat.x, plat.y, 3.2)
 		_board_marker.text = "Buradan bin: %s → %s" % [line.id, line.destination(int(tram.dir))]
 	_build_ribbon()
 
@@ -159,6 +159,15 @@ func _build_ribbon() -> void:
 	if pts.size() < 2:
 		_ribbon.mesh = null
 		return
+	# Follow the ground: split into short pieces (EN points).
+	var dense := PackedVector2Array()
+	for i in pts.size() - 1:
+		var n := maxi(1, ceili(pts[i].distance_to(pts[i + 1]) / 3.0))
+		for k in n:
+			dense.append(pts[i].lerp(pts[i + 1], float(k) / n))
+	dense.append(pts[pts.size() - 1])
+	pts = dense
+	var terrain := client.zone.terrain
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var along := 0.0
@@ -173,7 +182,7 @@ func _build_ribbon() -> void:
 		for k in [0, 1, 2, 0, 2, 3]:
 			st.set_uv(uvs[k])
 			var c: Vector2 = corners[k]
-			st.add_vertex(Vector3(c.x, 0.09, -c.y))
+			st.add_vertex(Vector3(c.x, terrain.height_en(c) + 0.12, -c.y))
 		along += seg
 	_ribbon.mesh = st.commit()
 

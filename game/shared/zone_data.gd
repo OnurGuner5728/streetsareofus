@@ -23,6 +23,7 @@ var trees: Array = []  # [e, n, height]
 var crossings: Array = []  # [e, n]
 var lamps: Array = []  # [e, n]
 var transit: TransitNetwork
+var terrain: Terrain
 var _graph: RoadGraph = null
 
 var _m_lat := 111000.0
@@ -61,7 +62,9 @@ static func load_zone(id: String) -> ZoneData:
 	zone.trees = z.get("trees", [])
 	zone.crossings = z.get("crossings", [])
 	zone.lamps = z.get("lamps", [])
+	zone.terrain = Terrain.from_zone(z.get("terrain"), zone.size_m / 2.0)
 	zone.transit = TransitNetwork.from_zone(z.get("transit"), zone.size_m / 2.0)
+	zone.transit.terrain = zone.terrain
 	var spawn_json: Variant = _read_json(base + "/spawn_points.json")
 	if typeof(spawn_json) == TYPE_DICTIONARY:
 		zone.spawn_points = spawn_json.get("points", [])
@@ -91,6 +94,11 @@ static func to_godot(e: float, n: float, height := 0.0) -> Vector3:
 
 static func to_en(pos: Vector3) -> Vector2:
 	return Vector2(pos.x, -pos.z)
+
+
+## Ground-level point for east/north coordinates, lifted by `lift`.
+func ground(e: float, n: float, lift := 0.0) -> Vector3:
+	return Vector3(e, terrain.height(e, -n) + lift, -n)
 
 
 ## Returns [latitude, longitude] for a Godot-space position. 64-bit on

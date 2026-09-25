@@ -5,12 +5,13 @@
     "lon": 29.02965
   },
   "size_m": 512.0,
-  "version": 2,
+  "version": 3,
   "format": 2,
-  "generated_at": "2026-09-25T08:13:13+00:00",
+  "generated_at": "2026-09-25T13:34:04+00:00",
   "generator": "world-pipeline/build_zone.py",
   "data_sources": [
-    "openstreetmap"
+    "openstreetmap",
+    "elevation"
   ],
   "counts": {
     "buildings": 828,

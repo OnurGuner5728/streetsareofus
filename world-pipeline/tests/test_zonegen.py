@@ -228,3 +228,47 @@ class TransitTests(unittest.TestCase):
                 plat = st["platform"]
                 self.assertGreaterEqual(plat["r"], line["track_offset"] + 1.0)
                 self.assertLessEqual(plat["r"], plat["r_room"] + 1.0)
+
+
+class TerrainTests(unittest.TestCase):
+    """Elevation grid processing (no network: raw samples are synthetic)."""
+
+    def _raw(self, fn, size_m=128.0, spacing=16.0, margin=16.0):
+        from zonegen import terrain
+        pts, per_side = terrain.sample_points(size_m, spacing, margin)
+        return {"per_side": per_side, "spacing": spacing, "margin": margin, "source": "test",
+                "heights": [fn(e, n) for e, n in pts]}
+
+    def test_sample_grid_covers_zone_and_margin(self):
+        from zonegen import terrain
+        pts, per_side = terrain.sample_points(128.0, 16.0, 16.0)
+        self.assertEqual(per_side, 11)
+        self.assertEqual(pts[0], (-80.0, 80.0))  # north-west corner first
+        self.assertEqual(pts[-1], (80.0, -80.0))
+
+    def test_plane_survives_smoothing_and_resampling(self):
+        from zonegen import terrain
+        # A 5 % slope rising to the east stays a 5 % slope.
+        out = terrain.build_terrain(self._raw(lambda e, n: 10.0 + 0.05 * e), 128.0, out_spacing=8.0, sigma_m=20.0)
+        size = out["size"]
+        self.assertEqual(size, 17)
+        self.assertEqual(len(out["heights_cm"]), size * size)
+        row = out["heights_cm"][8 * size:9 * size]
+        steps = [row[i + 1] - row[i] for i in range(size - 1)]
+        for s in steps[3:-3]:
+            self.assertAlmostEqual(s, 40, delta=3)  # 8 m * 5 % = 40 cm
+        self.assertEqual(min(out["heights_cm"]), 0)  # relative to the lowest point
+        self.assertAlmostEqual(out["base_m"], 10.0 - 0.05 * 64.0, delta=0.6)
+
+    def test_rooftop_bumps_are_smoothed_away(self):
+        from zonegen import terrain
+        # Flat ground with one 12 m "building" sample in the middle.
+        raw = self._raw(lambda e, n: 12.0 if abs(e) < 1 and abs(n) < 1 else 0.0)
+        out = terrain.build_terrain(raw, 128.0, sigma_m=28.0)
+        self.assertLess(out["relief_m"], 2.0)
+
+    def test_rows_run_north_to_south(self):
+        from zonegen import terrain
+        out = terrain.build_terrain(self._raw(lambda e, n: 0.1 * n), 128.0, sigma_m=8.0)
+        size = out["size"]
+        self.assertGreater(out["heights_cm"][0], out["heights_cm"][(size - 1) * size])

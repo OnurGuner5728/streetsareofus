@@ -102,6 +102,8 @@ var _render_scale := 1.0
 var _hud_tick := 0.0
 var _step_visual := 0.0  # eases the camera up kerbs and platforms
 var _flashing := false
+var _early_weather := {}
+var _early_props := PackedByteArray()
 var _shake := 0.0
 var _tram_hit_at := -INF
 var _tram_warned_at := -INF
@@ -197,10 +199,16 @@ func on_welcome(info: Dictionary) -> void:
 	transit = zone.transit
 	# Trams need a clock before the first snapshot arrives.
 	_clock_offset = now() - float(info.get("server_time", 0.0))
+	_connect_started = 0.0  # welcomed: building the city may take a while on a phone
+	var loading: CanvasLayer = null
 	if not _headless:
 		_quality_setting = GraphicsQuality.from_key(str(options.get("quality", "auto")))
 		GraphicsQuality.level = GraphicsQuality.initial_level(_quality_setting)
 		CityMaterials.set_lite(GraphicsQuality.lite_shaders())
+		# Show something while the city is built (seconds on a phone).
+		loading = _loading_screen(zone.display_name)
+		await get_tree().process_frame
+		await get_tree().process_frame
 	var world := WorldBuilder.build(zone, self, not _headless)
 	if not _headless:
 		var city: Dictionary = world.get_meta("city", {})
@@ -305,7 +313,33 @@ func on_welcome(info: Dictionary) -> void:
 					2 * CityMap.MINI_RADIUS, 2 * CityMap.MINI_RADIUS)]
 	joined = true
 	_joined_at = now()
+	if loading:
+		loading.queue_free()
+	# Messages that arrived while the city was being built.
+	if not _early_weather.is_empty():
+		on_weather(_early_weather)
+	if not _early_props.is_empty():
+		on_props(_early_props)
 	log_line("welcome id=%d zone=%s spawn=%s" % [my_id, zone.zone_id, body.global_position.snapped(Vector3.ONE * 0.1)])
+
+
+func _loading_screen(place: String) -> CanvasLayer:
+	var layer := CanvasLayer.new()
+	layer.layer = 20
+	add_child(layer)
+	var bg := ColorRect.new()
+	bg.color = Color("1b2430")
+	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	layer.add_child(bg)
+	var label := Label.new()
+	label.text = "%s kuruluyor…
+sokaklar, binalar, tramvaylar" % place
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	label.add_theme_font_size_override("font_size", 24)
+	label.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	bg.add_child(label)
+	return layer
 
 
 func on_snapshot(data: PackedByteArray) -> void:
@@ -467,12 +501,18 @@ func on_rider(id: int, ride: Array) -> void:
 
 
 func on_weather(info: Dictionary) -> void:
+	if not joined:
+		_early_weather = info
+		return
 	log_line("weather: %s" % WeatherService.describe(info))
 	if weather_view:
 		weather_view.set_info(info)
 
 
 func on_props(data: PackedByteArray) -> void:
+	if not joined:
+		_early_props = data
+		return
 	var poses: Variant = SnapshotCodec.decode_props(data)
 	if poses != null and props_view:
 		props_view.apply_now(poses)
@@ -1001,7 +1041,7 @@ func _maybe_screenshot() -> void:
 		var best := {}
 		for veh in fleet.vehicle_nodes():
 			var st := (transit.lines[veh.line] as TransitNetwork.TransitLine).state(veh.vehicle, server_now())
-			var p := TransitNetwork.en_to_godot(st.pos, 1.6)
+			var p := zone.ground(st.pos.x, st.pos.y, 1.6)
 			var d := p.distance_to(camera.global_position)
 			var ray := PhysicsRayQueryParameters3D.create(camera.global_position, p, Protocol.LAYER_WORLD)
 			var seen := get_world_3d().direct_space_state.intersect_ray(ray).is_empty()

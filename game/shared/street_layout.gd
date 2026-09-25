@@ -32,7 +32,7 @@ var tracks: Array = []  # PackedVector2Array track centre lines (XZ)
 
 ## Results, each an Array of Dictionaries.
 var lamps: Array = []  # {base: Vector3, head: Vector3, yaw}
-var cars: Array = []  # {pos: Vector3, yaw, color: Color, taxi: bool}
+var cars: Array = []  # {pos: Vector3, basis: Basis (tilted with the slope), yaw, color: Color, taxi: bool}
 var benches: Array = []  # {pos: Vector3, yaw}
 var bollards: Array = []  # Vector3
 var stops: Array = []  # {xf: Transform3D, name, color, long, room, track_gap, serves, slab: [centre, size] or []}
@@ -193,12 +193,16 @@ func _place_stops() -> void:
 						"track_gap": plat - line.track_offset,
 						"long": line.vehicle_type != "nostalgic", "serves": [], "color": line.color}
 				groups[key].serves.append([line.index, i, dir])
+	var terrain := zone.terrain
 	for g in groups.values():
 		var en: Vector2 = g.pos
 		var t: Vector2 = g.tangent
-		# Local frame: -Z along travel, +X away from the track.
-		var xf := Transform3D(Basis.looking_at(Vector3(t.x, 0, -t.y), Vector3.UP), Vector3(en.x, 0.0, -en.y))
 		var length := 26.0 if g.long else 13.0
+		# Local frame: -Z along travel, +X away from the track, pitched with
+		# the street so the platform follows the slope like the rails do.
+		var rise := terrain.height_en(en + t * length / 2.0) - terrain.height_en(en - t * length / 2.0)
+		var xf := Transform3D(Basis.looking_at(Vector3(t.x, rise / length, -t.y), Vector3.UP),
+			Vector3(en.x, terrain.height_en(en), -en.y))
 		var inner := -(float(g.track_gap) - TransitNetwork.CAR_HALF_WIDTH - 0.1)
 		var outer := minf(0.6, float(g.room) - 0.2)
 		g.xf = xf
@@ -237,8 +241,9 @@ func _place_lamps() -> void:
 						or building_clearance(p) < 0.4:
 					continue
 				var yaw := atan2(-n.x, -n.y)  # local +Z (the arm) points towards the street centre
-				lamps.append({"base": Vector3(p.x, 0.0, p.y), "yaw": yaw,
-					"head": Vector3(p.x - n.x * 1.1, 5.75, p.y - n.y * 1.1)})
+				var ground := zone.terrain.height(p.x, p.y)
+				lamps.append({"base": Vector3(p.x, ground, p.y), "yaw": yaw,
+					"head": Vector3(p.x - n.x * 1.1, ground + 5.75, p.y - n.y * 1.1)})
 			walked += seg
 
 
@@ -282,7 +287,9 @@ func _place_cars() -> void:
 					var yaw := atan2(-d.x, -d.y) + (PI if h > 0.8 else 0.0)
 					var colour := Color(str(CAR_COLOURS[int(WorldBuilder._hash01(key + str(slot) + "c") * CAR_COLOURS.size())]))
 					var taxi := WorldBuilder._hash01(key + str(slot) + "t") < 0.12
-					cars.append({"pos": Vector3(p.x, 0.0, p.y), "yaw": yaw, "color": Color(TAXI) if taxi else colour, "taxi": taxi})
+					var at := zone.terrain.on_ground(p)
+					cars.append({"pos": at, "basis": zone.terrain.resting_basis(at, yaw), "yaw": yaw,
+						"color": Color(TAXI) if taxi else colour, "taxi": taxi})
 				walked += seg
 
 
@@ -315,7 +322,7 @@ func _place_bollards() -> void:
 			for k in count:
 				var q := base + across * (-w / 2.0 + 0.5 + k * (w - 1.0) / maxf(1.0, count - 1))
 				if building_clearance(q) > 0.5 and not near_track(q, 2.0):
-					bollards.append(Vector3(q.x, 0.0, q.y))
+					bollards.append(zone.terrain.on_ground(q))
 
 
 ## Benches along park and plaza edges, facing inwards.
@@ -344,5 +351,5 @@ func _place_benches() -> void:
 				if not Geometry2D.is_point_in_polygon(p, poly) or building_clearance(p) < 1.0 \
 						or not inside_zone(p, 4.0) or _occupied(p, 1.0) or near_track(p, 3.0):
 					continue
-				benches.append({"pos": Vector3(p.x, 0.0, p.y), "yaw": atan2(-inward.x, -inward.y)})
+				benches.append({"pos": zone.terrain.on_ground(p), "yaw": atan2(-inward.x, -inward.y)})
 			walked += seg
