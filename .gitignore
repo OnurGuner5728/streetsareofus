@@ -1,0 +1,15 @@
+# Godot
+game/.godot/
+game/export/
+build/
+*.tmp
+
+# Raw OSM extracts are re-downloadable; the derived zone packages in game/zones are kept.
+world-pipeline/cache/
+
+# Python
+__pycache__/
+*.pyc
+
+# Local server data (accounts, reports, audit logs)
+server_data/

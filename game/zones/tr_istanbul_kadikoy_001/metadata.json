@@ -1,0 +1,32 @@
+{
+  "zone_id": "tr_istanbul_kadikoy_001",
+  "origin": {
+    "lat": 40.9895,
+    "lon": 29.02965
+  },
+  "size_m": 512.0,
+  "version": 2,
+  "format": 2,
+  "generated_at": "2026-09-25T08:13:13+00:00",
+  "generator": "world-pipeline/build_zone.py",
+  "data_sources": [
+    "openstreetmap"
+  ],
+  "counts": {
+    "buildings": 828,
+    "roads": 134,
+    "areas": 19,
+    "pois": 430,
+    "spawn_points": 250
+  },
+  "stats": {
+    "roads": 134,
+    "area_parking": 7,
+    "buildings": 828,
+    "area_grass": 5,
+    "area_plaza": 1,
+    "area_park": 6,
+    "pois": 430
+  },
+  "warnings": []
+}
