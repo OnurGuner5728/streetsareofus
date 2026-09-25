@@ -1355,10 +1355,7 @@
     "baseColorTexture": {
      "index": 5
     },
-    "metallicFactor": 0,
-    "metallicRoughnessTexture": {
-     "index": 6
-    }
+    "metallicFactor": 0
    }
   }
  ],
@@ -1463,12 +1460,12 @@
   {
    "mimeType": "image/png",
    "name": "T_Hair_2_Normal",
-   "uri": "T_Hair_2_Normal.png"
+   "uri": "hair/T_Hair_2_Normal.png"
   },
   {
    "mimeType": "image/png",
    "name": "T_Hair_2_BaseColor",
-   "uri": "T_Hair_2_BaseColor.png"
+   "uri": "hair/T_Hair_2_BaseColor.png"
   },
   {
    "mimeType": "image/png",
@@ -1493,7 +1490,7 @@
   {
    "mimeType": "image/png",
    "name": "T_Superhero_Female_Roughness",
-   "uri": "T_Superhero_Female_Roughness.png"
+   "uri": "T_Eye_Normal.png"
   }
  ],
  "skins": [

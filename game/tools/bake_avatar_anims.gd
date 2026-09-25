@@ -14,7 +14,7 @@ const BODIES := {
 	"male": "res://assets/characters/Superhero_Male_FullBody.gltf",
 	"female": "res://assets/characters/Superhero_Female_FullBody.gltf",
 }
-const FPS := 30.0
+const FPS := 20.0  # keyframes are interpolated; keeps the app small
 ## The library's idle is a ready-to-fight stance (wide, knees bent, fists).
 ## For standing in a street: legs and fingers eased towards the rest pose
 ## (legs straight down, hands open); the hips are then lowered or raised so
@@ -24,11 +24,9 @@ const RELAX := {"Idle_Loop": 0.65, "Idle_Talking_Loop": 0.55}
 const CLIPS := {
 	"Idle_Loop": "idle", "Walk_Loop": "walk", "Jog_Fwd_Loop": "jog", "Sprint_Loop": "sprint",
 	"Jump_Start": "jump_start", "Jump_Loop": "jump_loop", "Jump_Land": "jump_land",
-	"Idle_Talking_Loop": "talk", "Interact": "interact", "Dance_Loop": "dance",
-	"Walk_Formal_Loop": "walk_formal", "Push_Loop": "push", "Crouch_Idle_Loop": "crouch",
-	"Crouch_Fwd_Loop": "crouch_walk", "Hit_Chest": "hit", "Roll": "roll",
+	"Idle_Talking_Loop": "talk", "Dance_Loop": "dance",
 	"Sitting_Enter": "sit_down", "Sitting_Idle_Loop": "sit", "Sitting_Talking_Loop": "sit_talk",
-	"Sitting_Exit": "stand_up", "PickUp_Table": "pick_up", "Fixing_Kneeling": "kneel",
+	"Sitting_Exit": "stand_up",
 }
 
 
