@@ -14,7 +14,7 @@ func _ready() -> void:
 		test_store, test_spawn_picker, test_zone_load,
 		test_world_collision, test_motor_walks_and_is_blocked, test_replay_matches_realtime,
 		test_client_and_server_worlds_agree, test_step_up, test_tram_shoves_and_blocks, test_props, test_crowd,
-		test_terrain, test_bench_sitting,
+		test_crowd_view_pool, test_terrain, test_bench_sitting,
 		test_transit_network, test_transit_timetable, test_walking_routes, test_route_prefers_tram,
 	]
 	for t in tests:
@@ -744,7 +744,53 @@ func test_crowd() -> void:
 	check(inside < crowd.walkers.size() * 2, "walkers stay out of buildings (%d samples inside)" % inside)
 	var again := Crowd.new(zone)
 	check((again.walkers[5].pose(77.0)[0] as Vector2).is_equal_approx(crowd.walkers[5].pose(77.0)[0]), "crowd is deterministic")
+	check(again.look(5) == crowd.look(5) and crowd.look(5) != crowd.look(6), "pedestrians look the same everywhere, and different from each other")
+	check(AvatarSpec.sanitize(crowd.look(7)) == crowd.look(7), "pedestrian looks are valid avatars")
 	print("crowd sample: %s %s" % [crowd.walkers[0].pose(1000.0), crowd.walkers[1].pose(1000.0)])
+
+
+## The near/far split: nearest pedestrians get a pooled AvatarView, tied to
+## graphics quality, without flicker when the camera moves a little. Reaches
+## into CrowdView's private pooling state directly since it has no other
+## public surface to probe from outside a running GameClient.
+func test_crowd_view_pool() -> void:
+	var prev_level := GraphicsQuality.level
+	var zone := ZoneData.load_zone("tr_istanbul_kadikoy_001")
+	var view := CrowdView.new()
+	add_child(view)
+	view.crowd = Crowd.for_zone(zone)
+	view._count = mini(view.crowd.walkers.size(), 20)
+	for i in view._count:
+		view._last.append(Vector3(float(i) * 2.0, 0.0, 0.0))  # all within PEOPLE_RANGE
+		view._slot_of.append(-1)
+
+	GraphicsQuality.level = GraphicsQuality.LOW
+	view._pick(Vector3.ZERO, Vector3(0, 0, -1))
+	var n_low: int = CrowdView.PEOPLE_BY_QUALITY[GraphicsQuality.LOW]
+	var pooled_low := 0
+	for i in view._count:
+		if view._slot_of[i] >= 0:
+			pooled_low += 1
+	check(pooled_low == n_low, "as many pedestrians pooled as LOW quality allows (%d of %d)" % [pooled_low, n_low])
+	check(view._slot_of[0] >= 0, "the nearest pedestrian is drawn as a real avatar")
+	check((view._slots[0] as CrowdView.Slot).tag.text == "NPC", "pooled pedestrians still carry the NPC tag")
+
+	var kept: int = view._slot_of[0]
+	view._pick(Vector3(2.0, 0, 0), Vector3(0, 0, -1))
+	check(view._slot_of[0] == kept, "an already-pooled pedestrian keeps the same avatar (no flicker)")
+
+	GraphicsQuality.level = GraphicsQuality.HIGH
+	view._pick(Vector3.ZERO, Vector3(0, 0, -1))
+	var n_high: int = CrowdView.PEOPLE_BY_QUALITY[GraphicsQuality.HIGH]
+	var pooled_high := 0
+	for i in view._count:
+		if view._slot_of[i] >= 0:
+			pooled_high += 1
+	check(pooled_high > pooled_low, "higher graphics quality pools more pedestrians (%d > %d)" % [pooled_high, pooled_low])
+	check(pooled_high == mini(n_high, view._count), "HIGH pools up to its own quality count (%d)" % pooled_high)
+
+	GraphicsQuality.level = prev_level
+	view.queue_free()
 
 
 # --- transit and routing --------------------------------------------------------
