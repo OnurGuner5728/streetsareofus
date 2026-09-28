@@ -42,6 +42,8 @@ class Walker:
 
 
 var walkers: Array = []
+var zone_id := ""
+var _looks := {}  # walker index -> avatar dictionary
 
 
 static func for_zone(z: ZoneData) -> Crowd:
@@ -66,6 +68,7 @@ static func density(hours: float) -> float:
 
 
 func _init(zone: ZoneData) -> void:
+	zone_id = zone.zone_id
 	var graph := zone.road_graph()
 	if graph.nodes.size() < 2:
 		return
@@ -76,6 +79,16 @@ func _init(zone: ZoneData) -> void:
 		var w := _walker(graph, streets, rng)
 		if w != null:
 			walkers.append(w)
+
+
+## How pedestrian `i` looks: an avatar like a player's, picked at random but
+## the same on every client and every visit (seeded by zone and index).
+func look(i: int) -> Dictionary:
+	if not _looks.has(i):
+		var rng := RandomNumberGenerator.new()
+		rng.seed = hash("%s:crowd-look:%d" % [zone_id, i])
+		_looks[i] = AvatarSpec.random(rng)
+	return _looks[i]
 
 
 func _walker(graph: RoadGraph, streets: StreetLayout, rng: RandomNumberGenerator) -> Walker:

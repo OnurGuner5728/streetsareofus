@@ -65,6 +65,9 @@ var knocked := false  # lying on the ground
 var winded := false
 var limp := false
 var injury := ""  # "bruise", "arm", "leg" or "": what the body shows
+## Off for pedestrians: no head turns or gestures, and the skeleton is only
+## recomputed when the animation moves on.
+var gestures := true
 
 var _body := "male"
 var _model: Node3D
@@ -148,6 +151,7 @@ func build(new_avatar: Dictionary, with_detail := true) -> void:
 	_anim.add_animation_library("", ANIMS[_body])
 	_anim.callback_mode_process = AnimationMixer.ANIMATION_CALLBACK_MODE_PROCESS_MANUAL
 	_poser = AvatarPoser.new()
+	_poser.active = gestures
 	_skel.add_child(_poser)
 	_play("idle", 0.0)
 	_anim.advance(randf() * 2.0)  # people don't breathe in sync
