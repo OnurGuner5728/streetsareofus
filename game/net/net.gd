@@ -271,6 +271,13 @@ func c_unblock(account_id: String) -> void:
 		server.on_unblock(_sender(), account_id)
 
 
+## Get treated for an injury at a pharmacy, clinic or hospital nearby.
+@rpc("any_peer", "call_remote", "reliable", 1)
+func c_treat() -> void:
+	if server:
+		server.on_treat(_sender())
+
+
 ## Step off now if the tram is at a stop, otherwise toggle the stop request.
 @rpc("any_peer", "call_remote", "reliable", 1)
 func c_alight() -> void:
@@ -399,3 +406,18 @@ func s_blocked_list(list: Array) -> void:
 func s_population(counts: PackedByteArray) -> void:
 	if client:
 		client.on_population(counts)
+
+
+## Someone's injury ("bruise", "arm", "leg", or "" when healed) and the
+## seconds left until it heals; sent to them and to everyone who sees them.
+@rpc("authority", "call_remote", "reliable", 1)
+func s_injury(id: int, kind: String, left: float) -> void:
+	if client:
+		client.on_injury(id, kind, left)
+
+
+## Your fitness (0..1), when it has grown noticeably from sprinting.
+@rpc("authority", "call_remote", "reliable", 1)
+func s_fitness(value: float) -> void:
+	if client:
+		client.on_fitness(value)

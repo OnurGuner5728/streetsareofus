@@ -7,20 +7,50 @@ extends RefCounted
 ## Everything here depends only on the body's state, the input and static
 ## geometry (plus trams, which are a pure function of the input's world
 ## tick), so prediction and replays land exactly where the server does.
+##
+## Body state beyond position and velocity lives in metas on the body:
+##   knock (int ticks left of being knocked down, incl. getting up),
+##   stamina (int 0..STAMINA_MAX, integer math only), winded (bool),
+##   hit_speed (float, speed of the tram that last knocked you down);
+## and parameters the server decides (not simulated here):
+##   fitness (float 0..1), limp (bool, a leg injury).
 
 const BUTTON_JUMP := 1
 const BUTTON_SPRINT := 2
 
 ## Ledges up to this height (kerbs, tram platforms, a step) are walked onto.
 const STEP_HEIGHT := 0.36
-## A moving tram that catches you shoves you out of its path.
-const TRAM_SHOVE_SIDE := 4.2
-const TRAM_SHOVE_UP := 2.6
+## A moving tram that catches you knocks you down and flings you: along
+## with it at most of its speed, sideways out of its path, and up.
+const TRAM_FLING_ALONG := 0.8
+const TRAM_FLING_SIDE := 3.5
+const TRAM_FLING_UP := 3.0
 const TRAM_REACH := 16.0
+
+## Knocked down: inputs ignored, sliding to a stop, then getting up.
+const KNOCK_TICKS := 96  # 3.2 s in all
+const KNOCK_GETUP_TICKS := 30  # the last second is standing up again
+const KNOCK_FRICTION := 7.0  # m/s² sliding along the ground
+const KNOCK_AIR_ACCEL := 0.5
+
+## Stamina: sprinting drains it (a fit person lasts longer), not sprinting
+## refills it. Out of breath at zero: no sprinting and a slower walk until
+## it is back up to WINDED_RECOVER.
+const STAMINA_MAX := 10000
+const WINDED_RECOVER := 3000
+const ENDURANCE_MIN := 10.0  # seconds of sprinting at fitness 0
+const ENDURANCE_MAX := 40.0  # ... and at fitness 1
+const RECOVER_MOVING := 20  # per tick (~17 s to full while walking)
+const RECOVER_IDLE := 45  # per tick (~7 s to full standing still)
+const WINDED_WALK := 0.85
+const DEFAULT_FITNESS := 0.35
+## A leg injury: no running, no jumping, a slow walk.
+const LIMP_SPEED := 1.3
 
 ## step() result flags.
 const EVENT_TRAM_HIT := 1
 const EVENT_STEPPED := 2
+const EVENT_SPRINTED := 4  # stamina was spent sprinting this tick
 
 
 static func make_body(avatar: Dictionary) -> CharacterBody3D:
@@ -59,20 +89,82 @@ static func fit_capsule(body: CharacterBody3D, avatar: Dictionary) -> void:
 	col.position.y = shape.height / 2.0  # body origin sits at the feet
 
 
+## The simulated part of the body state: what snapshots carry and what
+## reconciliation compares and restores.
+static func motor_state(body: CharacterBody3D) -> Dictionary:
+	return {
+		"stamina": int(body.get_meta("stamina", STAMINA_MAX)),
+		"knock": int(body.get_meta("knock", 0)),
+		"winded": bool(body.get_meta("winded", false)),
+	}
+
+
+static func apply_state(body: CharacterBody3D, st: Dictionary) -> void:
+	body.set_meta("stamina", clampi(int(st.get("stamina", STAMINA_MAX)), 0, STAMINA_MAX))
+	body.set_meta("knock", maxi(0, int(st.get("knock", 0))))
+	body.set_meta("winded", bool(st.get("winded", false)))
+
+
+static func knock_ticks(body: CharacterBody3D) -> int:
+	return int(body.get_meta("knock", 0))
+
+
+## Lying on the ground (knocked down and not yet getting up).
+static func is_down(body: CharacterBody3D) -> bool:
+	return knock_ticks(body) > KNOCK_GETUP_TICKS
+
+
+## Stamina spent per sprinting tick: all of it in `endurance` seconds.
+static func sprint_drain(fitness: float) -> int:
+	var endurance := lerpf(ENDURANCE_MIN, ENDURANCE_MAX, clampf(fitness, 0.0, 1.0))
+	return maxi(1, roundi(STAMINA_MAX / (endurance * Protocol.TICK_RATE)))
+
+
 ## `input` is a quantized input dictionary from SnapshotCodec; its "wt" is
 ## the server tick at which trams are placed. Returns EVENT_* flags.
 static func step(body: CharacterBody3D, input: Dictionary, transit: TransitNetwork = null) -> int:
+	var mx: float = input.mx
+	var my: float = input.my
+	var buttons: int = input.buttons
+	var events := 0
+	# Knocked down: the player's input does nothing until back on their feet.
+	var knock := int(body.get_meta("knock", 0))
+	if knock > 0:
+		knock -= 1
+		body.set_meta("knock", knock)
+		mx = 0.0
+		my = 0.0
+		buttons = 0
+	var limp := bool(body.get_meta("limp", false))
+	var winded := bool(body.get_meta("winded", false))
+	if limp:
+		buttons &= ~(BUTTON_JUMP | BUTTON_SPRINT)
+	if winded:
+		buttons &= ~BUTTON_SPRINT
+	var moving := mx != 0.0 or my != 0.0
+	# Stamina, in whole units so every machine counts exactly the same.
+	var stamina := int(body.get_meta("stamina", STAMINA_MAX))
+	if buttons & BUTTON_SPRINT and moving:
+		stamina = maxi(0, stamina - sprint_drain(float(body.get_meta("fitness", DEFAULT_FITNESS))))
+		events |= EVENT_SPRINTED
+		if stamina == 0:
+			winded = true
+	else:
+		stamina = mini(STAMINA_MAX, stamina + (RECOVER_MOVING if moving else RECOVER_IDLE))
+		if winded and stamina >= WINDED_RECOVER:
+			winded = false
+	body.set_meta("stamina", stamina)
+	body.set_meta("winded", winded)
 	# Seated on a bench: stay put until the player moves or jumps. Server and
 	# client prediction both run this, so standing up is predicted exactly.
 	if body.has_meta("seat"):
-		if input.mx != 0 or input.my != 0 or int(input.buttons) & BUTTON_JUMP:
+		if moving or buttons & BUTTON_JUMP:
 			body.remove_meta("seat")
 		else:
 			body.velocity = Vector3.ZERO
-			return 0
+			return events
 	var v := body.velocity
 	var grounded := is_grounded(body)
-	var buttons: int = input.buttons
 	if grounded:
 		v.y = 0.0
 		if buttons & BUTTON_JUMP:
@@ -80,17 +172,22 @@ static func step(body: CharacterBody3D, input: Dictionary, transit: TransitNetwo
 	else:
 		v.y -= Protocol.GRAVITY * Protocol.DT
 
-	var move := Vector2(input.mx, input.my).limit_length(1.0)
+	var move := Vector2(mx, my).limit_length(1.0)
 	var dir := Basis(Vector3.UP, float(input.yaw)) * Vector3(move.x, 0.0, -move.y)
 	var speed := Protocol.SPRINT_SPEED if buttons & BUTTON_SPRINT else Protocol.WALK_SPEED
+	if winded:
+		speed *= WINDED_WALK
+	if limp:
+		speed = minf(speed, LIMP_SPEED)
 	var accel := Protocol.GROUND_ACCEL if grounded else Protocol.AIR_ACCEL
+	if knock > 0:
+		accel = KNOCK_FRICTION if grounded else KNOCK_AIR_ACCEL
 	var horizontal := Vector2(v.x, v.z).move_toward(Vector2(dir.x, dir.z) * speed, accel * Protocol.DT)
 	v.x = horizontal.x
 	v.z = horizontal.y
 	body.velocity = v
 	var start := body.global_transform
 	body.move_and_slide()
-	var events := 0
 	if grounded and v.y <= 0.0 and horizontal.length() > 0.1 and body.is_on_wall():
 		if _step_up(body, start, Vector3(v.x, 0.0, v.z) * Protocol.DT):
 			events |= EVENT_STEPPED
@@ -144,8 +241,9 @@ static func _step_up(body: CharacterBody3D, start: Transform3D, motion: Vector3)
 
 
 ## Trams are solid boxes (see TransitNetwork.boxes_near). Walking into one
-## stops you like a wall; one that runs into you from the front throws you
-## sideways off the track.
+## stops you like a wall; one that runs into you from the front knocks you
+## down and throws you off the track (once: while you are down it only
+## keeps you out of its way).
 static func _collide_trams(body: CharacterBody3D, transit: TransitNetwork, tick: int) -> int:
 	var pos := body.global_position
 	var radius := 0.3
@@ -189,8 +287,13 @@ static func _collide_trams(body: CharacterBody3D, transit: TransitNetwork, tick:
 			# Caught by the front of a moving tram: out of its path, sideways.
 			var side := n * (1.0 if across >= 0.0 else -1.0)
 			push = side * (hw + radius - absf(across) + 0.05)
-			v = Vector3(side.x * TRAM_SHOVE_SIDE + a.x * speed * 0.5, TRAM_SHOVE_UP, side.y * TRAM_SHOVE_SIDE + a.y * speed * 0.5)
-			events |= EVENT_TRAM_HIT
+			if int(body.get_meta("knock", 0)) == 0:
+				v = Vector3(a.x * speed * TRAM_FLING_ALONG + side.x * TRAM_FLING_SIDE, TRAM_FLING_UP,
+					a.y * speed * TRAM_FLING_ALONG + side.y * TRAM_FLING_SIDE)
+				body.set_meta("knock", KNOCK_TICKS)
+				body.set_meta("hit_speed", speed)
+				body.remove_meta("seat")
+				events |= EVENT_TRAM_HIT
 		else:
 			var into := Vector2(v.x, v.z).dot(normal)
 			if into < 0.0:

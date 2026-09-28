@@ -33,7 +33,21 @@ const NOTICES := {
 	"tram_not_boardable": "Bu tramvaya şu an binilemez: durakta değil ya da bölgeden çıkıyor.",
 	"too_far_tram": "Tramvayın kapısına biraz daha yaklaş.",
 	"tram_full": "Tramvay dolu, bir sonrakini bekle.",
+	"not_injured": "Tedaviye ihtiyacın yok.",
+	"treat_far": "Tedavi için bir eczaneye ya da sağlık kuruluşuna yaklaş (15 m).",
+	"treat_healed": "Eczacı pansuman yaptı. Morluğun geçti.",
+	"treat_dressed": "Eczacı pansuman yaptı. Daha çabuk iyileşeceksin.",
+	"treat_again": "Eczacı elinden geleni yaptı; gerisi zamana kalmış.",
+	"treat_doctor": "Doktor tedavi etti; iyileştin.",
 }
+## Your injury on the HUD (with the time left), and the news when it happens.
+const INJURY_LINES := {"bruise": "Başında bir morluk var", "arm": "Sol kolun alçıda", "leg": "Bacağın alçıda, topallıyorsun"}
+const INJURY_NEWS := {"bruise": "Tramvay çarptı! Başın morardı; birkaç dakikada geçer.",
+	"arm": "Tramvay çarptı! Sol kolun kırıldı, alçıya alındı.",
+	"leg": "Tramvay çarptı! Bacağın kırıldı; bir süre topallayacaksın."}
+## Places that treat injuries (as ZoneServer.HEAL_KINDS) and how close to be.
+const HEAL_KINDS := ["pharmacy", "clinic", "hospital", "doctors"]
+const HEAL_RANGE := 15.0
 const REJECTS := {
 	"protocol_mismatch": "Sürüm uyuşmuyor; istemciyi güncelle.",
 	"bad_name": "Geçersiz isim: 3-20 karakter; harf, rakam, boşluk, _ . - kullanılabilir.",
@@ -115,6 +129,7 @@ var camera_mode := "first"
 var _cam_dist := 0.0
 var _cam_zoom := 1.0
 var _self_view: AvatarView  # you, seen from behind or in the wardrobe
+var _fallen_yaw := 0.0  # which way you face while knocked down
 var _wardrobe_open := false
 var volume := "on"
 var _seat_yaw := 0.0
@@ -123,6 +138,9 @@ var _bench_cache := {"at": -INF, "id": -1}
 var _shake := 0.0
 var _tram_hit_at := -INF
 var _tram_warned_at := -INF
+var injury := ""  # "bruise", "arm", "leg" or ""
+var _injury_until := 0.0  # local clock
+var _clinic_cache := {"at": -INF, "poi": {}}
 
 
 static func now() -> float:
@@ -272,6 +290,7 @@ func on_welcome(info: Dictionary) -> void:
 	body.name = "LocalPlayer"
 	add_child(body)
 	body.global_position = info.spawn
+	body.set_meta("fitness", float(info.get("fitness", PlayerMotor.DEFAULT_FITNESS)))
 	_prev_pos = body.global_position
 	_curr_pos = _prev_pos
 	_eye_height = AvatarSpec.eye_height(avatar)
@@ -357,6 +376,7 @@ func on_welcome(info: Dictionary) -> void:
 					2 * CityMap.MINI_RADIUS, 2 * CityMap.MINI_RADIUS)]
 	joined = true
 	_joined_at = now()
+	_set_own_injury(str(info.get("injury", "")), float(info.get("injury_left", 0.0)), false)
 	if loading:
 		loading.queue_free()
 	if bot == null:
@@ -537,6 +557,7 @@ func on_ride(info: Dictionary) -> void:
 		PlayerMotor.step(body, inp, transit)
 		inp.pos = body.global_position
 		inp.vel = body.velocity
+		inp.st = PlayerMotor.motor_state(body)
 	_prev_pos = body.global_position
 	_curr_pos = _prev_pos
 	_correction = Vector3.ZERO
@@ -550,6 +571,61 @@ func on_ride(info: Dictionary) -> void:
 func on_rider(id: int, ride: Array) -> void:
 	if remotes.has(id):
 		remotes[id].ride = ride
+
+
+func on_injury(id: int, kind: String, left: float) -> void:
+	if id == my_id:
+		_set_own_injury(kind, left, true)
+	elif remotes.has(id):
+		remotes[id].set_injury(kind)
+
+
+func on_fitness(value: float) -> void:
+	if body:
+		body.set_meta("fitness", clampf(value, 0.0, 1.0))
+	log_line("fitness %.2f" % value)
+
+
+func _set_own_injury(kind: String, left: float, news: bool) -> void:
+	var before := injury
+	injury = kind if INJURY_LINES.has(kind) else ""
+	_injury_until = now() + left
+	# The server applies the limp to its body at the same moment.
+	if body:
+		body.set_meta("limp", injury == "leg")
+	if _self_view:
+		_self_view.set_injury(injury)
+	if news and injury != before:
+		if injury != "":
+			log_line("injured: %s for %.0f s" % [injury, left])
+			_notice(INJURY_NEWS[injury])
+		else:
+			log_line("healed")
+			_notice("İyileştin!")
+
+
+## The pharmacy or clinic you are standing at (a POI) while injured, or {}.
+func _clinic_near() -> Dictionary:
+	if injury == "" or body == null:
+		return {}
+	var t := now()
+	if t - float(_clinic_cache.at) < 0.5:
+		return _clinic_cache.poi
+	var p := ZoneData.to_en(body.global_position)
+	var best := {}
+	var best_d := HEAL_RANGE
+	for poi in zone.pois:
+		if str(poi.get("kind", "")) in HEAL_KINDS:
+			var d := p.distance_to(Vector2(float(poi.e), float(poi.n)))
+			if d <= best_d:
+				best_d = d
+				best = poi
+	_clinic_cache = {"at": t, "poi": best}
+	return best
+
+
+func request_treatment() -> void:
+	Net.c_treat.rpc_id(1)
 
 
 func on_weather(info: Dictionary) -> void:
@@ -640,7 +716,7 @@ func _tram_warning() -> void:
 
 ## The bench next to you (any free-looking seat within reach), or -1.
 func _nearest_bench() -> int:
-	if body == null or body.has_meta("seat") or not riding.is_empty():
+	if body == null or body.has_meta("seat") or not riding.is_empty() or PlayerMotor.knock_ticks(body) > 0:
 		return -1
 	var t := now()
 	if t - float(_bench_cache.at) < 0.25:
@@ -792,11 +868,14 @@ func _physics_process(_delta: float) -> void:
 			_step_visual -= body.global_position.y - _prev_pos.y
 		if events & PlayerMotor.EVENT_TRAM_HIT:
 			_on_tram_hit()
+		if props_view:
+			props_view.touch_balls(body.global_position, body.velocity, events & PlayerMotor.EVENT_SPRINTED != 0)
 	else:
 		body.global_position = transit.rider_position(riding.line, riding.vehicle, riding.slot, server_now())
 	_curr_pos = body.global_position
 	inp.pos = body.global_position  # predicted result, compared on ack
 	inp.vel = body.velocity
+	inp.st = PlayerMotor.motor_state(body)
 	inp.t = now()
 	_pending_inputs.append(inp)
 	if _pending_inputs.size() > MAX_PENDING_INPUTS:
@@ -827,16 +906,21 @@ func _reconcile() -> void:
 	if not riding.is_empty():
 		return  # the tram carries us; nothing to predict or correct
 	# Usually the prediction was right and there is nothing to replay.
-	if not acked.is_empty() and int(acked.seq) == ack 			and (acked.pos as Vector3).distance_to(snap.self_pos) < 0.01 			and (acked.vel as Vector3).distance_to(snap.self_vel) < 0.05:
+	if not acked.is_empty() and int(acked.seq) == ack \
+			and (acked.pos as Vector3).distance_to(snap.self_pos) < 0.01 \
+			and (acked.vel as Vector3).distance_to(snap.self_vel) < 0.05 \
+			and acked.get("st", {}) == snap.self_state:
 		return
 	_stats.replays += 1
 	var before := body.global_position
 	body.global_position = snap.self_pos
 	body.velocity = snap.self_vel
+	PlayerMotor.apply_state(body, snap.self_state)
 	for inp in _pending_inputs:
 		PlayerMotor.step(body, inp, transit)
 		inp.pos = body.global_position
 		inp.vel = body.velocity
+		inp.st = PlayerMotor.motor_state(body)
 	var error := before - body.global_position
 	var err_len := error.length()
 	if err_len > 0.5:
@@ -896,7 +980,8 @@ func _process(delta: float) -> void:
 	if sounds:
 		sounds.update(night, delta)
 		if riding.is_empty():
-			sounds.footsteps(Vector2(body.velocity.x, body.velocity.z).length(), body.is_on_floor(), delta)
+			sounds.footsteps(Vector2(body.velocity.x, body.velocity.z).length(), body.is_on_floor() and PlayerMotor.knock_ticks(body) == 0, delta)
+		sounds.breathing(_breath_level())
 	FrameProfiler.add("sounds", t0)
 	t0 = FrameProfiler.start()
 	_board_timer -= delta
@@ -909,7 +994,7 @@ func _process(delta: float) -> void:
 	for r in remotes.values():
 		r.update_render(server_now, delta, cam_pos)
 	if props_view:
-		props_view.update(server_now)
+		props_view.update(server_now, delta)
 	t0 = FrameProfiler.start()
 	if crowd_view and crowd_view.crowd:
 		crowd_view.update(server_now, sky.local_hours())
@@ -975,15 +1060,23 @@ func _update_camera(render_pos: Vector3, eye: Vector3, delta: float) -> void:
 	var speed := Vector2(body.velocity.x, body.velocity.z).length() if riding.is_empty() else 0.0
 	_shake = maxf(0.0, _shake - delta * 1.5)
 	var jolt := Vector3(sin(now() * 71.0), sin(now() * 53.0), 0.0) * 0.05 * _shake
-	var third := _self_view != null and (camera_mode != "first" or _wardrobe_open)
+	# Knocked down: watch yourself from further back until you are up again.
+	var knocked := PlayerMotor.knock_ticks(body) > 0
+	var mode := "far" if knocked and _self_view != null else camera_mode
+	var third := _self_view != null and (mode != "first" or _wardrobe_open)
 	if _self_view:
 		_self_view.visible = third
+		if not knocked:
+			_fallen_yaw = _seat_yaw if body.has_meta("seat") else yaw
 		if third:
 			_self_view.global_position = render_pos
-			_self_view.rotation.y = _seat_yaw if body.has_meta("seat") else yaw
+			_self_view.rotation.y = _fallen_yaw
 			_self_view.sitting = body.has_meta("seat")
 			_self_view.talking = not conversations.is_empty()
-			_self_view.animate(speed, delta, pitch, riding.is_empty() and absf(body.velocity.y) > 1.2)
+			_self_view.knocked = PlayerMotor.is_down(body)
+			_self_view.winded = bool(body.get_meta("winded", false))
+			_self_view.limp = bool(body.get_meta("limp", false))
+			_self_view.animate(speed, delta, pitch, riding.is_empty() and absf(body.velocity.y) > 1.2 and not knocked)
 	if not third:
 		_bob_phase = fmod(_bob_phase + delta * (1.5 + speed * 2.2), TAU)
 		var bob := sin(_bob_phase * 2.0) * 0.03 * clampf(speed / Protocol.WALK_SPEED, 0.0, 1.5)
@@ -1002,10 +1095,10 @@ func _update_camera(render_pos: Vector3, eye: Vector3, delta: float) -> void:
 		back = Basis(Vector3.UP, yaw + 0.35) * Vector3.FORWARD
 		want = 2.6
 	else:
-		var side := 0.35 if camera_mode == "near" else 0.0
+		var side := 0.35 if mode == "near" else 0.0
 		pivot = eye + Basis(Vector3.UP, yaw) * Vector3(side, 0.2, 0)
 		back = Basis.from_euler(Vector3(pitch, yaw, 0)) * Vector3.BACK
-		want = float(CAMERA_DISTANCE[camera_mode]) * _cam_zoom
+		want = float(CAMERA_DISTANCE[mode]) * (_cam_zoom if mode == camera_mode else 1.0)
 	# Spring arm: stop in front of walls; pull in fast, ease back out.
 	var reach := want
 	var ray := PhysicsRayQueryParameters3D.create(pivot, pivot + back * (want + 0.3), Protocol.LAYER_WORLD)
@@ -1333,6 +1426,8 @@ func _on_key(key: Key) -> void:
 				request_talk(target)
 			elif _cat_in_reach() >= 0:
 				critters.pet(_cat_in_reach())
+			elif not _clinic_near().is_empty():
+				request_treatment()
 			elif _nearest_bench() >= 0:
 				Net.c_sit.rpc_id(1, _nearest_bench())
 		KEY_J:
@@ -1405,6 +1500,8 @@ func _on_touch_action(id: String) -> void:
 				respond_incoming(latest, id == "accept")
 		"tram":
 			tram_action()
+		"treat":
+			request_treatment()
 		"sit":
 			if _nearest_bench() >= 0:
 				Net.c_sit.rpc_id(1, _nearest_bench())
@@ -1494,8 +1591,29 @@ func _look_target() -> int:
 	return best
 
 
+## How hard you are breathing (0..1): out of breath, or nearly so.
+func _breath_level() -> float:
+	if body.get_meta("winded", false):
+		return 1.0
+	var stamina := float(body.get_meta("stamina", PlayerMotor.STAMINA_MAX)) / PlayerMotor.STAMINA_MAX
+	return clampf((0.35 - stamina) / 0.35, 0.0, 1.0) * 0.7
+
+
 func _update_hud(delta: float) -> void:
 	_tram_warning()
+	var stamina := float(body.get_meta("stamina", PlayerMotor.STAMINA_MAX)) / PlayerMotor.STAMINA_MAX
+	hud.set_stamina(stamina, bool(body.get_meta("winded", false)))
+	var clinic := _clinic_near()
+	if injury != "":
+		var left := maxf(0.0, _injury_until - now())
+		var hint := "Yakındaki bir eczanede tedavi olabilirsin."
+		if not clinic.is_empty():
+			var place := str(clinic.get("name", ""))
+			hint = "%s: tedavi için %s" % [place if place != "" else "Eczane", "Tedavi'ye dokun" if touch else "[E]"]
+		hud.set_injury("%s — %s\n%s" % [INJURY_LINES[injury],
+			"%d dk" % ceili(left / 60.0) if left >= 60.0 else "%d sn" % ceili(left), hint])
+	else:
+		hud.set_injury("")
 	var t0 := FrameProfiler.start()
 	var target := _look_target()
 	var latest := _latest_incoming()
@@ -1503,6 +1621,7 @@ func _update_hud(delta: float) -> void:
 	FrameProfiler.add("hud.tram_ctx", t0)
 	if touch:
 		touch.set_context({"target": target > 0, "cat": target <= 0 and _cat_in_reach() >= 0, "talking_to_target": conversations.has(target),
+			"treat": target <= 0 and not clinic.is_empty(),
 			"bench": target <= 0 and _nearest_bench() >= 0, "seated": body.has_meta("seat"),
 			"in_conversation": not conversations.is_empty(), "incoming": latest >= 0,
 			"tram_label": tram.get("label", ""), "tram_tint": tram.get("tint", Color("2e86de"))})

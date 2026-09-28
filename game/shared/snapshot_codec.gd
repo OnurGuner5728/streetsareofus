@@ -9,12 +9,14 @@ extends RefCounted
 ## world_tick is the client's estimate of the server tick it saw when it
 ## made the input (low 16 bits). Moving obstacles (trams) are evaluated at
 ## that tick on both sides, so prediction and server agree exactly.
-## Snapshot:     u32 tick, u32 ack_seq, f32x3 self_pos, f32x3 self_vel, u16 count,
+## Snapshot:     u32 tick, u32 ack_seq, f32x3 self_pos, f32x3 self_vel,
+##   u16 self_stamina, u8 self_knock, u8 self_bits (1 = winded), u16 count,
 ##   then per entity: u32 id, f32x3 pos, u16 yaw, s8 pitch, u8 speed_dm, u8 flags,
 ##   then u16 prop_count and per moving prop: u16 id, s16x3 pos_cm, s16x4 quat
 
 const MAX_INPUTS_PER_PACKET := Protocol.MAX_RESENT_INPUTS
 const INPUT_BYTES := 12
+const HEADER_BYTES := 38
 const MAX_ENTITIES := 512
 const ENTITY_BYTES := 21
 const PROP_BYTES := 16
@@ -23,6 +25,10 @@ const FLAG_GROUNDED := 1
 const FLAG_SPRINT := 2
 const FLAG_RIDING := 4
 const FLAG_SITTING := 8
+const FLAG_KNOCKED := 16  # lying on the ground (not while getting up)
+const FLAG_WINDED := 32
+const FLAG_LIMP := 64
+const SELF_WINDED := 1
 
 
 static func quantize_input(seq: int, mx: float, my: float, yaw: float, pitch: float, buttons: int, world_tick := 0) -> Dictionary:
@@ -92,7 +98,8 @@ static func decode_inputs(data: PackedByteArray) -> Array:
 	return out
 
 
-static func encode_snapshot(tick: int, ack_seq: int, self_pos: Vector3, self_vel: Vector3, entities: Array, props := PackedByteArray()) -> PackedByteArray:
+## self_state: PlayerMotor.motor_state() of the receiving player.
+static func encode_snapshot(tick: int, ack_seq: int, self_pos: Vector3, self_vel: Vector3, self_state: Dictionary, entities: Array, props := PackedByteArray()) -> PackedByteArray:
 	var buf := StreamPeerBuffer.new()
 	buf.put_u32(tick)
 	buf.put_u32(ack_seq)
@@ -100,6 +107,9 @@ static func encode_snapshot(tick: int, ack_seq: int, self_pos: Vector3, self_vel
 		buf.put_float(v.x)
 		buf.put_float(v.y)
 		buf.put_float(v.z)
+	buf.put_u16(clampi(int(self_state.get("stamina", PlayerMotor.STAMINA_MAX)), 0, 65535))
+	buf.put_u8(clampi(int(self_state.get("knock", 0)), 0, 255))
+	buf.put_u8(SELF_WINDED if bool(self_state.get("winded", false)) else 0)
 	var count := mini(entities.size(), MAX_ENTITIES)
 	buf.put_u16(count)
 	for i in count:
@@ -163,15 +173,19 @@ static func decode_props(data: PackedByteArray, offset := 0) -> Variant:
 
 ## Returns {} for malformed packets.
 static func decode_snapshot(data: PackedByteArray) -> Dictionary:
-	if data.size() < 34:
+	if data.size() < HEADER_BYTES:
 		return {}
 	var buf := StreamPeerBuffer.new()
 	buf.data_array = data
 	var snap := {"tick": buf.get_u32(), "ack": buf.get_u32()}
 	snap.self_pos = Vector3(buf.get_float(), buf.get_float(), buf.get_float())
 	snap.self_vel = Vector3(buf.get_float(), buf.get_float(), buf.get_float())
+	var stamina := mini(buf.get_u16(), PlayerMotor.STAMINA_MAX)
+	var knock := buf.get_u8()
+	var bits := buf.get_u8()
+	snap.self_state = {"stamina": stamina, "knock": knock, "winded": bits & SELF_WINDED != 0}
 	var count := buf.get_u16()
-	var props_at := 34 + count * ENTITY_BYTES
+	var props_at := HEADER_BYTES + count * ENTITY_BYTES
 	if count > MAX_ENTITIES or data.size() < props_at + 2:
 		return {}
 	var props: Variant = decode_props(data, props_at)

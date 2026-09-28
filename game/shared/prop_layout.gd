@@ -8,17 +8,39 @@ extends RefCounted
 
 const KINDS := {
 	"ball": {"mass": 0.43, "size": Vector3(0.22, 0.22, 0.22), "bounce": 0.62, "friction": 0.6, "push": 1.7},
-	"bin": {"mass": 32.0, "size": Vector3(1.25, 1.2, 1.0), "bounce": 0.05, "friction": 0.7, "push": 0.85},
+	"bin": {"mass": 32.0, "size": Vector3(1.25, 1.2, 1.0), "bounce": 0.05, "friction": 0.25, "push": 0.85},  # on castors
 	"chair": {"mass": 3.0, "size": Vector3(0.44, 0.86, 0.44), "bounce": 0.15, "friction": 0.6, "push": 1.15},
 	"table": {"mass": 8.0, "size": Vector3(0.7, 0.74, 0.7), "bounce": 0.1, "friction": 0.6, "push": 0.95},
 }
 const CAFE_KINDS := ["cafe", "restaurant", "bar", "pub", "fast_food", "confectionery", "bakery", "ice_cream"]
 const MAX_CAFES := 34
 const MAX_BINS := 36
+## A ball is not kicked again this soon after a kick (s), so it leaves the
+## foot instead of sticking to a running player.
+const KICK_COOLDOWN := 0.25
 
 ## [{id, kind, pos: Vector3 (bottom centre), yaw, tint: Color}]
 var props: Array = []
 var _terrain: Terrain
+
+
+## How a player's foot sends a ball off (server and client prediction use
+## this same function). `normal` points from the player to the ball. A
+## running (or jumping) kick is a proper shot, lifted; walking into the ball
+## dribbles it ahead along the ground. Mostly where you are going, partly
+## where you touched it.
+static func kick_velocity(player_vel: Vector3, normal: Vector3, sprint: bool, jump: bool) -> Vector3:
+	var flat := Vector3(player_vel.x, 0.0, player_vel.z)
+	var speed := flat.length()
+	var n := Vector3(normal.x, 0.0, normal.z)
+	n = n.normalized() if n.length_squared() > 0.0001 else (flat / speed if speed > 0.01 else Vector3.FORWARD)
+	if speed < 0.3:
+		return n * 0.8  # bumped into standing still: a nudge
+	var dir := flat / speed * 0.6 + n * 0.4
+	dir = dir.normalized() if dir.length_squared() > 0.0001 else n
+	if jump or speed > Protocol.WALK_SPEED + 0.4 or (sprint and speed > Protocol.WALK_SPEED):
+		return dir * (1.5 * speed + 1.0) + Vector3.UP * (2.0 + 0.3 * speed)
+	return dir * (1.15 * speed)
 
 
 static func for_zone(z: ZoneData) -> PropLayout:

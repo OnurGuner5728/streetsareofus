@@ -61,6 +61,39 @@ func save_location(account_id: String, zone_id: String, zone_version: int, pos: 
 	_dirty = true
 
 
+static func unix_now() -> float:
+	return Time.get_unix_time_from_system()
+
+
+## How fit the player has become by sprinting (0..1).
+func fitness(account_id: String, default: float) -> float:
+	return clampf(float(accounts.get(account_id, {}).get("fitness", default)), 0.0, 1.0)
+
+
+func set_fitness(account_id: String, value: float) -> void:
+	if accounts.has(account_id):
+		accounts[account_id].fitness = clampf(value, 0.0, 1.0)
+		_dirty = true
+
+
+## The current injury {kind, until (unix seconds), treated}, or {}.
+func injury(account_id: String) -> Dictionary:
+	var inj: Variant = accounts.get(account_id, {}).get("injury")
+	if typeof(inj) != TYPE_DICTIONARY or not str(inj.get("kind", "")) in ["bruise", "arm", "leg"]:
+		return {}
+	return {"kind": str(inj.kind), "until": float(inj.get("until", 0.0)), "treated": bool(inj.get("treated", false))}
+
+
+func set_injury(account_id: String, value: Dictionary) -> void:
+	if not accounts.has(account_id):
+		return
+	if value.is_empty():
+		accounts[account_id].erase("injury")
+	else:
+		accounts[account_id].injury = value.duplicate()
+	_dirty = true
+
+
 ## Returns {} unless a saved location exists for this exact zone version.
 func last_location(account_id: String, zone_id: String, zone_version: int) -> Dictionary:
 	var loc: Variant = accounts.get(account_id, {}).get("location")

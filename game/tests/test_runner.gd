@@ -14,7 +14,7 @@ func _ready() -> void:
 		test_store, test_spawn_picker, test_zone_load,
 		test_world_collision, test_motor_walks_and_is_blocked, test_replay_matches_realtime,
 		test_client_and_server_worlds_agree, test_step_up, test_tram_shoves_and_blocks, test_props, test_crowd,
-		test_terrain, test_bench_sitting,
+		test_terrain, test_bench_sitting, test_knockdown, test_stamina, test_limp, test_ball_kick, test_poser_arm,
 		test_transit_network, test_transit_timetable, test_walking_routes, test_route_prefers_tram,
 	]
 	for t in tests:
@@ -133,11 +133,13 @@ func test_snapshot_codec() -> void:
 		{"id": 12345, "pos": Vector3(1.5, 0.0, -20.25), "yaw": 1.0, "pitch": 0.2, "speed": 4.2, "flags": 1},
 		{"id": 2000000000, "pos": Vector3(-100, 3, 50), "yaw": 6.0, "pitch": -0.5, "speed": 0.0, "flags": 0},
 	]
-	var data := SnapshotCodec.encode_snapshot(99, 42, Vector3(1, 2, 3), Vector3(0.5, -1, 0), entities)
-	check(data.size() == 34 + 2 * SnapshotCodec.ENTITY_BYTES + 2, "snapshot size is compact")
+	var state := {"stamina": 1234, "knock": 50, "winded": true}
+	var data := SnapshotCodec.encode_snapshot(99, 42, Vector3(1, 2, 3), Vector3(0.5, -1, 0), state, entities)
+	check(data.size() == 38 + 2 * SnapshotCodec.ENTITY_BYTES + 2, "snapshot size is compact")
 	var snap := SnapshotCodec.decode_snapshot(data)
 	check(snap.tick == 99 and snap.ack == 42, "header survives")
 	check(snap.self_pos == Vector3(1, 2, 3), "self position survives")
+	check(snap.self_state == state, "own stamina, knock and winded survive (%s)" % [snap.get("self_state")])
 	check(snap.entities.size() == 2, "entities survive")
 	if snap.entities.size() == 2:
 		check(snap.entities[1].id == 2000000000, "large peer id survives")
@@ -147,7 +149,7 @@ func test_snapshot_codec() -> void:
 	var tilt := Transform3D(Basis(Vector3(1, 0, 1).normalized(), 0.8), Vector3(12.34, 0.56, -200.1))
 	var props := SnapshotCodec.encode_props([[7, tilt], [300, Transform3D.IDENTITY]])
 	check(props.size() == 2 + 2 * SnapshotCodec.PROP_BYTES, "props are 16 bytes each")
-	var with_props := SnapshotCodec.decode_snapshot(SnapshotCodec.encode_snapshot(5, 1, Vector3.ZERO, Vector3.ZERO, [], props))
+	var with_props := SnapshotCodec.decode_snapshot(SnapshotCodec.encode_snapshot(5, 1, Vector3.ZERO, Vector3.ZERO, {}, [], props))
 	check(with_props.props.size() == 2 and with_props.props[0][0] == 7, "props survive in a snapshot")
 	if with_props.props.size() == 2:
 		var got: Transform3D = with_props.props[0][1]
@@ -258,6 +260,15 @@ func test_store() -> void:
 	check(reloaded.unblock(id, other), "unblock lifts the block")
 	check(not reloaded.unblock(id, other), "second unblock is a no-op")
 	check(ServerStore.new(dir).blocked_by(id).is_empty(), "unblock survives reload")
+	near(reloaded.fitness(id, 0.35), 0.35, 0.0001, "fitness defaults")
+	reloaded.set_fitness(id, 0.61)
+	reloaded.set_injury(id, {"kind": "arm", "until": 1234.5, "treated": false})
+	reloaded.flush()
+	var again := ServerStore.new(dir)
+	near(again.fitness(id, 0.35), 0.61, 0.0001, "fitness survives reload")
+	check(again.injury(id).kind == "arm" and float(again.injury(id).until) == 1234.5, "injury survives reload")
+	again.set_injury(id, {})
+	check(again.injury(id).is_empty(), "healing clears the injury")
 	for f in DirAccess.get_files_at(dir):
 		DirAccess.remove_absolute(dir.path_join(f))
 	DirAccess.remove_absolute(dir)
@@ -542,6 +553,9 @@ func test_tram_shoves_and_blocks() -> void:
 	var tick0 := roundi(t0 / Protocol.DT)
 	var finals := []
 	var hits := 0
+	var hit_tick := -1
+	var states := []  # run 0: [pos, vel, motor state] after each tick
+	var final_state := {}
 	for run in 2:
 		var body := PlayerMotor.make_body(AvatarSpec.defaults())
 		holder.add_child(body)
@@ -551,7 +565,17 @@ func test_tram_shoves_and_blocks() -> void:
 			var inp := SnapshotCodec.quantize_input(k + 1, 0, 0, 0.0, 0, 0, tick0 + k)
 			if PlayerMotor.step(body, inp, net) & PlayerMotor.EVENT_TRAM_HIT:
 				hits += 1
+				if run == 0 and hit_tick < 0:
+					hit_tick = k
+					check(PlayerMotor.knock_ticks(body) == PlayerMotor.KNOCK_TICKS, "the hit knocks the player down")
+					near(float(body.get_meta("hit_speed", 0.0)), float(st0.speed), 1.5, "the hit speed is recorded")
+					var fling := Vector2(body.velocity.x, body.velocity.z).length()
+					check(fling > 3.5 and body.velocity.y > 2.0, "flung along, sideways and up (%.1f m/s, up %.1f)" % [fling, body.velocity.y])
+			if run == 0:
+				states.append([body.global_position, body.velocity, PlayerMotor.motor_state(body)])
 		finals.append(body.global_position)
+		if run == 0:
+			final_state = PlayerMotor.motor_state(body)
 		# Nowhere near the inside of a tram afterwards.
 		var p := Vector2(body.global_position.x, body.global_position.z)
 		for box in net.boxes_near(tick0 + 75, p, 20.0):
@@ -560,7 +584,25 @@ func test_tram_shoves_and_blocks() -> void:
 			var inside := absf(d.dot(a)) < float(box[2]) and absf(d.dot(Vector2(-a.y, a.x))) < float(box[3])
 			check(not inside, "run %d: player is not left inside a tram" % run)
 		body.queue_free()
-	check(hits >= 2, "the tram hit the player in both runs (%d hit ticks)" % hits)
+	check(hits == 2, "the tram hit the player once in each run, not again while down (%d hits)" % hits)
+	# A client that reconciles just before the hit replays it the same way.
+	if hit_tick >= 3:
+		var from := hit_tick - 3
+		var replay := PlayerMotor.make_body(AvatarSpec.defaults())
+		holder.add_child(replay)
+		await get_tree().physics_frame
+		replay.global_position = states[from][0]
+		replay.velocity = states[from][1]
+		PlayerMotor.apply_state(replay, states[from][2])
+		var replay_hits := 0
+		for k in range(from + 1, 75):
+			if PlayerMotor.step(replay, SnapshotCodec.quantize_input(k + 1, 0, 0, 0.0, 0, 0, tick0 + k), net) & PlayerMotor.EVENT_TRAM_HIT:
+				replay_hits += 1
+		check(replay_hits == 1, "the replay sees the hit too")
+		var diff := replay.global_position.distance_to(finals[0])
+		check(diff < 0.001, "replaying a tram hit lands where the realtime run did (%.4f m)" % diff)
+		check(PlayerMotor.motor_state(replay) == final_state, "and in the same state (%s vs %s)" % [PlayerMotor.motor_state(replay), final_state])
+		replay.queue_free()
 	check((finals[0] as Vector3).distance_to(finals[1]) < 0.001, "tram collisions are deterministic")
 	var side := (finals[0] as Vector3) - TransitNetwork.en_to_godot(en, 0.0)
 	check(Vector2(side.x, side.z).length() > 1.2, "shoved off the track (%.2f m)" % Vector2(side.x, side.z).length())
@@ -871,3 +913,143 @@ func test_bench_sitting() -> void:
 	check(not body.has_meta("seat"), "moving stands up")
 	check(body.global_position.distance_to(origin) > 0.0, "and walks off")
 	body.free()
+
+
+func _flat_speed(body: CharacterBody3D) -> float:
+	return Vector2(body.velocity.x, body.velocity.z).length()
+
+
+## Knocked down: input does nothing, the body slides to a stop, and after
+## KNOCK_TICKS the player walks again.
+func test_knockdown() -> void:
+	var made: Array = await _grid_world()
+	var zone: ZoneData = made[0]
+	var holder: Node3D = made[1]
+	var body := PlayerMotor.make_body(AvatarSpec.defaults())
+	holder.add_child(body)
+	body.global_position = ZoneData.to_godot(float(zone.roads[0].points[0][0]), -60.0, 0.05)
+	await get_tree().physics_frame
+	for i in 5:
+		PlayerMotor.step(body, SnapshotCodec.quantize_input(i + 1, 0, 0, 0.0, 0, 0))
+	PlayerMotor.apply_state(body, {"stamina": PlayerMotor.STAMINA_MAX, "knock": PlayerMotor.KNOCK_TICKS, "winded": false})
+	body.velocity = Vector3(0, 0, -3.0)
+	var all := PlayerMotor.BUTTON_JUMP | PlayerMotor.BUTTON_SPRINT
+	for i in 10:
+		PlayerMotor.step(body, SnapshotCodec.quantize_input(10 + i, 1, 1, 0.0, 0, all))
+	near(_flat_speed(body), 3.0 - PlayerMotor.KNOCK_FRICTION * 10.0 / Protocol.TICK_RATE, 0.05, "sliding friction while down")
+	check(body.velocity.y <= 0.0 and PlayerMotor.is_grounded(body), "no jumping while knocked down")
+	check(PlayerMotor.is_down(body), "still down after a third of a second")
+	for i in PlayerMotor.KNOCK_TICKS - 11:
+		PlayerMotor.step(body, SnapshotCodec.quantize_input(20 + i, 1, 1, 0.0, 0, all))
+	check(PlayerMotor.knock_ticks(body) == 1 and _flat_speed(body) < 0.01, "lying still until the last tick")
+	check(not PlayerMotor.is_down(body), "getting up at the end")
+	PlayerMotor.step(body, SnapshotCodec.quantize_input(200, 0, 1, 0.0, 0, 0))
+	check(PlayerMotor.knock_ticks(body) == 0, "the knockdown ends")
+	for i in 20:
+		PlayerMotor.step(body, SnapshotCodec.quantize_input(201 + i, 0, 1, 0.0, 0, 0))
+	near(_flat_speed(body), Protocol.WALK_SPEED, 0.01, "walking again afterwards")
+	holder.queue_free()
+
+
+## Sprinting drains stamina (faster when unfit); at zero you are winded:
+## no sprint and a slower walk until stamina is back to 30 %.
+func test_stamina() -> void:
+	check(PlayerMotor.sprint_drain(0.0) == 33 and PlayerMotor.sprint_drain(1.0) == 8, "10 s of sprinting unfit, 40 s fit (%d, %d)" % [
+		PlayerMotor.sprint_drain(0.0), PlayerMotor.sprint_drain(1.0)])
+	var made: Array = await _grid_world()
+	var zone: ZoneData = made[0]
+	var holder: Node3D = made[1]
+	var body := PlayerMotor.make_body(AvatarSpec.defaults())
+	holder.add_child(body)
+	body.global_position = ZoneData.to_godot(float(zone.roads[0].points[0][0]), -60.0, 0.05)
+	body.set_meta("fitness", 0.0)
+	await get_tree().physics_frame
+	var sprint := PlayerMotor.BUTTON_SPRINT
+	var events := 0
+	for i in 30:
+		events = PlayerMotor.step(body, SnapshotCodec.quantize_input(i + 1, 0, 1, 0.0, 0, sprint))
+	check(events & PlayerMotor.EVENT_SPRINTED != 0, "sprinting is reported")
+	check(int(body.get_meta("stamina")) == PlayerMotor.STAMINA_MAX - 30 * 33, "a second of sprinting costs a tenth (%d)" % body.get_meta("stamina"))
+	near(_flat_speed(body), Protocol.SPRINT_SPEED, 0.01, "full sprint speed with breath left")
+	PlayerMotor.apply_state(body, {"stamina": 200, "knock": 0, "winded": false})
+	for i in 7:
+		PlayerMotor.step(body, SnapshotCodec.quantize_input(40 + i, 0, 1, 0.0, 0, sprint))
+	check(int(body.get_meta("stamina")) == 0 and body.get_meta("winded"), "out of breath at zero")
+	for i in 30:
+		events = PlayerMotor.step(body, SnapshotCodec.quantize_input(50 + i, 0, 1, 0.0, 0, sprint))
+	near(_flat_speed(body), Protocol.WALK_SPEED * PlayerMotor.WINDED_WALK, 0.01, "winded: no sprint, a slower walk")
+	check(events & PlayerMotor.EVENT_SPRINTED == 0, "winded sprinting spends nothing")
+	check(int(body.get_meta("stamina")) == 30 * PlayerMotor.RECOVER_MOVING, "breath comes back while walking")
+	# Standing still refills faster; winded until 30 %.
+	var ticks := 0
+	while body.get_meta("winded") and ticks < 200:
+		PlayerMotor.step(body, SnapshotCodec.quantize_input(100 + ticks, 0, 0, 0.0, 0, sprint))
+		ticks += 1
+	var stamina := int(body.get_meta("stamina"))
+	check(stamina >= PlayerMotor.WINDED_RECOVER and stamina < PlayerMotor.WINDED_RECOVER + PlayerMotor.RECOVER_IDLE,
+		"winded until 30 %% (%d after %d ticks)" % [stamina, ticks])
+	for i in 10:
+		PlayerMotor.step(body, SnapshotCodec.quantize_input(400 + i, 0, 1, 0.0, 0, sprint))
+	near(_flat_speed(body), Protocol.SPRINT_SPEED, 0.01, "sprinting again once recovered")
+	holder.queue_free()
+
+
+## A leg in a cast: no sprint, no jump, a slow walk.
+func test_limp() -> void:
+	var made: Array = await _grid_world()
+	var zone: ZoneData = made[0]
+	var holder: Node3D = made[1]
+	var body := PlayerMotor.make_body(AvatarSpec.defaults())
+	holder.add_child(body)
+	body.global_position = ZoneData.to_godot(float(zone.roads[0].points[0][0]), -60.0, 0.05)
+	body.set_meta("limp", true)
+	await get_tree().physics_frame
+	var top := 0.0
+	for i in 30:
+		PlayerMotor.step(body, SnapshotCodec.quantize_input(i + 1, 0, 1, 0.0, 0, PlayerMotor.BUTTON_SPRINT | PlayerMotor.BUTTON_JUMP))
+		top = maxf(top, body.velocity.y)
+	near(_flat_speed(body), PlayerMotor.LIMP_SPEED, 0.01, "limping caps the speed")
+	check(top <= 0.0, "no jumping on a broken leg")
+	check(int(body.get_meta("stamina")) == PlayerMotor.STAMINA_MAX, "and no sprinting")
+	holder.queue_free()
+
+
+## The shared kick: a shot when running, a dribble when walking, a nudge
+## standing still.
+func test_ball_kick() -> void:
+	var run := PropLayout.kick_velocity(Vector3(0, 0, -5.2), Vector3(0, 0, -1), true, false)
+	near(Vector2(run.x, run.z).length(), 1.5 * 5.2 + 1.0, 0.01, "a running kick")
+	near(run.y, 2.0 + 0.3 * 5.2, 0.01, "lifted")
+	var walk := PropLayout.kick_velocity(Vector3(2.4, 0, 0), Vector3(1, 0, 1).normalized(), false, false)
+	near(Vector2(walk.x, walk.z).length(), 1.15 * 2.4, 0.01, "a dribble")
+	check(walk.y == 0.0 and walk.x > walk.z and walk.z > 0.0, "along the ground, mostly where you walk")
+	var still := PropLayout.kick_velocity(Vector3.ZERO, Vector3(0, 0, 1), false, false)
+	check(still.length() < 1.0 and still.z > 0.0, "a nudge standing still")
+
+
+## The wave and sling reach the same absolute arm pose whatever the base
+## animation (standing or sitting): the palm faces front when waving.
+func test_poser_arm() -> void:
+	var view := AvatarView.new()
+	add_child(view)
+	view.build(AvatarSpec.defaults())
+	var sk: Skeleton3D = view.find_children("*", "Skeleton3D", true, false)[0]
+	var poser: AvatarPoser = sk.find_children("*", "AvatarPoser", false, false)[0]
+	var fore := sk.find_bone("lowerarm_r")
+	var hand := sk.find_bone("hand_r")
+	var results := []
+	for sitting in [false, true]:
+		view.sitting = sitting
+		for k in 90:
+			view.animate(0.0, 1.0 / 30.0)
+		view.play_emote("wave")
+		view.animate(0.0, 0.5)
+		poser.wave_time = 0.0  # no swing: compare the pose itself
+		await poser.modification_processed
+		var chest := sk.get_bone_global_pose(sk.find_bone("spine_03")).basis.orthonormalized()
+		var lean := chest * sk.get_bone_global_rest(sk.find_bone("spine_03")).basis.orthonormalized().inverse()
+		var up := lean.inverse() * (sk.get_bone_global_pose(hand).origin - sk.get_bone_global_pose(fore).origin).normalized()
+		results.append(up)
+	check((results[0] as Vector3).y > 0.9 and (results[1] as Vector3).y > 0.9, "the forearm points up when waving (%s, %s)" % results)
+	check((results[0] as Vector3).distance_to(results[1]) < 0.05, "same wave standing and sitting")
+	view.queue_free()

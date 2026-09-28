@@ -43,6 +43,11 @@ func setup(entity_id: int, info: Dictionary) -> void:
 	set_avatar(info.get("avatar", {}))
 	var r: Variant = info.get("ride", [])
 	ride = r if typeof(r) == TYPE_ARRAY else []
+	set_injury(str(info.get("injury", "")))
+
+
+func set_injury(kind: String) -> void:
+	view.set_injury(kind if kind in ["bruise", "arm", "leg"] else "")
 
 
 func set_avatar(new_avatar: Dictionary) -> void:
@@ -79,6 +84,9 @@ func say(text: String) -> void:
 
 func push_sample(t: float, pos: Vector3, yaw: float, pitch: float, speed: float, flags := 0) -> void:
 	view.sitting = flags & SnapshotCodec.FLAG_SITTING != 0
+	view.knocked = flags & SnapshotCodec.FLAG_KNOCKED != 0
+	view.winded = flags & SnapshotCodec.FLAG_WINDED != 0
+	view.limp = flags & SnapshotCodec.FLAG_LIMP != 0
 	if not _samples.is_empty():
 		var last: Dictionary = _samples[-1]
 		if t <= float(last.t):
@@ -135,7 +143,7 @@ func update_render(now_server: float, delta: float, camera_pos: Vector3) -> void
 	# Limbs of people far away are a few pixels tall: animate them less often.
 	_anim_skip += delta
 	if dist < 40.0 or _anim_skip > 0.1:
-		view.animate(_speed, _anim_skip if dist >= 40.0 else delta, _pitch, absf(_vy) > 1.3)
+		view.animate(_speed, _anim_skip if dist >= 40.0 else delta, _pitch, absf(_vy) > 1.3 and not view.knocked)
 		_anim_skip = 0.0
 	var show_name := dist < NAME_RANGE
 	if _label.visible != show_name:
