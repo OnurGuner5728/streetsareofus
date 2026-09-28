@@ -27,6 +27,8 @@ const CLIPS := {
 	"Idle_Talking_Loop": "talk", "Dance_Loop": "dance",
 	"Sitting_Enter": "sit_down", "Sitting_Idle_Loop": "sit", "Sitting_Talking_Loop": "sit_talk",
 	"Sitting_Exit": "stand_up",
+	# Knocked down (by a tram); played backwards it is getting up again.
+	"Death01": "fall",
 }
 
 

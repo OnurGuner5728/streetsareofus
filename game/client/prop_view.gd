@@ -4,8 +4,18 @@ extends Node3D
 ## however many chairs there are), starting at their deterministic homes
 ## and following server poses, interpolated a little in the past like other
 ## players. Knocks make a sound.
+##
+## Balls you touch yourself do not wait for the server: the same kick
+## (PropLayout.kick_velocity) is applied here at once and the ball is
+## simulated simply (gravity, bouncing on the terrain, rolling resistance)
+## for PREDICT_TIME, then blended over to the server's pose.
 
 const INTERP_DELAY := 0.12
+const PREDICT_TIME := 0.7
+const PREDICT_BLEND := 0.3
+const GRAVITY := 9.8
+const BALL_BOUNCE := 0.62
+const BALL_DAMP := 0.25  # as PropWorld's ball linear_damp
 
 var layout: PropLayout
 var sounds: CitySounds
@@ -14,12 +24,23 @@ var _slot := []  # id -> [kind, instance]
 var _samples := {}  # id -> [[t, Transform3D], ...]
 var _active := {}  # id -> true while samples are being played back
 var _last_speed := {}  # id -> m/s, for knock sounds
+var _terrain: Terrain
+var _balls: Array = []  # ids of the balls
+var _shown := {}  # id -> Transform3D on screen now (balls)
+var _server_xf := {}  # id -> last pose placed from the server (balls)
+var _pred := {}  # id -> {pos, vel, basis, age}
+var _kicked_at := {}  # id -> local time of our last predicted kick
 
 
 func setup(zone: ZoneData) -> void:
 	layout = PropLayout.for_zone(zone)
+	_terrain = zone.terrain
 	var by_kind := {}
 	for p in layout.props:
+		if p.kind == "ball":
+			_balls.append(int(p.id))
+			_shown[int(p.id)] = PropWorld.home_transform(p)
+			_server_xf[int(p.id)] = _shown[int(p.id)]
 		if not by_kind.has(p.kind):
 			by_kind[p.kind] = []
 		_slot.append([p.kind, by_kind[p.kind].size()])
@@ -45,7 +66,32 @@ func setup(zone: ZoneData) -> void:
 ## Poses sent on joining: jump straight there.
 func apply_now(poses: Array) -> void:
 	for entry in poses:
-		_place(int(entry[0]), entry[1])
+		_place_server(int(entry[0]), entry[1])
+
+
+## The local player this physics tick: any ball they run into is kicked
+## here straight away, exactly as the server will kick it.
+func touch_balls(pos: Vector3, vel: Vector3, sprint: bool) -> void:
+	var t := Time.get_ticks_msec() / 1000.0
+	var reach := PropWorld.PLAYER_RADIUS + 0.22 * 0.45
+	for id: int in _balls:
+		var ball: Vector3 = _pred[id].pos if _pred.has(id) else (_shown[id] as Transform3D).origin
+		var flat := Vector3(ball.x - pos.x, 0.0, ball.z - pos.z)
+		var bottom := ball.y - PropWorld.BALL_RADIUS
+		if flat.length() > reach or bottom > pos.y + 1.7 or bottom + 0.22 < pos.y - 0.05:
+			continue
+		if t - float(_kicked_at.get(id, -INF)) < PropLayout.KICK_COOLDOWN:
+			continue
+		var n := flat.normalized() if flat.length() > 0.01 else Vector3(vel.x, 0.0, vel.z).normalized()
+		var kick := PropLayout.kick_velocity(vel, n, sprint, vel.y > 0.5)
+		var have: Vector3 = _pred[id].vel if _pred.has(id) else Vector3.ZERO
+		if kick.dot(n) <= have.dot(n) + 0.05:
+			continue
+		_kicked_at[id] = t
+		var basis: Basis = _pred[id].basis if _pred.has(id) else (_shown[id] as Transform3D).basis
+		_pred[id] = {"pos": ball, "vel": kick, "basis": basis, "age": 0.0}
+		if sounds:
+			sounds.knock(ball, "ball", clampf(kick.length() / 6.0, 0.2, 1.0))
 
 
 ## Poses from a snapshot generated at server time t.
@@ -65,13 +111,13 @@ func push(t: float, poses: Array) -> void:
 		_active[id] = true
 
 
-func update(now_server: float) -> void:
+func update(now_server: float, delta := 0.0) -> void:
 	var t := now_server - INTERP_DELAY
 	for id in _active.keys():
 		var list: Array = _samples[id]
 		var last: Array = list[-1]
 		if t >= float(last[0]):
-			_place(id, last[1])
+			_place_server(id, last[1])
 			if t > float(last[0]) + 1.0:
 				_active.erase(id)
 				_samples[id] = [last]
@@ -81,14 +127,64 @@ func update(now_server: float) -> void:
 			var b: Array = list[i]
 			if float(a[0]) <= t:
 				var f := (t - float(a[0])) / maxf(0.0001, float(b[0]) - float(a[0]))
-				_place(id, (a[1] as Transform3D).interpolate_with(b[1], f))
-				_knock(id, a, b)
+				_place_server(id, (a[1] as Transform3D).interpolate_with(b[1], f))
+				if not _pred.has(id):
+					_knock(id, a, b)
 				break
+	for id in _pred.keys():
+		var p: Dictionary = _pred[id]
+		_simulate_ball(p, delta)
+		p.age = float(p.age) + delta
+		var mine := Transform3D(p.basis, p.pos)
+		var blend := (float(p.age) - PREDICT_TIME) / PREDICT_BLEND
+		if blend >= 1.0:
+			_pred.erase(id)
+			_place(id, _server_xf[id])
+		else:
+			_place(id, mine.interpolate_with(_server_xf[id], clampf(blend, 0.0, 1.0)))
+
+
+## A pose from the server: shown unless our own prediction runs the ball.
+func _place_server(id: int, xf: Transform3D) -> void:
+	if _server_xf.has(id):
+		_server_xf[id] = xf
+		if _pred.has(id):
+			return
+	_place(id, xf)
+
+
+## Roughly what the server's physics does to a kicked ball, in small steps.
+func _simulate_ball(p: Dictionary, delta: float) -> void:
+	var steps := maxi(1, ceili(delta * 60.0))
+	var dt := delta / steps
+	var pos: Vector3 = p.pos
+	var vel: Vector3 = p.vel
+	var basis: Basis = p.basis
+	for k in steps:
+		vel.y -= GRAVITY * dt
+		vel *= maxf(0.0, 1.0 - BALL_DAMP * dt)
+		pos += vel * dt
+		var ground := _terrain.height(pos.x, pos.z) + PropWorld.BALL_RADIUS
+		if pos.y <= ground:
+			pos.y = ground
+			vel.y = -vel.y * BALL_BOUNCE if vel.y < -0.8 else 0.0
+			var flat := Vector3(vel.x, 0.0, vel.z)
+			var speed := flat.length()
+			if speed > 0.001:
+				vel -= flat / speed * minf(speed, PropWorld.ROLL_RESIST * dt)
+		var roll := Vector3(vel.x, 0.0, vel.z)
+		if roll.length() > 0.01:
+			basis = Basis(Vector3.UP.cross(roll).normalized(), roll.length() * dt / PropWorld.BALL_RADIUS) * basis
+	p.pos = pos
+	p.vel = vel
+	p.basis = basis.orthonormalized()
 
 
 func _place(id: int, xf: Transform3D) -> void:
 	if id < 0 or id >= _slot.size():
 		return
+	if _shown.has(id):
+		_shown[id] = xf
 	var slot: Array = _slot[id]
 	(_mm[slot[0]] as MultiMesh).set_instance_transform(int(slot[1]), xf)
 

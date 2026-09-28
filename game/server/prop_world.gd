@@ -30,6 +30,8 @@ var _pos := PackedVector3Array()  # where each prop is (refreshed for awake ones
 var _kind_spec: Array = []  # per id: PropLayout.KINDS entry
 var _near_trams := {}  # Vector2i(line, vehicle) -> true when a prop is within reach
 var _near_checked := -1000.0
+var _kicked_at := {}  # ball id -> push tick of its last kick
+var _push_tick := 0
 var pushes := 0
 
 
@@ -98,30 +100,56 @@ func _make_body(p: Dictionary) -> RigidBody3D:
 	b.physics_material_override = mat
 	b.collision_layer = Protocol.LAYER_PROPS
 	b.collision_mask = Protocol.LAYER_WORLD | Protocol.LAYER_PROPS | Protocol.LAYER_TRAMS
-	var cs := CollisionShape3D.new()
-	if p.kind == "ball":
-		var sphere := SphereShape3D.new()
-		sphere.radius = BALL_RADIUS
-		cs.shape = sphere
-		b.continuous_cd = true
-		b.angular_damp = 1.2  # grass and asphalt eat a rolling ball's spin
-		b.linear_damp = 0.25
-	elif p.kind == "table":
-		var cyl := CylinderShape3D.new()
-		cyl.radius = size.x / 2.0
-		cyl.height = size.y
-		cs.shape = cyl
-		cs.position.y = size.y / 2.0
-	else:
-		var box := BoxShape3D.new()
-		box.size = size
-		cs.shape = box
-		cs.position.y = size.y / 2.0
-	b.add_child(cs)
+	match p.kind:
+		"ball":
+			var sphere := SphereShape3D.new()
+			sphere.radius = BALL_RADIUS
+			_add_shape(b, sphere, Vector3.ZERO)
+			b.continuous_cd = true
+			b.angular_damp = 1.2  # grass and asphalt eat a rolling ball's spin
+			b.linear_damp = 0.25
+		"chair":
+			# Legs (as one block), seat and backrest: it lands on its back or
+			# side like a chair, not like a crate.
+			_add_shape(b, _box(Vector3(0.42, 0.44, 0.42)), Vector3(0, 0.22, 0))
+			_add_shape(b, _box(Vector3(0.44, 0.04, 0.42)), Vector3(0, 0.46, 0))
+			_add_shape(b, _box(Vector3(0.42, 0.38, 0.04)), Vector3(0, 0.67, 0.2))
+			b.center_of_mass_mode = RigidBody3D.CENTER_OF_MASS_MODE_CUSTOM
+			b.center_of_mass = Vector3(0, 0.36, 0.03)
+		"table":
+			# Top disc, pole and a heavy base disc: a tipped table lies still
+			# instead of rolling away like a barrel.
+			_add_shape(b, _disc(size.x / 2.0, 0.03), Vector3(0, size.y - 0.015, 0))
+			_add_shape(b, _disc(0.035, size.y - 0.05), Vector3(0, (size.y - 0.05) / 2.0, 0))
+			_add_shape(b, _disc(0.25, 0.03), Vector3(0, 0.015, 0))
+			b.center_of_mass_mode = RigidBody3D.CENTER_OF_MASS_MODE_CUSTOM
+			b.center_of_mass = Vector3(0, 0.22, 0)
+		_:
+			_add_shape(b, _box(size), Vector3(0, size.y / 2.0, 0))
 	add_child(b)
 	b.global_transform = home_transform(p)
 	b.sleeping = true
 	return b
+
+
+static func _add_shape(b: RigidBody3D, shape: Shape3D, at: Vector3) -> void:
+	var cs := CollisionShape3D.new()
+	cs.shape = shape
+	cs.position = at
+	b.add_child(cs)
+
+
+static func _box(size: Vector3) -> BoxShape3D:
+	var box := BoxShape3D.new()
+	box.size = size
+	return box
+
+
+static func _disc(radius: float, height: float) -> CylinderShape3D:
+	var cyl := CylinderShape3D.new()
+	cyl.radius = radius
+	cyl.height = height
+	return cyl
 
 
 ## Moves the tram bodies to where the timetable has them at `t`; only trams
@@ -156,8 +184,10 @@ func update_trams(t: float) -> void:
 
 
 ## Whatever a player moves into is pushed along at (a share of) their
-## speed; running or jumping into a ball kicks it up.
+## speed; balls are kicked (PropLayout.kick_velocity, which client
+## prediction uses too): a shot when running or jumping, a dribble walking.
 func push_from_players(players: Array) -> void:
+	_push_tick += 1
 	for pl in players:
 		if not pl.riding.is_empty():
 			continue
@@ -182,21 +212,35 @@ func push_from_players(players: Array) -> void:
 			if dist > reach:
 				continue
 			var n := flat / dist if dist > 0.01 else Basis(Vector3.UP, float(pl.yaw)) * Vector3.FORWARD
+			if kind == "ball":
+				_kick(b, id, pl, n)
+				continue
 			var along := Vector3(vel.x, 0.0, vel.z).dot(n)
 			var want := maxf(along, 0.0) * float(spec.push) + (reach - dist) * 3.0
 			var have := b.linear_velocity.dot(n)
 			if want <= have + 0.05:
 				continue
 			var impulse := n * (want - have) * float(spec.mass)
-			var at := Vector3.ZERO
-			if kind == "ball":
-				if pl.buttons & PlayerMotor.BUTTON_SPRINT or vel.y > 0.5:
-					impulse.y += (1.6 + along * 0.45) * float(spec.mass)
-			else:
-				at = Vector3(0, size.y * 0.7, 0)  # pushed high, tall things tip over
+			var at := Vector3(0, size.y * 0.7, 0)  # pushed high, tall things tip over
 			b.sleeping = false
 			b.apply_impulse(impulse, at)
 			pushes += 1
+
+
+func _kick(b: RigidBody3D, id: int, pl: Variant, n: Vector3) -> void:
+	if _push_tick - int(_kicked_at.get(id, -1000)) < roundi(PropLayout.KICK_COOLDOWN * Protocol.TICK_RATE):
+		return
+	var body: CharacterBody3D = pl.body
+	var sprint: bool = int(pl.buttons) & PlayerMotor.BUTTON_SPRINT != 0 and not body.get_meta("winded", false)
+	var kick := PropLayout.kick_velocity(body.velocity, n, sprint, body.velocity.y > 0.5)
+	if kick.dot(n) <= b.linear_velocity.dot(n) + 0.05:
+		return  # already rolling away faster than the foot
+	_kicked_at[id] = _push_tick
+	b.sleeping = false
+	b.linear_velocity = kick
+	# Rolling, not sliding: spin to match the ground speed.
+	b.angular_velocity = Vector3.UP.cross(Vector3(kick.x, 0.0, kick.z)) / BALL_RADIUS * 0.6
+	pushes += 1
 
 
 ## Bookkeeping after each tick: what is moving, what to tidy away.

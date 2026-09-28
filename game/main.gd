@@ -32,7 +32,8 @@ func _ready() -> void:
 	if args.has("test"):
 		_run_tests()
 	elif args.has("avatar-gallery"):
-		_avatar_gallery(int(args.get("avatar-gallery", "1")), str(args.get("screenshot", "")))
+		_avatar_gallery(int(args.get("avatar-gallery", "1")), str(args.get("screenshot", "")),
+			args.has("states"), deg_to_rad(float(args.get("turn", "0"))))
 	elif args.has("server"):
 		_start_server(args)
 	elif args.has("connect"):
@@ -172,7 +173,10 @@ static func _random_avatar(seed_value: int) -> Dictionary:
 
 
 ## Debug: six random avatars side by side (seeded), saved as a screenshot.
-func _avatar_gallery(seed_value: int, path: String) -> void:
+## With --states they show conditions instead: waving standing and seated,
+## an arm in a sling, limping on a leg cast, a bandaged head and out of
+## breath, knocked down. --turn=DEG turns them all (to see from the side).
+func _avatar_gallery(seed_value: int, path: String, states := false, turn := 0.0) -> void:
 	var stage := Node3D.new()
 	_swap(stage)
 	var env := Environment.new()
@@ -202,7 +206,31 @@ func _avatar_gallery(seed_value: int, path: String) -> void:
 		view.build(AvatarSpec.random(rng))
 		view.position = Vector3(-3.75 + i * 1.5, 0, 0)
 		view.rotation.y = PI + 0.35 * (i % 3 - 1)  # face the camera
-		view.animate(0.0, 0.016)
+		if not states:
+			view.animate(0.0, 0.016)
+			continue
+		view.rotation.y = PI + turn
+		var speed := 0.0
+		match i:
+			0:
+				view.play_emote("wave")
+			1:
+				view.sitting = true
+			2:
+				view.set_injury("arm")
+			3:
+				view.set_injury("leg")
+				view.limp = true
+				speed = PlayerMotor.LIMP_SPEED
+			4:
+				view.set_injury("bruise")
+				view.winded = true
+			5:
+				view.knocked = true
+		for k in 60:
+			if i == 1 and k == 50:
+				view.play_emote("wave")
+			view.animate(speed, 1.0 / 30.0)
 	var cam := Camera3D.new()
 	cam.position = Vector3(0, 1.1, 5.2)
 	cam.fov = 50

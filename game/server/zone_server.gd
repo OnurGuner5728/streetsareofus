@@ -15,6 +15,16 @@ const REPORTS_PER_MINUTE := 5
 # How far an input's world tick may lag behind (or run ahead of) the server.
 const MAX_INPUT_LAG_TICKS := 45
 const MAX_INPUT_LEAD_TICKS := 3
+## Sprinting slowly makes you fitter (0..1); clients hear of it in steps.
+const FITNESS_PER_SPRINT_TICK := 0.00002
+const FITNESS_SEND_STEP := 0.01
+## Tram injuries by the tram's speed (m/s): [kind, below speed, seconds].
+const INJURIES := [["bruise", 3.0, 120.0], ["arm", 6.0, 300.0], ["leg", INF, 480.0]]
+const INJURY_RANK := {"": 0, "bruise": 1, "arm": 2, "leg": 3}
+## Where to get patched up, and how close you must be (m).
+const HEAL_KINDS := ["pharmacy", "clinic", "hospital", "doctors"]
+const HEAL_RANGE := 15.0
+const HEAL_RANGE_TOLERANCE := 2.0
 
 
 class Player:
@@ -45,6 +55,9 @@ class Player:
 	var seat := -1  # bench * 2 + side while sitting
 	var seat_yaw := 0.0
 	var joined_at := 0.0
+	var fitness := PlayerMotor.DEFAULT_FITNESS
+	var fitness_sent := PlayerMotor.DEFAULT_FITNESS  # what the client (and the motor) use
+	var injury := {}  # {kind, until (unix seconds), treated}
 
 
 var zone: ZoneData
@@ -194,11 +207,20 @@ func on_hello(peer: int, payload: Dictionary) -> void:
 	players[peer] = pl
 	store.update_profile(account_id, display_name, pl.avatar)
 	store.audit("join", {"account": account_id, "peer": peer, "zone": zone.zone_id, "mode": mode})
+	pl.fitness = store.fitness(account_id, PlayerMotor.DEFAULT_FITNESS)
+	pl.fitness_sent = pl.fitness
+	pl.body.set_meta("fitness", pl.fitness)
+	pl.injury = store.injury(account_id)
+	if not pl.injury.is_empty() and float(pl.injury.until) <= ServerStore.unix_now():
+		pl.injury = {}
+		store.set_injury(account_id, {})
+	pl.body.set_meta("limp", str(pl.injury.get("kind", "")) == "leg")
 
 	Net.s_welcome.rpc_id(peer, {
 		"id": peer, "zone_id": zone.zone_id, "zone_version": zone.version,
 		"tick_rate": Protocol.TICK_RATE, "tick": tick, "server_time": server_time(),
 		"spawn": spawn.pos, "yaw": spawn.yaw, "name": display_name, "avatar": pl.avatar,
+		"fitness": pl.fitness, "injury": str(pl.injury.get("kind", "")), "injury_left": _injury_left(pl),
 	})
 	var moved := props.displaced_poses()
 	if not moved.is_empty():
@@ -322,6 +344,7 @@ func _physics_process(_delta: float) -> void:
 		_stats.snap_us += Time.get_ticks_usec() - t_snap
 	if tick % Protocol.TICK_RATE == 0:
 		_drop_silent_peers()
+		_heal_expired()
 	if tick % Protocol.POPULATION_EVERY_TICKS == 0:
 		_send_population()
 	var t := now()
@@ -355,12 +378,10 @@ func _simulate(pl: Player) -> void:
 	var limit := MAX_INPUTS_PER_TICK if pl.queue.size() > 2 else 1
 	while not pl.queue.is_empty() and pl.input_credit >= 1.0 and processed < limit:
 		var inp: Dictionary = pl.queue.pop_front()
-		var events := PlayerMotor.step(pl.body, inp, transit)
-		if events & PlayerMotor.EVENT_TRAM_HIT and now() - pl.tram_hit_at > 3.0:
-			pl.tram_hit_at = now()
-			log_line("%s was hit by a tram" % pl.display_name)
+		_after_step(pl, PlayerMotor.step(pl.body, inp, transit))
 		_stats.sim_steps += 1
-		pl.yaw = inp.yaw
+		if PlayerMotor.knock_ticks(pl.body) == 0:
+			pl.yaw = inp.yaw  # someone lying on the ground does not turn with the mouse
 		pl.pitch = inp.pitch
 		pl.buttons = inp.buttons
 		pl.last_processed_seq = inp.seq
@@ -376,7 +397,114 @@ func _simulate(pl: Player) -> void:
 	pl.starved_ticks += 1
 	if pl.starved_ticks > STARVED_TICKS_BEFORE_IDLE:
 		_stats.idle_steps += 1
-		PlayerMotor.step(pl.body, SnapshotCodec.quantize_input(pl.last_processed_seq, 0, 0, pl.yaw, pl.pitch, 0, tick), transit)
+		_after_step(pl, PlayerMotor.step(pl.body, SnapshotCodec.quantize_input(pl.last_processed_seq, 0, 0, pl.yaw, pl.pitch, 0, tick), transit))
+
+
+func _after_step(pl: Player, events: int) -> void:
+	if events & PlayerMotor.EVENT_TRAM_HIT:
+		var speed := float(pl.body.get_meta("hit_speed", 0.0))
+		pl.tram_hit_at = now()
+		log_line("%s was hit by a tram at %.1f m/s" % [pl.display_name, speed])
+		_injure(pl, speed)
+	if events & PlayerMotor.EVENT_SPRINTED and pl.fitness < 1.0:
+		pl.fitness = minf(1.0, pl.fitness + FITNESS_PER_SPRINT_TICK)
+		if pl.fitness - pl.fitness_sent >= FITNESS_SEND_STEP or (pl.fitness >= 1.0 and pl.fitness_sent < 1.0):
+			# The motor only ever uses what the client has been told, so
+			# prediction keeps matching.
+			pl.fitness_sent = pl.fitness
+			pl.body.set_meta("fitness", pl.fitness)
+			store.set_fitness(pl.account_id, pl.fitness)
+			if Net.is_open(pl.id):
+				Net.s_fitness.rpc_id(pl.id, pl.fitness)
+
+
+# --- injuries ------------------------------------------------------------------
+
+func _injure(pl: Player, speed: float) -> void:
+	var kind := ""
+	var seconds := 0.0
+	for entry in INJURIES:
+		if speed < float(entry[1]):
+			kind = entry[0]
+			seconds = entry[2]
+			break
+	# A lighter knock never replaces (or shortens) a worse injury.
+	var current := str(pl.injury.get("kind", ""))
+	if INJURY_RANK[kind] < INJURY_RANK[current]:
+		return
+	_set_injury(pl, {"kind": kind, "until": ServerStore.unix_now() + seconds, "treated": false})
+	store.audit("injury", {"account": pl.account_id, "kind": kind, "speed": snappedf(speed, 0.1)})
+
+
+func _set_injury(pl: Player, injury: Dictionary) -> void:
+	pl.injury = injury
+	var kind := str(injury.get("kind", ""))
+	pl.body.set_meta("limp", kind == "leg")
+	store.set_injury(pl.account_id, injury)
+	var left := _injury_left(pl)
+	if Net.is_open(pl.id):
+		Net.s_injury.rpc_id(pl.id, pl.id, kind, left)
+	for other in players.values():
+		if other.known.has(pl.id) and Net.is_open(other.id):
+			Net.s_injury.rpc_id(other.id, pl.id, kind, left)
+
+
+func _injury_left(pl: Player) -> float:
+	if pl.injury.is_empty():
+		return 0.0
+	return maxf(0.0, float(pl.injury.until) - ServerStore.unix_now())
+
+
+func _heal_expired() -> void:
+	var t := ServerStore.unix_now()
+	for pl in players.values():
+		if not pl.injury.is_empty() and float(pl.injury.until) <= t:
+			log_line("%s healed (%s)" % [pl.display_name, pl.injury.kind])
+			_set_injury(pl, {})
+
+
+## The nearest place that treats injuries within `radius` metres: the POI, or {}.
+func _clinic_near(pos: Vector3, radius: float) -> Dictionary:
+	var p := ZoneData.to_en(pos)
+	var best := {}
+	var best_d := radius
+	for poi in zone.pois:
+		if not str(poi.get("kind", "")) in HEAL_KINDS:
+			continue
+		var d := p.distance_to(Vector2(float(poi.e), float(poi.n)))
+		if d <= best_d:
+			best_d = d
+			best = poi
+	return best
+
+
+## Pressing E at a pharmacy: a bruise is dressed and gone; a cast gets
+## looked after once, halving the time left. Clinics and hospitals heal.
+func on_treat(peer: int) -> void:
+	var pl: Player = players.get(peer)
+	if pl == null:
+		return
+	if pl.injury.is_empty():
+		_dispatch([SocialRules._notice(peer, "not_injured")])
+		return
+	var place := _clinic_near(pl.body.global_position, HEAL_RANGE + HEAL_RANGE_TOLERANCE)
+	if place.is_empty():
+		_dispatch([SocialRules._notice(peer, "treat_far")])
+		return
+	var kind := str(pl.injury.kind)
+	var where := str(place.get("name", ""))
+	if str(place.kind) != "pharmacy" or kind == "bruise":
+		_set_injury(pl, {})
+		_dispatch([SocialRules._notice(peer, "treat_healed" if str(place.kind) == "pharmacy" else "treat_doctor", where)])
+	elif bool(pl.injury.get("treated", false)):
+		_dispatch([SocialRules._notice(peer, "treat_again", where)])
+		return
+	else:
+		var left := _injury_left(pl) * 0.5
+		_set_injury(pl, {"kind": kind, "until": ServerStore.unix_now() + left, "treated": true})
+		_dispatch([SocialRules._notice(peer, "treat_dressed", where)])
+	store.audit("treat", {"account": pl.account_id, "kind": kind, "at": str(place.get("id", ""))})
+	log_line("%s treated (%s) at %s" % [pl.display_name, kind, where])
 
 
 func _send_snapshots() -> void:
@@ -417,13 +545,20 @@ func _send_snapshots() -> void:
 					flags |= SnapshotCodec.FLAG_RIDING
 				if other.seat >= 0:
 					flags |= SnapshotCodec.FLAG_SITTING
+				if PlayerMotor.is_down(other.body):
+					flags |= SnapshotCodec.FLAG_KNOCKED
+				if other.body.get_meta("winded", false):
+					flags |= SnapshotCodec.FLAG_WINDED
+				if other.body.get_meta("limp", false):
+					flags |= SnapshotCodec.FLAG_LIMP
 				entities.append({"id": other_id, "pos": other_pos, "yaw": other.seat_yaw if other.seat >= 0 else other.yaw, "pitch": other.pitch,
 					"speed": Vector2(other.body.velocity.x, other.body.velocity.z).length(), "flags": flags})
 		for known_id in pl.known.keys():
 			if not interested.has(known_id):
 				pl.known.erase(known_id)
 				Net.s_entity_leave.rpc_id(pl.id, known_id)
-		var data := SnapshotCodec.encode_snapshot(tick, pl.last_processed_seq, pos, pl.body.velocity, entities, prop_data)
+		var data := SnapshotCodec.encode_snapshot(tick, pl.last_processed_seq, pos, pl.body.velocity,
+			PlayerMotor.motor_state(pl.body), entities, prop_data)
 		Net.s_snapshot.rpc_id(pl.id, data)
 		_stats.snap_bytes += data.size()
 		_stats.snap_entities += entities.size()
@@ -431,7 +566,7 @@ func _send_snapshots() -> void:
 
 
 func _entity_info(pl: Player) -> Dictionary:
-	return {"name": pl.display_name, "avatar": pl.avatar, "ride": _ride_array(pl)}
+	return {"name": pl.display_name, "avatar": pl.avatar, "ride": _ride_array(pl), "injury": str(pl.injury.get("kind", ""))}
 
 
 static func _ride_array(pl: Player) -> Array:
@@ -471,7 +606,7 @@ func _simulate_rider(pl: Player) -> void:
 
 func on_board(peer: int, line_index: int, vehicle: int) -> void:
 	var pl: Player = players.get(peer)
-	if pl == null or not pl.riding.is_empty() or line_index < 0 or line_index >= transit.lines.size():
+	if pl == null or not pl.riding.is_empty() or line_index < 0 or line_index >= transit.lines.size() 			or PlayerMotor.knock_ticks(pl.body) > 0:
 		return
 	var line: TransitNetwork.TransitLine = transit.lines[line_index]
 	if vehicle < 0 or vehicle >= line.vehicles:
@@ -712,7 +847,7 @@ func on_report(peer: int, target: int, reason: String) -> void:
 func on_sit(peer: int, bench: int) -> void:
 	var pl: Player = players.get(peer)
 	var benches: Array = StreetLayout.for_zone(zone).benches
-	if pl == null or not pl.riding.is_empty() or bench < 0 or bench >= benches.size():
+	if pl == null or not pl.riding.is_empty() or bench < 0 or bench >= benches.size() or PlayerMotor.knock_ticks(pl.body) > 0:
 		return
 	var b: Dictionary = benches[bench]
 	var best := -1

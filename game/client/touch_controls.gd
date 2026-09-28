@@ -42,7 +42,8 @@ func _ready() -> void:
 	add_child(_surface)
 
 
-## ctx: target (someone under the crosshair), talking_to_target, in_conversation, incoming
+## ctx: target (someone under the crosshair), talking_to_target, in_conversation, incoming,
+## cat, treat (injured at a pharmacy), bench, seated, tram_label, tram_tint
 func set_context(ctx: Dictionary) -> void:
 	if _surface.visible != enabled:
 		_surface.visible = enabled
@@ -79,6 +80,8 @@ func _buttons() -> Array:
 		list.append({"id": "person", "label": "Kişi", "pos": Vector2(w - 140, h - 200), "r": 26.0})
 	elif _context.get("cat", false):
 		list.append({"id": "pet", "label": "Sev", "pos": Vector2(w - 62, h - 170), "r": 34.0, "tint": Color("d9893a")})
+	elif _context.get("treat", false):
+		list.append({"id": "treat", "label": "Tedavi", "pos": Vector2(w - 62, h - 170), "r": 34.0, "tint": Color("c0392b")})
 	elif _context.get("bench", false):
 		list.append({"id": "sit", "label": "Otur", "pos": Vector2(w - 62, h - 170), "r": 34.0, "tint": Color("8a6d4b")})
 	if not _context.get("seated", false):

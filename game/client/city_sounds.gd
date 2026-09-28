@@ -3,7 +3,8 @@ extends Node3D
 ## The city's sound, synthesised on the client (no audio files to download):
 ## a background hum that quietens at night, tram rumble that follows each
 ## car's speed, the tram bell, footsteps, gulls over the rooftops, sparrows
-## in the trees, rain, and a soft chime for incoming talk requests.
+## in the trees, rain, a soft chime for incoming talk requests, and your
+## own heavy breathing when you have run out of breath.
 ##
 ## Samples are generated a slice per frame after joining, so building them
 ## never stalls a phone.
@@ -23,6 +24,7 @@ var _ambient: AudioStreamPlayer
 var _rain: AudioStreamPlayer
 var _steps: AudioStreamPlayer
 var _ui: AudioStreamPlayer
+var _breath: AudioStreamPlayer
 var _one_shots: Array = []  # AudioStreamPlayer3D pool
 var _tram_voices := {}  # veh root -> AudioStreamPlayer3D
 var _next_critter := 0.0
@@ -38,6 +40,7 @@ func setup(game: GameClient) -> void:
 	_rain = _player2d(-80.0)
 	_steps = _player2d(-28.0)
 	_ui = _player2d(-8.0)
+	_breath = _player2d(-80.0)
 	for i in 4:
 		var p := AudioStreamPlayer3D.new()
 		p.unit_size = 12.0
@@ -102,6 +105,19 @@ func footsteps(speed: float, grounded: bool, delta: float) -> void:
 		_steps.pitch_scale = _rng.randf_range(0.9, 1.1)
 		_steps.volume_db = (-23.0 if running else -28.0) + _rng.randf_range(-1.5, 1.0)
 		_steps.play()
+
+
+## Panting, as loud as `level` (0..1): nothing when you have breath left.
+func breathing(level: float) -> void:
+	if not ready_to_play or level < 0.02:
+		if _breath and _breath.playing:
+			_breath.stop()
+		return
+	if not _breath.playing:
+		_breath.stream = _samples.breath
+		_breath.play()
+	_breath.volume_db = linear_to_db(level) - 13.0
+	_breath.pitch_scale = 0.95 + 0.12 * level
 
 
 func update(night: float, delta: float) -> void:
@@ -200,12 +216,12 @@ func _one_shot(sample: String, at: Vector3, db: float, pitch: float) -> void:
 
 func _generate() -> void:
 	var specs := [["step", 0.12], ["thump", 0.25], ["clang", 0.7], ["chime", 0.7], ["bell", 1.4], ["sparrow", 0.5], ["gull", 1.1],
-		["rumble", 2.0], ["ambient", 6.0], ["rain", 3.0], ["thunder", 3.5], ["purr", 1.8]]
+		["rumble", 2.0], ["ambient", 6.0], ["rain", 3.0], ["thunder", 3.5], ["purr", 1.8], ["breath", 1.9]]
 	for spec in specs:
 		var data := PackedFloat32Array()
 		data.resize(int(float(spec[1]) * RATE))
 		await _fill(str(spec[0]), data)
-		var loop: bool = spec[0] in ["rumble", "ambient", "rain"]
+		var loop: bool = spec[0] in ["rumble", "ambient", "rain", "breath"]
 		_samples[spec[0]] = _to_wav(data, loop)
 	ready_to_play = true
 
@@ -270,6 +286,22 @@ func _fill(sound: String, out: PackedFloat32Array) -> void:
 				lp2 += (lp - lp2) * 0.05
 				var roll := 1.0 + 0.6 * sin(TAU * 1.3 * t) * sin(TAU * 0.4 * t)
 				s = lp2 * 9.0 * roll * exp(-t * 0.9) + _rng.randf_range(-1.0, 1.0) * 0.5 * exp(-t * 18.0)
+			"breath":
+				# Two quick breaths a cycle: a hissing gasp in, a longer huff out
+				# through the mouth (noise shaped by a breathy formant).
+				var u := fmod(t, 0.9)
+				var env := 0.0
+				var bright := 0.0
+				if u < 0.32:
+					env = sin(PI * u / 0.32) * 0.55
+					bright = 0.5
+				elif u > 0.36 and u < 0.84:
+					env = pow(sin(PI * (u - 0.36) / 0.48), 0.7)
+					bright = 0.25
+				var white := _rng.randf_range(-1.0, 1.0)
+				lp += (white - lp) * bright
+				lp2 += (lp - lp2) * 0.35
+				s = (lp - lp2 * 0.6) * env * 1.4
 			"rain":
 				var white := _rng.randf_range(-1.0, 1.0)
 				lp += (white - lp) * 0.6
@@ -277,7 +309,7 @@ func _fill(sound: String, out: PackedFloat32Array) -> void:
 		out[i] = s
 		if i % 12000 == 11999:
 			await get_tree().process_frame
-	if sound in ["rumble", "ambient", "rain"]:
+	if sound in ["rumble", "ambient", "rain", "breath"]:
 		_crossfade_loop(out)
 
 

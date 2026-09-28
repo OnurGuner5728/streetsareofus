@@ -13,7 +13,9 @@ extends Node3D
 ## - skirts, coat tails, hoods, collars, hats, glasses, bags and scarves are
 ##   small merged meshes on bones.
 ## Locomotion follows the speed (idle, walk, jog, sprint, jump, fall); an
-## AvatarPoser adds where the player looks, waving and nodding.
+## AvatarPoser adds where the player looks, waving and nodding, and how the
+## body is doing: out of breath, a leg in a cast, an arm in a sling.
+## Knocked down, the "fall" clip plays, and backwards to get up again.
 ## Faces -Z, like the camera, so rotation.y = yaw.
 
 const DIR := "res://assets/characters/"
@@ -45,6 +47,9 @@ const HAIR_BODY := {"Hair_Buzzed": "male", "Hair_SimpleParted": "male", "Hair_Be
 const SKIN_REFERENCE := Color(0.665, 0.467, 0.323)
 ## Natural ground speed of the in-place loops (m/s), for foot-matched playback.
 const CLIP_SPEED := {"walk": 1.25, "jog": 3.4, "sprint": 6.0}
+const GETUP_SECONDS := 1.0
+const CAST_COLOR := Color(0.95, 0.95, 0.93)
+const SLING_COLOR := Color(0.34, 0.48, 0.72)
 const FACE_SCALE := {"oval": Vector3(0.97, 1.02, 1.0), "round": Vector3(1.04, 0.97, 1.0),
 	"square": Vector3(1.04, 1.0, 1.0), "long": Vector3(0.95, 1.06, 1.0)}
 
@@ -56,6 +61,10 @@ var visual_height := 1.7
 var detail := true
 var talking := false
 var sitting := false
+var knocked := false  # lying on the ground
+var winded := false
+var limp := false
+var injury := ""  # "bruise", "arm", "leg" or "": what the body shows
 
 var _body := "male"
 var _model: Node3D
@@ -71,6 +80,8 @@ var _dance_left := 0.0
 var _transition := 0.0  # sitting down / standing up in progress
 var _lm := {}
 var _mat: ShaderMaterial
+var _getup_left := 0.0
+var _injury_nodes: Array = []
 
 
 func build(new_avatar: Dictionary, with_detail := true) -> void:
@@ -140,6 +151,94 @@ func build(new_avatar: Dictionary, with_detail := true) -> void:
 	_skel.add_child(_poser)
 	_play("idle", 0.0)
 	_anim.advance(randf() * 2.0)  # people don't breathe in sync
+	_injury_nodes = []
+	_build_injury()
+
+
+## Shows an injury: a head bandage (bruise), a cast and sling on the left
+## arm, or a cast on the left calf.
+func set_injury(kind: String) -> void:
+	if kind == injury:
+		return
+	injury = kind
+	_build_injury()
+
+
+func _build_injury() -> void:
+	for node in _injury_nodes:
+		if is_instance_valid(node):
+			node.queue_free()
+	_injury_nodes = []
+	if _skel == null or injury == "":
+		return
+	var m := MeshMerger.new()
+	match injury:
+		"bruise":
+			var hf := _head_frame()
+			var c: Vector3 = hf[0]
+			var r: float = hf[1]
+			m.cylinder("Head", r * 1.07, r * 1.08, r * 0.34, Transform3D(Basis().scaled(Vector3(1.0, 1.0, 1.08)), c + Vector3(0, r * 0.4, -r * 0.02)), CAST_COLOR)
+			m.box("Head", Vector3(r * 0.55, r * 0.42, 0.012), c + Vector3(r * 0.35, r * 0.42, r * 1.03), Color(0.98, 0.98, 0.97), Basis(Vector3.UP, 0.35))
+		"arm":
+			var elbow := _bone_rest("lowerarm_l")
+			var wrist := _bone_rest("hand_l")
+			var along := (wrist - elbow).normalized()
+			_limb(m, "lowerarm_l", elbow + along * 0.03, wrist + along * 0.05, 0.052, 0.045, CAST_COLOR)
+			# The sling's pouch cradles the forearm from below (T-pose -Z is
+			# down once the arm is held across the belly).
+			var mid := (elbow + wrist + along * 0.05) * 0.5
+			m.box("lowerarm_l", Vector3((wrist - elbow).length() + 0.1, 0.13, 0.03), mid + Vector3(0, 0, -0.05), SLING_COLOR,
+				Basis(Vector3.BACK, atan2(along.y, along.x)))
+			_sling_straps(m, elbow, wrist)
+		"leg":
+			var knee := _bone_rest("calf_l")
+			var ankle := _bone_rest("foot_l")
+			var down := (ankle - knee).normalized()
+			_limb(m, "calf_l", knee + down * 0.06, ankle + down * 0.05, 0.068, 0.058, CAST_COLOR)
+	var material := MeshMerger.vertex_colour_material(0.9)
+	for bone: String in m.groups():
+		var inner := _attach(bone)
+		m.emit(bone, inner, material)
+		_injury_nodes.append(inner.get_parent())
+
+
+## The sling's strap around the neck: from both ends of the pouch (where
+## AvatarPoser holds the forearm) up to either side of the neck.
+func _sling_straps(m: MeshMerger, elbow: Vector3, wrist: Vector3) -> void:
+	var shoulder := _bone_rest("upperarm_l")
+	var up_len := shoulder.distance_to(elbow)
+	var fore_len := elbow.distance_to(wrist)
+	var held_elbow := shoulder + AvatarPoser.HOLD_UPPER.normalized() * up_len
+	var held_wrist := held_elbow + AvatarPoser.HOLD_FORE.normalized() * (fore_len + 0.04)
+	var neck: Vector3 = _lm.neck
+	var chest: Vector3 = _lm.chest
+	var front := chest.z + 0.14
+	var neck_r := Vector3(-0.075, neck.y - 0.02, neck.z + 0.02)
+	var neck_l := Vector3(0.075, neck.y - 0.02, neck.z + 0.02)
+	var across := Vector3(-0.02, chest.y + 0.02, front)
+	_strap(m, "spine_03", neck_r, across, 0.06, SLING_COLOR)
+	_strap(m, "spine_03", across, held_wrist + Vector3(0, -0.02, -0.01), 0.06, SLING_COLOR)
+	_strap(m, "spine_03", neck_l, held_elbow + Vector3(-0.02, -0.02, 0.06), 0.05, SLING_COLOR.darkened(0.08))
+
+
+func _bone_rest(bone: String) -> Vector3:
+	return _skel.get_bone_global_rest(_skel.find_bone(bone)).origin
+
+
+## A tapered cylinder from a to b (radius r0 at a, r1 at b).
+static func _limb(m: MeshMerger, group: String, a: Vector3, b: Vector3, r0: float, r1: float, color: Color) -> void:
+	var y := (b - a).normalized()
+	var side := Vector3.BACK if absf(y.z) < 0.9 else Vector3.RIGHT
+	var x := side.cross(y).normalized()
+	m.cylinder(group, r1, r0, a.distance_to(b), Transform3D(Basis(x, y, x.cross(y)), (a + b) * 0.5), color)
+
+
+## A flat band from a to b, lying against the front of the body.
+static func _strap(m: MeshMerger, group: String, a: Vector3, b: Vector3, width: float, color: Color) -> void:
+	var y := (b - a).normalized()
+	var z := (Vector3.BACK - y * y.dot(Vector3.BACK)).normalized()
+	var x := y.cross(z)
+	m.box(group, Vector3(width, a.distance_to(b) + 0.02, 0.012), (a + b) * 0.5, color, Basis(x, y, z))
 
 
 func _body_material() -> ShaderMaterial:
@@ -440,11 +539,24 @@ func animate(speed: float, delta: float, pitch := 0.0, air := false) -> void:
 	var want := "idle"
 	var rate := 1.0
 	var seated_clips := ["sit", "sit_talk", "sit_down"]
-	if speed > 0.6 or air or sitting:
+	if speed > 0.6 or air or sitting or knocked:
 		_dance_left = 0.0
 	if _transition > 0.0:
 		_transition -= delta
-	if sitting:
+	if _getup_left > 0.0:
+		_getup_left -= delta
+	if knocked:
+		want = "fall"
+		_getup_left = 0.0
+	elif _clip == "fall":
+		# Back on your feet: the fall, backwards and quicker.
+		_clip = "getup"
+		_getup_left = GETUP_SECONDS
+		_anim.play("fall", 0.1, -_anim.get_animation("fall").length / GETUP_SECONDS, true)
+		want = "getup"
+	elif _clip == "getup" and _getup_left > 0.0:
+		want = "getup"
+	elif sitting:
 		if not _clip in seated_clips:
 			want = "sit_down"
 			_transition = 1.1
@@ -482,10 +594,16 @@ func animate(speed: float, delta: float, pitch := 0.0, air := false) -> void:
 		elif talking:
 			want = "talk"
 	if want != _clip:
-		_play(want, 0.12 if want == "jump_land" else 0.25)
+		_play(want, 0.12 if want == "jump_land" else (0.15 if want == "fall" else 0.25))
 	_anim.speed_scale = rate
 	_anim.advance(delta)
-	_poser.look_pitch = lerpf(_poser.look_pitch, clampf(pitch, -0.8, 0.8), minf(1.0, delta * 10.0))
+	_poser.look_pitch = lerpf(_poser.look_pitch, clampf(pitch, -0.8, 0.8) if not knocked else 0.0, minf(1.0, delta * 10.0))
+	var upright := not knocked and _clip != "getup"
+	_poser.bend = move_toward(_poser.bend, 1.0 if winded and upright and not sitting and speed < 1.6 else 0.0, delta * 2.0)
+	_poser.limp = move_toward(_poser.limp, 1.0 if limp and upright and _clip == "walk" else 0.0, delta * 4.0)
+	if _clip == "walk" and _anim.current_animation_length > 0.0:
+		_poser.limp_phase = _anim.current_animation_position / _anim.current_animation_length
+	_poser.hold_arm = move_toward(_poser.hold_arm, 1.0 if injury == "arm" and upright else 0.0, delta * 3.0)
 	if _emote_left > 0.0:
 		_emote_left -= delta
 		var total := 1.6 if _emote == "wave" else 0.9

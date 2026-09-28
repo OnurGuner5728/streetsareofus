@@ -24,6 +24,7 @@ const HELP := """[b]Hareket[/b]  WASD · Shift koş · Space zıpla · Fare bak
 [b]Sohbet[/b]  Enter yaz · X sohbetten ayrıl
 [b]Şehir[/b]  Tab harita (dokun: rota çiz) · F tramvaya bin / durak iste / in · V kamera (tekerlek: uzaklık) · E bankın yanında: otur
           E kediyi sev · koşarak topa gir: şut · raylarda durma!
+[b]Sağlık[/b]  koşmak yorar (alttaki çubuk), koştukça kondisyonun artar · yaralıyken eczanede E tedavi
 F1 yardım · F3 ağ bilgisi · Esc menü (engellenenler, grafik, FPS)"""
 
 var _location: Label
@@ -57,6 +58,9 @@ var _volume_button: Button
 var _wardrobe: PanelContainer
 var _wardrobe_editor: AvatarEditor
 var touch_mode := false
+var _stamina_bar: Control
+var _stamina_fill: ColorRect
+var _injury: Label
 
 const REPORT_LABELS := [["harassment", "Taciz"], ["hate", "Nefret söylemi"], ["spam", "Spam"], ["impersonation", "Taklit"], ["other", "Diğer"]]
 
@@ -103,6 +107,29 @@ func _ready() -> void:
 	_route.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_route.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_route.add_theme_color_override("font_color", Color("9ef0c0"))
+
+	# Stamina: a thin bar at the bottom, only while it is not full.
+	_stamina_bar = ColorRect.new()
+	(_stamina_bar as ColorRect).color = Color(0, 0, 0, 0.45)
+	_stamina_bar.custom_minimum_size = Vector2(200, 8)
+	_stamina_bar.size = Vector2(200, 8)
+	_place(_stamina_bar, Control.PRESET_CENTER_BOTTOM, Vector2(-100, -58))
+	_stamina_bar.offset_right = _stamina_bar.offset_left + 200
+	_stamina_bar.offset_bottom = _stamina_bar.offset_top + 8
+	_stamina_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_stamina_bar.visible = false
+	root.add_child(_stamina_bar)
+	_stamina_fill = ColorRect.new()
+	_stamina_fill.position = Vector2(1, 1)
+	_stamina_fill.size = Vector2(198, 6)
+	_stamina_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_stamina_bar.add_child(_stamina_fill)
+
+	_injury = _label(root, 16, Control.PRESET_CENTER_BOTTOM, Vector2(-180, -112))
+	_injury.custom_minimum_size = Vector2(360, 0)
+	_injury.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_injury.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_injury.add_theme_color_override("font_color", Color("ffc2b8"))
 
 	_notice = _label(root, 20, Control.PRESET_CENTER, Vector2(-320, -120))
 	_notice.custom_minimum_size = Vector2(640, 0)
@@ -443,6 +470,22 @@ func set_target(text: String) -> void:
 func set_incoming(text: String) -> void:
 	_incoming.text = text
 	_incoming_panel.visible = not text.is_empty()
+
+
+## stamina 0..1; winded (out of breath) shows it red.
+func set_stamina(stamina: float, winded: bool) -> void:
+	var show := stamina < 0.995 or winded
+	if _stamina_bar.visible != show:
+		_stamina_bar.visible = show
+	if not show:
+		return
+	_stamina_fill.size.x = 198.0 * clampf(stamina, 0.0, 1.0)
+	_stamina_fill.color = Color("e05545") if winded else (Color("f0c040") if stamina < 0.3 else Color("7fd18b"))
+
+
+func set_injury(text: String) -> void:
+	if _injury.text != text:
+		_injury.text = text
 
 
 func set_route(text: String) -> void:
