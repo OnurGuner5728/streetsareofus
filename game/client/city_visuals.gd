@@ -22,26 +22,40 @@ const DRAPE_STEP := 3.0
 
 ## The zone's ground while the city is being built (everything is draped on it).
 static var _t := Terrain.new()
+## The zone's coastline, if it has one; null otherwise.
+static var _coast: Coast = null
 
 
 static func build(zone: ZoneData, vis: Node3D) -> Dictionary:
 	_t = zone.terrain
+	_coast = zone.coast
+	var timings := {}
+	var t0 := Time.get_ticks_usec()
 	var ctx := StreetLayout.for_zone(zone)
-	_ground(ctx, vis)
-	_areas(ctx, vis)
-	_roads(ctx, vis)
-	_crossings(ctx, vis)
-	_tracks(ctx, vis)
-	_buildings(ctx, vis)
-	_trees(ctx, vis)
-	var lamps := _lamps(ctx, vis)
-	_cars(ctx, vis)
-	_street_furniture(ctx, vis)
-	_shop_signs(ctx, vis)
-	_street_signs(ctx, vis)
-	_catenary(ctx, vis)
-	var boards := _stops(ctx, vis)
-	return {"lamps": lamps, "boards": boards}
+	timings.layout = Time.get_ticks_usec() - t0
+	var lamps := PackedVector3Array()
+	var boards := []
+	for step in ["ground", "sea", "areas", "roads", "crossings", "tracks", "buildings", "trees", "lamps", "cars",
+			"street_furniture", "shop_signs", "street_signs", "catenary", "stops"]:
+		t0 = Time.get_ticks_usec()
+		match step:
+			"ground": _ground(ctx, vis)
+			"sea": _sea(ctx, vis)
+			"areas": _areas(ctx, vis)
+			"roads": _roads(ctx, vis)
+			"crossings": _crossings(ctx, vis)
+			"tracks": _tracks(ctx, vis)
+			"buildings": _buildings(ctx, vis)
+			"trees": _trees(ctx, vis)
+			"lamps": lamps = _lamps(ctx, vis)
+			"cars": _cars(ctx, vis)
+			"street_furniture": _street_furniture(ctx, vis)
+			"shop_signs": _shop_signs(ctx, vis)
+			"street_signs": _street_signs(ctx, vis)
+			"catenary": _catenary(ctx, vis)
+			"stops": boards = _stops(ctx, vis)
+		timings[step] = Time.get_ticks_usec() - t0
+	return {"lamps": lamps, "boards": boards, "timings": timings}
 
 
 # --- ground, areas, roads ------------------------------------------------------------
@@ -83,7 +97,7 @@ static func _ground(ctx: StreetLayout, vis: Node3D) -> void:
 static func _terrain_mesh(half: float) -> Mesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var tris := _t.triangles()
+	var tris := _t.triangles_land(_coast) if _coast != null else _t.triangles()
 	for v in tris:
 		st.set_normal(_t.normal(v.x, v.z))
 		st.add_vertex(v)
@@ -111,6 +125,46 @@ static func _terrain_mesh(half: float) -> Mesh:
 					st.set_normal(Vector3.UP)
 					st.add_vertex(v)
 	return st.commit()
+
+
+## The sea surface (a single wave-shaded plane at the coast's sea level,
+## reaching past the fog like the ground's skirt) and a walkable deck over
+## every pier, including Kadıköy's İskele.
+static func _sea(ctx: StreetLayout, vis: Node3D) -> void:
+	if _coast == null:
+		return
+	var mi := MeshInstance3D.new()
+	mi.name = "Sea"
+	var plane := PlaneMesh.new()
+	var span := ctx.zone.size_m + 800.0
+	plane.size = Vector2(span, span)
+	var subdiv := 24 if GraphicsQuality.lite_shaders() else 140
+	plane.subdivide_width = subdiv
+	plane.subdivide_depth = subdiv
+	mi.mesh = plane
+	mi.position = Vector3(0, _coast.sea_level, 0)
+	mi.material_override = CityMaterials.get_shader("water")
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	vis.add_child(mi)
+	var deck_y := _coast.sea_level + _coast.shore_height_m
+	var deck := SurfaceTool.new()
+	deck.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var any := false
+	for pier in _coast.piers:
+		var pts: PackedVector2Array = pier.points
+		if bool(pier.get("closed", false)):
+			any = WorldBuilder._add_flat_polygon(deck, pts, deck_y, Color("8a8478")) or any
+		else:
+			# Not ribbon(): a pier's deck stands at a fixed height over the
+			# sea, not draped on the terrain like a road or sidewalk.
+			_flat_ribbon(deck, pts, float(pier.get("width", 3.0)), deck_y, Color("8a8478"))
+			any = true
+	if any:
+		var pier_mi := MeshInstance3D.new()
+		pier_mi.name = "Piers"
+		pier_mi.mesh = deck.commit()
+		pier_mi.material_override = CityMaterials.get_shader("pavers")
+		vis.add_child(pier_mi)
 
 
 ## Splits a longer polyline so draped strips follow the ground between points.
@@ -241,6 +295,22 @@ static func ribbon(st: SurfaceTool, pts: PackedVector2Array, width: float, lift:
 		WorldBuilder._add_tri(st, a, c, d, up, color,
 			PackedVector2Array([Vector2(along, 0), Vector2(along + seg, 1), Vector2(along + seg, 0)]))
 		along += seg
+
+
+## Strip along a polyline at a fixed Godot Y (not draped on the terrain):
+## an open pier's deck, standing over the sea at a constant height.
+static func _flat_ribbon(st: SurfaceTool, pts: PackedVector2Array, width: float, y: float, color: Color) -> void:
+	if pts.size() < 2:
+		return
+	var left := offset_polyline(pts, width / 2.0)
+	var right := offset_polyline(pts, -width / 2.0)
+	for i in pts.size() - 1:
+		var a := Vector3(left[i].x, y, left[i].y)
+		var b := Vector3(right[i].x, y, right[i].y)
+		var c := Vector3(right[i + 1].x, y, right[i + 1].y)
+		var d := Vector3(left[i + 1].x, y, left[i + 1].y)
+		WorldBuilder._add_tri(st, a, b, c, Vector3.UP, color)
+		WorldBuilder._add_tri(st, a, c, d, Vector3.UP, color)
 
 
 ## Polyline shifted sideways (positive = left of travel in XZ), mitred.

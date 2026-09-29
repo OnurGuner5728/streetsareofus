@@ -142,8 +142,16 @@ def bilinear(grid: List[float], per_side: int, fx: float, fy: float) -> float:
     return top * (1 - v) + bottom * v
 
 
-def build_terrain(raw: dict, size_m: float, out_spacing: float = 8.0, sigma_m: float = 28.0) -> dict:
-    """Smoothed, resampled terrain block for zone.json (see module docstring)."""
+def build_terrain(raw: dict, size_m: float, out_spacing: float = 8.0, sigma_m: float = 28.0,
+                  is_land: Optional[Callable[[Tuple[float, float]], bool]] = None, shore_m: float = 1.6) -> dict:
+    """Smoothed, resampled terrain block for zone.json (see module docstring).
+
+    With `is_land` (a coast), no ground point is lower than `shore_m` above
+    the sea: the radar DEM's blur of land and water would otherwise sink
+    the promenade below the waves. Grid points out at sea get that height
+    too; they are never drawn and lie behind the shore wall, so the land's
+    edge between them stays level with the quay.
+    """
     per_side = int(raw["per_side"])
     spacing = float(raw["spacing"])
     margin = float(raw["margin"])
@@ -158,7 +166,10 @@ def build_terrain(raw: dict, size_m: float, out_spacing: float = 8.0, sigma_m: f
             e = -half + i * out_spacing
             fx = (e + half + margin) / spacing
             fy = (half + margin - n) / spacing
-            out.append(bilinear(heights, per_side, fx, fy))
+            height = bilinear(heights, per_side, fx, fy)
+            if is_land is not None:
+                height = max(height, shore_m) if is_land((e, n)) else shore_m
+            out.append(height)
     base = min(out)
     rel = [h - base for h in out]
     return {

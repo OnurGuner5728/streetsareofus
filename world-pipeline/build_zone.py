@@ -15,7 +15,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from zonegen import osm, terrain  # noqa: E402
+from zonegen import coast, osm, terrain  # noqa: E402
 from zonegen.package import write_package  # noqa: E402
 from zonegen.spawn import compute_spawn_points  # noqa: E402
 from zonegen.synthetic import build_synthetic_zone  # noqa: E402
@@ -35,10 +35,20 @@ def cmd_osm(args) -> int:
     if not args.flat:
         dem = terrain.load_or_fetch(HERE / "cache" / f"{args.zone_id}.dem.json", builder.proj, args.size,
                                     16.0, 48.0, args.refresh)
-        zone["terrain"] = terrain.build_terrain(dem, args.size)
+        land = builder.land.is_land if builder.land is not None else None
+        zone["terrain"] = terrain.build_terrain(dem, args.size, is_land=land)
         print(f"  terrain: {zone['terrain']['relief_m']} m of relief above {zone['terrain']['base_m']} m ({dem['source']})")
+    if "coast" in zone:
+        # Godot y of the sea surface: terrain heights are relative to base_m.
+        grid = zone["terrain"].get("type") == "grid"
+        zone["coast"]["sea_level"] = round(-(zone["terrain"]["base_m"] if grid else coast.SHORE_HEIGHT_M), 2)
+        c = zone["coast"]
+        kinds = {}
+        for run in c["shore"]:
+            kinds[run["kind"]] = kinds.get(run["kind"], 0) + 1
+        print(f"  coast: {len(c['land'])} land polygon(s), shore runs {kinds}, {len(c['piers'])} piers, sea at y={c['sea_level']}")
     zone["transit"] = build_transit(data, builder.proj, zone)
-    spawns = compute_spawn_points(zone)
+    spawns = compute_spawn_points(zone, land=builder.land)
     if not spawns:
         print("error: no walkable spawn points found in this zone", file=sys.stderr)
         return 1

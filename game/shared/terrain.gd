@@ -123,3 +123,30 @@ func triangles() -> PackedVector3Array:
 func _vertex(i: int, j: int, step: float) -> Vector3:
 	var h := 0.0 if flat else heights[j * size + i]
 	return Vector3(-half + i * step, h, -half + j * step)
+
+
+## Like triangles(), but a cell is only drawn if at least one of its corners
+## is on land: the sea's cells are holes filled by the water surface instead
+## (see world-pipeline/zonegen/terrain.py, which flattens them to the shore
+## height so nothing shows through the gap).
+func triangles_land(coast: Coast) -> PackedVector3Array:
+	if flat or coast == null:
+		return triangles()
+	var on_land := PackedByteArray()
+	on_land.resize(size * size)
+	for j in size:
+		for i in size:
+			var v := _vertex(i, j, spacing)
+			on_land[j * size + i] = 1 if coast.is_land(Vector2(v.x, v.z)) else 0
+	var out := PackedVector3Array()
+	for j in size - 1:
+		for i in size - 1:
+			var k := j * size + i
+			if on_land[k] == 0 and on_land[k + 1] == 0 and on_land[k + size] == 0 and on_land[k + size + 1] == 0:
+				continue
+			var p00 := _vertex(i, j, spacing)
+			var p10 := _vertex(i + 1, j, spacing)
+			var p01 := _vertex(i, j + 1, spacing)
+			var p11 := _vertex(i + 1, j + 1, spacing)
+			out.append_array([p00, p10, p11, p00, p11, p01])
+	return out

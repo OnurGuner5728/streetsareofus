@@ -252,7 +252,17 @@ func on_welcome(info: Dictionary) -> void:
 		loading = _loading_screen(zone.display_name)
 		await get_tree().process_frame
 		await get_tree().process_frame
+	var build_start := Time.get_ticks_msec()
 	var world := WorldBuilder.build(zone, self, not _headless)
+	if options.get("perf", false):
+		print("[perf] world built in %d ms (%d buildings)" % [Time.get_ticks_msec() - build_start, zone.buildings.size()])
+		for key in ["collision_timings", "city"]:
+			var timings: Dictionary = world.get_meta(key, {})
+			timings = timings.get("timings", timings)
+			var parts := PackedStringArray()
+			for k in timings:
+				parts.append("%s=%d" % [k, int(timings[k]) / 1000])
+			print("[perf] %s_ms %s" % [key.get_slice("_", 0), " ".join(parts)])
 	if not _headless:
 		var city: Dictionary = world.get_meta("city", {})
 		_boards = city.get("boards", [])
