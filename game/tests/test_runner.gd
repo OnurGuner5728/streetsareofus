@@ -15,7 +15,7 @@ func _ready() -> void:
 		test_world_collision, test_motor_walks_and_is_blocked, test_replay_matches_realtime,
 		test_client_and_server_worlds_agree, test_step_up, test_tram_shoves_and_blocks, test_props, test_crowd,
 		test_terrain, test_bench_sitting,
-		test_coastline, test_coast_sea_blocking, test_weather_wave_mapping,
+		test_coastline, test_coast_sea_blocking, test_weather_wave_mapping, test_tree_road_grid,
 		test_transit_network, test_transit_timetable, test_walking_routes, test_route_prefers_tram,
 	]
 	for t in tests:
@@ -725,6 +725,41 @@ func test_terrain() -> void:
 
 
 # --- coast and weather ---------------------------------------------------------------
+
+## Trees keep off roads through a bucketed grid; it must agree with the
+## plain test against every road segment.
+func test_tree_road_grid() -> void:
+	var zone := ZoneData.load_zone("tr_istanbul_kadikoy_001")
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 11
+	var mismatches := 0
+	var on_road := 0
+	var roads: Array = []
+	for road in zone.roads:
+		roads.append([WorldBuilder.footprint_xz(road.points), float(road.width) / 2.0 + 1.2])
+	for k in 300:
+		# Half the probes sit right beside a road so both answers occur.
+		var p := Vector2(rng.randf_range(-800.0, 800.0), rng.randf_range(-800.0, 800.0))
+		if k % 2 == 0:
+			var pts: PackedVector2Array = roads[rng.randi() % roads.size()][0]
+			p = pts[rng.randi() % pts.size()] + Vector2(rng.randf_range(-6.0, 6.0), rng.randf_range(-6.0, 6.0))
+		var want := false
+		for r in roads:
+			var pts: PackedVector2Array = r[0]
+			for i in pts.size() - 1:
+				if p.distance_to(Geometry2D.get_closest_point_to_segment(p, pts[i], pts[i + 1])) < float(r[1]):
+					want = true
+					break
+			if want:
+				break
+		if want:
+			on_road += 1
+		if WorldBuilder._on_road(zone, p) != want:
+			mismatches += 1
+	check(mismatches == 0, "road grid matches the brute-force test (%d mismatches of 300)" % mismatches)
+	check(on_road > 30 and on_road < 270, "probes cover both answers (%d on a road)" % on_road)
+	check(WorldBuilder.tree_points(zone) is Array and WorldBuilder.tree_points(zone).size() > 100, "trees are planted")
+
 
 func test_coastline() -> void:
 	var coast := Coast.from_zone({

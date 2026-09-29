@@ -13,6 +13,8 @@ const TREE_KINDS := ["park", "grass", "playground"]
 ## fails with "compound hierarchy is too deep". Shapes are spread over
 ## several bodies instead, well under that limit.
 const COLLISION_CHUNK := 128
+## Cell size of the grid that keeps trees off roads (see _road_grid).
+const ROAD_CELL := 32.0
 
 
 ## A StaticBody3D that rolls over to a fresh one every COLLISION_CHUNK shapes.
@@ -235,6 +237,8 @@ static func footprint_xz(points: Array) -> PackedVector2Array:
 ## Deterministic tree positions, shared so client visuals match server colliders:
 ## trees mapped in OSM plus planted rows in parks.
 static func tree_points(zone: ZoneData) -> Array:
+	if zone.has_meta("tree_points"):
+		return zone.get_meta("tree_points")
 	var out := []
 	for t in zone.trees:
 		out.append(zone.ground(float(t[0]), float(t[1])))
@@ -256,6 +260,7 @@ static func tree_points(zone: ZoneData) -> Array:
 					out.append(zone.terrain.on_ground(p))
 				z += TREE_SPACING
 			x += TREE_SPACING
+	zone.set_meta("tree_points", out)
 	return out
 
 
@@ -268,13 +273,37 @@ static func _edge_distance(p: Vector2, poly: PackedVector2Array) -> float:
 
 
 static func _on_road(zone: ZoneData, p: Vector2) -> bool:
+	var segments: Array = _road_grid(zone).get(Vector2i(floori(p.x / ROAD_CELL), floori(p.y / ROAD_CELL)), [])
+	for s in segments:
+		if p.distance_to(Geometry2D.get_closest_point_to_segment(p, s[0], s[1])) < float(s[2]):
+			return true
+	return false
+
+
+## Road segments (with their tree clearance) bucketed into a coarse grid, so
+## a tree candidate only tests the few segments near it instead of every
+## road of the zone (which grows with the zone's area and its road count).
+static func _road_grid(zone: ZoneData) -> Dictionary:
+	if zone.has_meta("road_clearance_grid"):
+		return zone.get_meta("road_clearance_grid")
+	var grid := {}
 	for road in zone.roads:
 		var pts := footprint_xz(road.points)
 		var clearance := float(road.width) / 2.0 + 1.2
+		var reach := Vector2.ONE * (clearance + 0.01)
 		for i in pts.size() - 1:
-			if p.distance_to(Geometry2D.get_closest_point_to_segment(p, pts[i], pts[i + 1])) < clearance:
-				return true
-	return false
+			var a := pts[i]
+			var b := pts[i + 1]
+			var lo := Vector2(minf(a.x, b.x), minf(a.y, b.y)) - reach
+			var hi := Vector2(maxf(a.x, b.x), maxf(a.y, b.y)) + reach
+			for cx in range(floori(lo.x / ROAD_CELL), floori(hi.x / ROAD_CELL) + 1):
+				for cy in range(floori(lo.y / ROAD_CELL), floori(hi.y / ROAD_CELL) + 1):
+					var key := Vector2i(cx, cy)
+					if not grid.has(key):
+						grid[key] = []
+					grid[key].append([a, b, clearance])
+	zone.set_meta("road_clearance_grid", grid)
+	return grid
 
 
 static func _hash01(key: String) -> float:
