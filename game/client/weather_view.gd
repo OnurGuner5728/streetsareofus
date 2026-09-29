@@ -81,7 +81,10 @@ var cloud := 0.2
 var fog := 0.0
 var wind := 0.2
 var wetness := 0.0
-var _target := {"rain": 0.0, "snow": 0.0, "cloud": 0.2, "fog": 0.0, "wind": 0.2}
+var wave_m := 0.15  # sea state, only used for zones with a coast
+var wave_dir := 0.0  # degrees
+var wave_period := 3.5  # seconds
+var _target := {"rain": 0.0, "snow": 0.0, "cloud": 0.2, "fog": 0.0, "wind": 0.2, "wave_m": 0.15, "wave_dir": 0.0, "wave_period": 3.5}
 var _precip: MultiMeshInstance3D
 var _precip_mat: ShaderMaterial
 var _clouds: MeshInstance3D
@@ -148,6 +151,9 @@ func set_info(w: Dictionary) -> void:
 	_target.cloud = clampf(float(w.get("cloud", 0.2)), 0.0, 1.0)
 	_target.fog = 1.0 if code in [45, 48] else 0.0
 	_target.wind = clampf(float(w.get("wind_kmh", 10.0)) / 45.0, 0.05, 1.0)
+	_target.wave_m = clampf(float(w.get("wave_m", 0.15)), 0.02, 3.0)
+	_target.wave_dir = float(w.get("wave_dir", 0.0))
+	_target.wave_period = clampf(float(w.get("wave_period", 3.5)), 1.5, 16.0)
 	if first:
 		# Joining during the rain: it did not just start, the streets are wet.
 		rain = _target.rain
@@ -156,6 +162,9 @@ func set_info(w: Dictionary) -> void:
 		fog = _target.fog
 		wind = _target.wind
 		wetness = 1.0 if rain > 0.0 else 0.0
+		wave_m = _target.wave_m
+		wave_dir = _target.wave_dir
+		wave_period = _target.wave_period
 
 
 func is_storm() -> bool:
@@ -203,6 +212,19 @@ func update(delta: float) -> void:
 			_clouds.global_position = client.camera.global_position
 	if client.sounds:
 		client.sounds.rain = rain
+	if client.zone and client.zone.coast:
+		wave_m = lerpf(wave_m, _target.wave_m, k)
+		wave_period = lerpf(wave_period, _target.wave_period, k)
+		wave_dir = rad_to_deg(lerp_angle(deg_to_rad(wave_dir), deg_to_rad(_target.wave_dir), k))
+		var mat := CityMaterials.get_shader("water")
+		mat.set_shader_parameter("amp", clampf(wave_m * 0.5, 0.02, 1.2))
+		mat.set_shader_parameter("wave_dir", deg_to_rad(wave_dir))
+		mat.set_shader_parameter("speed", clampf(6.0 / maxf(wave_period, 1.5), 0.3, 3.0))
+		mat.set_shader_parameter("wavelength", clampf(wave_period * 4.0, 6.0, 60.0))
+		if client.sounds and client.body:
+			var here := Vector2(client.body.global_position.x, client.body.global_position.z)
+			var d := client.zone.coast.distance_to_shore(here)
+			client.sounds.sea = clampf(1.0 - d / 45.0, 0.0, 1.0) * clampf(0.4 + wave_m, 0.4, 1.4)
 	# Lightning: a flash, then thunder a moment later.
 	_flash = maxf(0.0, _flash - delta * 6.0)
 	if is_storm():

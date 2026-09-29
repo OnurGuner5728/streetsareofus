@@ -7,8 +7,9 @@ slice" hedefini uygular:
 > Gerçek bir mahalle + headless sunucu + birden fazla oyuncu + yürüme +
 > birbirini görme + konuşma isteği (kabul / ret / tepkisiz).
 
-Pilot bölge: **Kadıköy, İstanbul** (Bahariye / Söğütlüçeşme çevresi, 512×512 m,
-828 bina, 134 yol, OpenStreetMap'ten).
+Pilot bölge: **Kadıköy, İstanbul** (Bahariye / Söğütlüçeşme'den İskele ve Moda
+kıyısına, 1800×1800 m, 3778 bina, 886 yol, OpenStreetMap'ten; gerçek kıyı
+çizgisi ve deniz dahil).
 
 ## Neler çalışıyor
 
@@ -58,6 +59,7 @@ Pilot bölge: **Kadıköy, İstanbul** (Bahariye / Söğütlüçeşme çevresi, 
 | **Banklara oturma** | Bankın yanında **E** / **Otur**: sunucu en yakın boş yeri (bank başına 2 kişi) doğrular, oturma animasyonu oynar, herkes oturduğunu görür; yürüyünce kalkarsın (kalkış istemci tahmininde de birebir). Oturup konuşurken el-kol jestleri |
 | **Dans** | **J** / **Dans**: 8 saniye dans (yakındaki herkes görür; yürüyünce biter) |
 | **Gerçek hava** | Sunucu Kadıköy'ün anlık havasını **Open-Meteo**'dan 15 dakikada bir alır (anahtarsız; yalnızca bölgenin koordinatı gider) ve herkese aynısını dağıtır: yağmur (kameranın çevresinde GPU'da düşen damlalar), ıslanan ve yavaşça kuruyan sokaklar, asfaltta su birikintileri, kar (kaldırım ve çatılarda birikir), sis, bulut katmanı, kapalı havada gri gök ve yumuşak ışık, fırtınada şimşek ve gök gürültüsü, rüzgârla sallanan ağaçlar. HUD'da "13°C · Yağmurlu" |
+| **Deniz ve dalgalar** | Kıyısı olan bölgelerde gerçek deniz: kara poligonunun dışı su, oyuncu kıyıdan içeri yürüyemez (görünmez, kıyı çizgisini izleyen bir duvar). Dalga yüksekliği/yönü/periyodu sunucunun **Open-Meteo Marine** çağrısından gelir (o gün Marmara nasılsa deniz öyle), çekilemezse rüzgardan kabaca kestirilir ya da `--weather` ön ayarının kendi dalga durumu kullanılır. Su, gerçek Gerstner dalgalarıyla yer değiştiren tam shader (masaüstü) ve tek geçişli, tepe noktası kaydırmayan **LITE** varyant (telefon/web) olarak iki halde derlenir; kıyıya yaklaşınca dalga/sörf sesi duyulur. Kadıköy İskele'nin güvertesi yürünebilir |
 | **Yayalar [NPC]** | Kaldırımlarda yürüyen, ara sıra vitrin önünde duran, oyunculara yol veren yayalar. Plandaki kurala uygun olarak açıkça **NPC** olarak etiketlenir ("yapay bir figür; sohbet edilemez"), gerçek kişi sanılmaz. Hareketleri sunucu saatinin deterministik fonksiyonu: herkes aynı yayayı aynı yerde görür, ağ trafiği yok. Saate göre yoğunluk (gece seyrek) |
 | **Sokak kedileri** | Park etmiş arabaların kaputunda ve banklarda uyuyan, kaldırımda gezinen kediler (herkes için aynı). Yanına git: **E** / **Sev** → mırlar |
 | **Güvercinler** | Meydan, park ve durak önlerinde yem arayan sürüler; biri yaklaşınca (koşarak daha uzaktan) havalanır, başka yere konar |
@@ -298,13 +300,26 @@ python world-pipeline/build_zone.py osm --zone-id tr_istanbul_moda_001 \
     --name "Moda, İstanbul" --lat 40.9840 --lon 29.0260
 ```
 
+Kadıköy zone'unun kendisi de aynı komutla, yalnızca merkez ve `--size` değişerek
+üretildi; iskele ve Moda kıyısını içeren 1800×1800 m'lik hali:
+
+```bash
+python world-pipeline/build_zone.py osm --zone-id tr_istanbul_kadikoy_001 \
+    --name "Kadıköy, İstanbul" --lat 40.9855 --lon 29.0245 --size 1800 --version 4 --refresh
+```
+
 Yükseklik verisi OpenTopoData'dan (SRTM, olmazsa ASTER) ya da Open-Meteo'dan
 (Copernicus 90 m) çekilir ve `world-pipeline/cache/` altında saklanır; düz zemin
 için `--flat`. Zone içeriği değiştiğinde `--version` artırılmalı (Kadıköy şu an
-v3): sunucu ve istemci farklı sürümdeyse bağlantı açık bir mesajla reddedilir.
+v4): sunucu ve istemci farklı sürümdeyse bağlantı açık bir mesajla reddedilir.
+Merkez ya da boyut değiştiğinde de `--refresh` şart: önbellek zone-id'ye göre
+tutulur, eski bbox'ı sessizce geri verir.
 
-Kıyı çizgisi içeren bölgelerde deniz poligonu henüz üretilmiyor; pipeline bu
-durumda uyarı verir. Pilot bölge bu yüzden kıyıdan içeride seçildi.
+Kıyı çizgisi içeren bölgelerde `zonegen/coast.py`, OSM'in `natural=coastline`
+çizgisinden kara/deniz poligonlarını, kıyı türünü (rıhtım, kayalık, plaj),
+iskeleleri ve vapur iskelelerini üretir; deniz oyuncuyu bloklayan gerçek bir
+geometridir (yukarıdaki "Deniz ve dalgalar" satırına bakın). Kıyısız
+bölgelerde bu blok hiç üretilmez.
 
 ### Ağ protokolü
 

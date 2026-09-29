@@ -1,33 +1,42 @@
 {
   "zone_id": "tr_istanbul_kadikoy_001",
   "origin": {
-    "lat": 40.9895,
-    "lon": 29.02965
+    "lat": 40.9855,
+    "lon": 29.0245
   },
-  "size_m": 512.0,
-  "version": 3,
+  "size_m": 1800.0,
+  "version": 4,
   "format": 2,
-  "generated_at": "2026-09-25T13:34:04+00:00",
+  "generated_at": "2026-09-28T13:47:42+00:00",
   "generator": "world-pipeline/build_zone.py",
   "data_sources": [
     "openstreetmap",
     "elevation"
   ],
   "counts": {
-    "buildings": 828,
-    "roads": 134,
-    "areas": 19,
-    "pois": 430,
-    "spawn_points": 250
+    "buildings": 3778,
+    "roads": 886,
+    "areas": 187,
+    "pois": 1700,
+    "spawn_points": 500
   },
   "stats": {
-    "roads": 134,
-    "area_parking": 7,
-    "buildings": 828,
-    "area_grass": 5,
-    "area_plaza": 1,
-    "area_park": 6,
-    "pois": 430
+    "shore_runs": 5,
+    "roads": 886,
+    "area_park": 31,
+    "area_parking": 54,
+    "buildings": 3778,
+    "area_pitch": 27,
+    "area_playground": 7,
+    "area_grass": 59,
+    "area_water": 3,
+    "road_cut_at_shore": 6,
+    "road_underground_skipped": 22,
+    "area_plaza": 6,
+    "pois": 1700,
+    "road_through_building": 15
   },
-  "warnings": []
+  "warnings": [
+    "2 multipolygon outer members need ring assembly (skipped)"
+  ]
 }

@@ -24,6 +24,7 @@ var crossings: Array = []  # [e, n]
 var lamps: Array = []  # [e, n]
 var transit: TransitNetwork
 var terrain: Terrain
+var coast: Coast = null  # null for zones with no real coastline
 var _graph: RoadGraph = null
 
 var _m_lat := 111000.0
@@ -63,6 +64,7 @@ static func load_zone(id: String) -> ZoneData:
 	zone.crossings = z.get("crossings", [])
 	zone.lamps = z.get("lamps", [])
 	zone.terrain = Terrain.from_zone(z.get("terrain"), zone.size_m / 2.0)
+	zone.coast = Coast.from_zone(z.get("coast"))
 	zone.transit = TransitNetwork.from_zone(z.get("transit"), zone.size_m / 2.0)
 	zone.transit.terrain = zone.terrain
 	var spawn_json: Variant = _read_json(base + "/spawn_points.json")

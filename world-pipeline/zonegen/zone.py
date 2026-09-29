@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Optional, Tuple
 
+from . import coast as coastmod
 from . import geo
 from .osm import OsmData, OsmWay
 
@@ -117,6 +118,7 @@ class ZoneBuilder:
         self.half = size_m / 2.0
         self.stats: Dict[str, int] = {}
         self.warnings: List[str] = []
+        self.land: Optional[coastmod.LandMask] = None
 
     def _count(self, key: str) -> None:
         self.stats[key] = self.stats.get(key, 0) + 1
@@ -127,17 +129,25 @@ class ZoneBuilder:
     def _inside(self, p: geo.Point) -> bool:
         return -self.half <= p[0] <= self.half and -self.half <= p[1] <= self.half
 
+    def _on_land(self, p) -> bool:
+        return self.land is None or self.land.is_land(p)
+
     def build(self, osm: OsmData) -> dict:
         h = self.half
         buildings, roads, areas, pois = [], [], [], []
         trees, crossings, lamps = [], [], []
+        coast = coastmod.build_coast(osm, self.proj, self.size_m, self.warnings)
+        if coast is not None:
+            self.land = coastmod.LandMask([[tuple(q) for q in poly] for poly in coast["land"]], h)
+            self.stats["shore_runs"] = len(coast["shore"])
 
         for way in list(osm.ways) + list(osm.relation_rings):
             tags = way.tags
             if tags.get("natural") == "tree_row":
                 for piece in geo.clip_polyline(self._local(way), -h, -h, h, h):
                     for p in geo.sample_polyline(piece, 7.0):
-                        trees.append([round(p[0], 2), round(p[1], 2), 0.0])
+                        if self._on_land(p):
+                            trees.append([round(p[0], 2), round(p[1], 2), 0.0])
                 continue
             if tags.get("railway"):
                 continue  # tracks come from route relations (transit.py)
@@ -152,6 +162,11 @@ class ZoneBuilder:
                 # A building belongs to the zone that contains its centroid,
                 # so neighbouring zones never both own the same building.
                 if not self._inside(geo.centroid(ring)):
+                    continue
+                # Pier buildings stand at the water's edge; anything further
+                # out (moorings, pontoons) is not part of the walkable city.
+                if self.land is not None and not self.land.near_land(geo.centroid(ring), 20.0):
+                    self._count("building_at_sea_skipped")
                     continue
                 ring = geo.ensure_ccw(ring)
                 key = f"{'r' if way.id < 0 else 'w'}{abs(way.id)}"
@@ -171,15 +186,14 @@ class ZoneBuilder:
                 ring = geo.clean_ring(self._local(way))
                 clipped = geo.clip_polygon_rect(ring, -h, -h, h, h)
                 clipped = geo.clean_ring(clipped)
-                if len(clipped) >= 3 and abs(geo.signed_area(clipped)) >= 4.0:
+                if len(clipped) >= 3 and abs(geo.signed_area(clipped)) >= 4.0 and self._on_land(geo.centroid(clipped)):
                     areas.append({"id": f"w{way.id}", "kind": kind,
                                   "polygon": _round_pts(geo.ensure_ccw(clipped))})
                     self._count(f"area_{kind}")
                 continue
 
             if tags.get("natural") == "coastline":
-                self.warnings.append("coastline present: sea polygons are not generated yet")
-                continue
+                continue  # see coast.py
 
             highway = tags.get("highway")
             if highway and highway not in SKIP_HIGHWAYS:
@@ -193,7 +207,14 @@ class ZoneBuilder:
                 base = highway.replace("_link", "")
                 width = parse_length(tags.get("width")) or ROAD_WIDTHS.get(base, 5.0)
                 width = max(1.5, min(width, 20.0))
-                for idx, piece in enumerate(geo.clip_polyline(self._local(way), -h, -h, h, h)):
+                pieces = geo.clip_polyline(self._local(way), -h, -h, h, h)
+                if self.land is not None:
+                    # Paths out on breakwaters and piers are not walkable ground.
+                    total = sum(geo.polyline_length(q) for q in pieces)
+                    pieces = [q for piece in pieces for q in coastmod.clip_polyline_to_land(piece, self.land)]
+                    if sum(geo.polyline_length(q) for q in pieces) < total - 0.5:
+                        self._count("road_cut_at_shore")
+                for idx, piece in enumerate(pieces):
                     if geo.polyline_length(piece) < 1.0:
                         continue
                     road = {"id": f"w{way.id}" + (f"_{idx}" if idx else ""),
@@ -207,7 +228,7 @@ class ZoneBuilder:
 
         for node in osm.nodes:
             p = self.proj.to_local(node.lat, node.lon)
-            if not self._inside(p):
+            if not self._inside(p) or not self._on_land(p):
                 continue
             here = [round(p[0], 2), round(p[1], 2)]
             if node.tags.get("natural") == "tree":
@@ -250,7 +271,7 @@ class ZoneBuilder:
         # Wider roads first so narrow paths render on top.
         roads.sort(key=lambda r: -r["width"])
         south, west, north, east = self.proj.bbox(self.size_m)
-        return {
+        out = {
             "format": ZONE_FORMAT,
             "zone_id": self.zone_id,
             "name": self.name,
@@ -269,3 +290,6 @@ class ZoneBuilder:
             "crossings": crossings,
             "lamps": lamps,
         }
+        if coast is not None:
+            out["coast"] = coast
+        return out

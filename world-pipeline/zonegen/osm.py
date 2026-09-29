@@ -7,6 +7,7 @@ public infrastructure must not be used as a game CDN.
 from __future__ import annotations
 
 import json
+import math
 import time
 import urllib.error
 import urllib.parse
@@ -17,11 +18,12 @@ from typing import Dict, List, Optional, Tuple
 
 OVERPASS_ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
     "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ]
 USER_AGENT = "streetsareofus-world-pipeline/0.2 (+self-hosted game prototype)"
-CACHE_FORMAT = 2
+CACHE_FORMAT = 3  # 3: shore features (beaches, piers, breakwaters)
 
 
 @dataclass
@@ -75,7 +77,7 @@ class OsmData:
 
 def build_query(south: float, west: float, north: float, east: float) -> str:
     bbox = f"{south:.7f},{west:.7f},{north:.7f},{east:.7f}"
-    return f"""[out:json][timeout:90];
+    return f"""[out:json][timeout:180];
 (
   way["building"]({bbox});
   relation["building"]["type"="multipolygon"]({bbox});
@@ -84,7 +86,9 @@ def build_query(south: float, west: float, north: float, east: float) -> str:
   way["landuse"~"^(grass|recreation_ground|village_green)$"]({bbox});
   way["amenity"="parking"]({bbox});
   way["place"="square"]({bbox});
-  way["natural"~"^(water|coastline|tree_row)$"]({bbox});
+  way["natural"~"^(water|coastline|tree_row|beach|bare_rock|shingle|sand)$"]({bbox});
+  way["man_made"~"^(pier|breakwater|quay|groyne)$"]({bbox});
+  way["amenity"="ferry_terminal"]({bbox});
   way["railway"~"^(tram|light_rail)$"]({bbox});
   relation["route"~"^(tram|light_rail)$"]({bbox});
   node["amenity"]({bbox});
@@ -107,7 +111,7 @@ def fetch_overpass(query: str, retries_per_endpoint: int = 2) -> dict:
                     "User-Agent": USER_AGENT,
                     "Accept": "application/json",
                 })
-                with urllib.request.urlopen(req, timeout=120) as resp:
+                with urllib.request.urlopen(req, timeout=240) as resp:
                     raw = resp.read().decode("utf-8")
                 data = json.loads(raw)
                 if "elements" not in data:
@@ -120,6 +124,41 @@ def fetch_overpass(query: str, retries_per_endpoint: int = 2) -> dict:
                 print(f"  overpass {endpoint} attempt {attempt + 1} failed: {exc}")
                 time.sleep(3 * (attempt + 1))
     raise RuntimeError(f"all Overpass endpoints failed: {last_error}")
+
+
+# Busy public Overpass servers time out on a whole district; a bbox wider
+# than this is fetched in tiles (each cached, so a retry resumes) and merged.
+TILE_DEG = 0.0065
+
+
+def fetch_tiled(cache_file: Path, bbox: Tuple[float, float, float, float]) -> dict:
+    south, west, north, east = bbox
+    rows = max(1, math.ceil((north - south) / TILE_DEG - 1e-9))
+    cols = max(1, math.ceil((east - west) / (TILE_DEG * 1.35) - 1e-9))
+    if rows * cols == 1:
+        return fetch_overpass(build_query(*bbox))
+    merged: Dict[Tuple[str, int], dict] = {}
+    header: dict = {}
+    for r in range(rows):
+        for c in range(cols):
+            tile_file = cache_file.with_name(f"{cache_file.stem}.tile{r}_{c}.json")
+            if tile_file.exists():
+                part = json.loads(tile_file.read_text(encoding="utf-8"))
+            else:
+                s = south + (north - south) * r / rows
+                n = south + (north - south) * (r + 1) / rows
+                w = west + (east - west) * c / cols
+                e = west + (east - west) * (c + 1) / cols
+                print(f"  tile {r * cols + c + 1}/{rows * cols}")
+                part = fetch_overpass(build_query(s, w, n, e))
+                tile_file.parent.mkdir(parents=True, exist_ok=True)
+                tile_file.write_text(json.dumps(part), encoding="utf-8")
+            header = header or {k: v for k, v in part.items() if k != "elements"}
+            for el in part.get("elements", []):
+                merged[(el.get("type"), el.get("id"))] = el
+    out = dict(header)
+    out["elements"] = list(merged.values())
+    return out
 
 
 def _route_stop_ids(data: dict) -> List[int]:
@@ -139,7 +178,7 @@ def load_or_fetch(cache_file: Path, bbox: Tuple[float, float, float, float],
             return data
         print("  cached extract predates transit data, re-fetching")
     print("  querying Overpass ...")
-    data = fetch_overpass(build_query(*bbox))
+    data = fetch_tiled(cache_file, bbox)
     stop_ids = _route_stop_ids(data)
     if stop_ids:
         # Route stops outside the zone only come back as coordinates; one more

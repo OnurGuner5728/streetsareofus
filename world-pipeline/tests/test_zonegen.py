@@ -163,6 +163,67 @@ class SyntheticZoneTests(unittest.TestCase):
                 self.assertGreaterEqual(math.hypot(a["e"] - b["e"], a["n"] - b["n"]), 12.0 - 1e-6)
 
 
+from zonegen import coast as coastmod  # noqa: E402
+from zonegen.osm import OsmData, OsmNode, OsmWay  # noqa: E402
+
+
+class CoastTests(unittest.TestCase):
+    """natural=coastline -> land/sea split, shore classification, piers."""
+
+    def setUp(self):
+        self.proj = geo.LocalProjection(*ORIGIN)
+        self.h = 50.0
+
+    def _way(self, way_id, tags, en_points):
+        return OsmWay(way_id, tags, [self.proj.to_geo(e, n) for e, n in en_points])
+
+    def _build(self):
+        # A straight coastline at e=20 running north (land on its left, i.e.
+        # the west half of the zone), a pier reaching east into the sea, and
+        # its ferry terminal.
+        coastline = self._way(1, {"natural": "coastline"}, [(20.0, -70.0), (20.0, 70.0)])
+        pier = self._way(2, {"man_made": "pier", "name": "Test İskelesi"},
+                         [(20.0, -5.0), (35.0, -5.0), (35.0, 5.0), (20.0, 5.0), (20.0, -5.0)])
+        lat, lon = self.proj.to_geo(35.0, 0.0)
+        ferry = OsmNode(9, {"amenity": "ferry_terminal", "name": "Test İskele"}, lat, lon)
+        osm = OsmData(ways=[coastline, pier], nodes=[ferry])
+        return coastmod.build_coast(osm, self.proj, 2 * self.h, [])
+
+    def test_land_sea_split(self):
+        block = self._build()
+        self.assertIsNotNone(block)
+        self.assertGreaterEqual(len(block["land"]), 1)
+        mask = coastmod.LandMask([[tuple(p) for p in poly] for poly in block["land"]], self.h)
+        self.assertTrue(mask.is_land((0.0, 0.0)))  # west of the coastline: land
+        self.assertFalse(mask.is_land((40.0, 0.0)))  # east, out past the pier: sea
+        self.assertTrue(mask.near_land((40.0, 0.0), 20.0))  # ...but close enough to the quay
+
+    def test_shore_classified_as_quay_near_the_pier(self):
+        block = self._build()
+        kinds = {run["kind"] for run in block["shore"]}
+        self.assertIn("quay", kinds)
+
+    def test_pier_and_ferry_terminal(self):
+        block = self._build()
+        self.assertEqual(len(block["piers"]), 1)
+        self.assertEqual(block["piers"][0]["name"], "Test İskelesi")
+        self.assertTrue(block["piers"][0]["closed"])
+        self.assertEqual(len(block["ferry_terminals"]), 1)
+        self.assertEqual(block["ferry_terminals"][0]["name"], "Test İskele")
+
+    def test_no_coastline_means_no_coast_block(self):
+        osm = OsmData(ways=[self._way(3, {"highway": "residential"}, [(-10.0, -10.0), (10.0, 10.0)])])
+        self.assertIsNone(coastmod.build_coast(osm, self.proj, 2 * self.h, []))
+
+    def test_clip_polyline_to_land_drops_the_stretch_over_water(self):
+        block = self._build()
+        mask = coastmod.LandMask([[tuple(p) for p in poly] for poly in block["land"]], self.h)
+        # A path crossing the coastline from land (e=0) out over the sea (e=40).
+        pieces = coastmod.clip_polyline_to_land([(0.0, 0.0), (40.0, 0.0)], mask)
+        self.assertEqual(len(pieces), 1)
+        self.assertLess(pieces[0][-1][0], 21.0)  # stops at the shore, not out at sea
+
+
 if __name__ == "__main__":
     unittest.main()
 

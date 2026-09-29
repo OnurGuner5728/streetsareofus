@@ -295,6 +295,90 @@ void fragment() {
 }
 """
 
+## The sea surface. `amp`/`wave_dir`/`speed`/`wavelength` are driven every
+## frame from the zone's real weather (see WeatherView and the Open-Meteo
+## Marine fetch in weather_service.gd). The full variant displaces vertices
+## with a sum of Gerstner waves; LITE (low-end phones, web) only scrolls a
+## cheap normal-mapped ripple in the fragment shader, no vertex cost.
+const WATER := """
+shader_type spatial;
+render_mode blend_mix, cull_disabled, shadows_disabled;
+uniform float amp = 0.12;
+uniform float wave_dir = 0.0;
+uniform float speed = 1.0;
+uniform float wavelength = 18.0;
+varying vec3 wpos;
+%s
+#ifdef LITE
+void vertex() {
+	wpos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+}
+void fragment() {
+	vec2 p = wpos.xz * 0.05;
+	vec2 flow = vec2(sin(wave_dir), cos(wave_dir)) * TIME * speed * 0.06;
+	float n = vnoise(p + flow) * 0.6 + vnoise(p * 2.3 - flow * 1.6) * 0.4;
+	vec3 deep = srgb(vec3(0.06, 0.16, 0.24));
+	vec3 shallow = srgb(vec3(0.16, 0.34, 0.40));
+	vec3 col = mix(deep, shallow, n);
+	float fres = pow(1.0 - clamp(dot(NORMAL, VIEW), 0.0, 1.0), 4.0);
+	ALBEDO = mix(col, vec3(1.0), fres * 0.5);
+	ROUGHNESS = 0.15;
+	SPECULAR = 0.6;
+	ALPHA = 0.92;
+}
+#else
+// Three Gerstner waves (long swell to short chop) summed for the vertex
+// offset and its analytic normal. See GPU Gems ch. 1 for the derivation.
+vec3 gerstner(vec2 p, float t, out vec3 n) {
+	float k1 = 6.283185 / max(4.0, wavelength);
+	float k2 = 6.283185 / max(4.0, wavelength * 0.5);
+	float k3 = 6.283185 / max(4.0, wavelength * 0.27);
+	float c1 = sqrt(9.8 / k1);
+	float c2 = sqrt(9.8 / k2);
+	float c3 = sqrt(9.8 / k3);
+	vec2 d1 = vec2(sin(wave_dir), cos(wave_dir));
+	vec2 d2 = vec2(sin(wave_dir + 0.9), cos(wave_dir + 0.9));
+	vec2 d3 = vec2(sin(wave_dir - 1.3), cos(wave_dir - 1.3));
+	float a1 = amp;
+	float a2 = amp * 0.45;
+	float a3 = amp * 0.22;
+	float f1 = k1 * dot(d1, p) - c1 * k1 * t * speed;
+	float f2 = k2 * dot(d2, p) - c2 * k2 * t * speed;
+	float f3 = k3 * dot(d3, p) - c3 * k3 * t * speed;
+	float q1 = min(0.5, 1.0 / (k1 * a1 * 3.0 + 0.001));
+	float q2 = min(0.5, 1.0 / (k2 * a2 * 3.0 + 0.001));
+	float q3 = min(0.5, 1.0 / (k3 * a3 * 3.0 + 0.001));
+	vec3 off = vec3(0.0);
+	off.x = q1 * a1 * d1.x * cos(f1) + q2 * a2 * d2.x * cos(f2) + q3 * a3 * d3.x * cos(f3);
+	off.z = q1 * a1 * d1.y * cos(f1) + q2 * a2 * d2.y * cos(f2) + q3 * a3 * d3.y * cos(f3);
+	off.y = a1 * sin(f1) + a2 * sin(f2) + a3 * sin(f3);
+	float nx = d1.x * k1 * a1 * cos(f1) + d2.x * k2 * a2 * cos(f2) + d3.x * k3 * a3 * cos(f3);
+	float nz = d1.y * k1 * a1 * cos(f1) + d2.y * k2 * a2 * cos(f2) + d3.y * k3 * a3 * cos(f3);
+	n = normalize(vec3(-nx, 1.0, -nz));
+	return off;
+}
+void vertex() {
+	vec3 world = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	vec3 n;
+	vec3 off = gerstner(world.xz, TIME, n);
+	VERTEX += off;
+	NORMAL = n;
+	wpos = world + off;
+}
+void fragment() {
+	vec3 deep = srgb(vec3(0.05, 0.14, 0.22));
+	vec3 shallow = srgb(vec3(0.18, 0.38, 0.42));
+	float n = fbm(wpos.xz * 0.08 + TIME * 0.02);
+	vec3 col = mix(deep, shallow, clamp(n, 0.0, 1.0));
+	float fres = pow(1.0 - clamp(dot(NORMAL, VIEW), 0.0, 1.0), 4.0);
+	ALBEDO = mix(col, vec3(1.0), fres * 0.55);
+	ROUGHNESS = 0.08;
+	SPECULAR = 0.85;
+	ALPHA = 0.94;
+}
+#endif
+"""
+
 static var _cache := {}
 static var _variants := {}  # key -> [full Shader, lite Shader]
 static var lite := false
@@ -305,7 +389,7 @@ static func get_shader(key: String) -> ShaderMaterial:
 		return _cache[key]
 	var code: String = {
 		"pavers": PAVERS, "cobbles": COBBLES, "asphalt": ASPHALT, "grass": GRASS, "zebra": ZEBRA,
-		"walls": WALLS, "roof": ROOF, "leaves": LEAVES, "lamp_head": LAMP_HEAD,
+		"walls": WALLS, "roof": ROOF, "leaves": LEAVES, "lamp_head": LAMP_HEAD, "water": WATER,
 	}[key]
 	if code.contains("%s"):
 		code = code % COMMON

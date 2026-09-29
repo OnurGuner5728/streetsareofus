@@ -27,7 +27,8 @@ WEIGHTS = {
 
 def compute_spawn_points(zone: dict, spacing: float = 20.0, edge_margin: float = 12.0,
                          building_clearance: float = 1.5, min_separation: float = 12.0,
-                         max_points: int = 250) -> List[Dict]:
+                         max_points: int = 500, land=None, shore_clearance: float = 4.0) -> List[Dict]:
+    """`land` (coast.LandMask) keeps spawn points on land, a few metres from the water."""
     half = zone["size_m"] / 2.0 - edge_margin
     footprints = []
     for b in zone["buildings"]:
@@ -56,6 +57,8 @@ def compute_spawn_points(zone: dict, spacing: float = 20.0, edge_margin: float =
             continue
         for p in geo.sample_polyline([tuple(x) for x in road["points"]], spacing):
             if abs(p[0]) > half or abs(p[1]) > half or blocked(p):
+                continue
+            if land is not None and not land.shore_distance_ok(p, shore_clearance):
                 continue
             nearby = sum(1 for q in pois if math.hypot(q[0] - p[0], q[1] - p[1]) < 60.0)
             components = {

@@ -15,6 +15,7 @@ func _ready() -> void:
 		test_world_collision, test_motor_walks_and_is_blocked, test_replay_matches_realtime,
 		test_client_and_server_worlds_agree, test_step_up, test_tram_shoves_and_blocks, test_props, test_crowd,
 		test_terrain, test_bench_sitting,
+		test_coastline, test_coast_sea_blocking, test_weather_wave_mapping,
 		test_transit_network, test_transit_timetable, test_walking_routes, test_route_prefers_tram,
 	]
 	for t in tests:
@@ -526,12 +527,13 @@ func test_tram_shoves_and_blocks() -> void:
 	if line == null:
 		return
 	# A moment when vehicle 0 runs at full speed well inside the zone.
+	var reach := zone.half_size() - 56.0
 	var t0 := -1.0
 	var t := 0.0
 	while t < line.cycle and t0 < 0.0:
 		var st := line.state(0, t)
 		var ahead := line.track_point(float(st.s) + int(st.dir) * 20.0, int(st.dir))
-		if not st.dwelling and float(st.speed) > line.speed * 0.9 and absf(ahead.x) < 200.0 and absf(ahead.y) < 200.0:
+		if not st.dwelling and float(st.speed) > line.speed * 0.9 and absf(ahead.x) < reach and absf(ahead.y) < reach:
 			t0 = t
 		t += 0.5
 	check(t0 >= 0.0, "found a tram at speed")
@@ -722,6 +724,80 @@ func test_terrain() -> void:
 	vp.queue_free()
 
 
+# --- coast and weather ---------------------------------------------------------------
+
+func test_coastline() -> void:
+	var coast := Coast.from_zone({
+		"sea_level": -1.6, "shore_height_m": 1.6,
+		"land": [[[-10.0, -10.0], [10.0, -10.0], [10.0, 10.0], [-10.0, 10.0]]],
+		"shore": [{"kind": "quay", "points": [[10.0, -10.0], [10.0, 10.0]]}],
+		"piers": [{"id": "w1", "closed": false, "width": 3.0, "name": "Test İskelesi",
+			"points": [[10.0, 0.0], [20.0, 0.0]]}],
+		"ferry_terminals": [{"name": "Test İskele", "e": 20.0, "n": 0.0}],
+	})
+	check(coast != null, "coast block parses")
+	near(coast.sea_level, -1.6, 0.001, "sea level read")
+	check(coast.is_land(Vector2(0, 0)), "zone centre is land")
+	check(not coast.is_land(Vector2(12, 12)), "outside the land square, still within the zone: sea")
+	near(coast.distance_to_shore(Vector2(15, 0)), 5.0, 0.01, "distance to the east shore run")
+	check(coast.piers.size() == 1 and str(coast.piers[0].name) == "Test İskelesi", "pier parsed with its name")
+	check(coast.ferry_terminals.size() == 1 and (coast.ferry_terminals[0].pos as Vector2).is_equal_approx(Vector2(20, 0)),
+		"ferry terminal position converted to Godot XZ")
+	check(Coast.from_zone(null) == null, "zones without a coastline get null")
+
+
+## The shore is a real, physical wall: a player (or here, a bare raycast)
+## cannot cross from land into the sea.
+func test_coast_sea_blocking() -> void:
+	var zone := ZoneData.new()
+	zone.size_m = 100.0
+	zone.coast = Coast.from_zone({
+		"sea_level": -1.6, "shore_height_m": 1.6,
+		"land": [[[-10.0, -10.0], [10.0, -10.0], [10.0, 10.0], [-10.0, 10.0]]],
+		"shore": [{"kind": "quay", "points": [[10.0, -10.0], [10.0, 10.0]]}],
+		"piers": [], "ferry_terminals": [],
+	})
+	var holder := Node3D.new()
+	add_child(holder)
+	var sink := WorldBuilder._CollisionSink.new(holder)
+	WorldBuilder._build_coast(zone, sink)
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	var space := holder.get_world_3d().direct_space_state
+	# The shore wall sits on the land square's east edge (x=10); a ray through
+	# it at head height must be blocked.
+	var blocked := space.intersect_ray(PhysicsRayQueryParameters3D.create(Vector3(5, 1.0, 0), Vector3(20, 1.0, 0)))
+	check(not blocked.is_empty(), "shore wall blocks a ray from land out to sea")
+	var clear := space.intersect_ray(PhysicsRayQueryParameters3D.create(Vector3(5, 1.0, 40), Vector3(6, 1.0, 40)))
+	check(clear.is_empty(), "well away from the shore, nothing blocks")
+	holder.queue_free()
+
+
+func test_weather_wave_mapping() -> void:
+	var marine := {"current": {"time": "2026-01-01T00:00", "wave_height": 0.85, "wave_direction": 210.0, "wave_period": 4.5}}
+	var waves := WeatherService.parse_marine(marine)
+	near(waves.wave_m, 0.85, 0.001, "marine wave height parsed")
+	near(waves.wave_dir, 210.0, 0.001, "marine wave direction parsed")
+	near(waves.wave_period, 4.5, 0.001, "marine wave period parsed")
+	check(WeatherService.parse_marine({"current": {"no_wave": true}}).is_empty(), "malformed marine response yields nothing")
+	check(WeatherService.parse_marine(null).is_empty(), "non-dictionary marine response yields nothing")
+	var calm := WeatherService.estimate_wave(5.0)
+	var stormy := WeatherService.estimate_wave(50.0)
+	check(calm.wave_m < stormy.wave_m, "stronger wind estimates bigger waves")
+	check(stormy.wave_m <= 1.6, "wave estimate stays clamped")
+	# Offline presets (used when the marine fetch is unavailable) carry their
+	# own plausible wave state too.
+	for key in WeatherService.PRESETS:
+		var preset: Dictionary = WeatherService.PRESETS[key]
+		check(preset.has("wave_m") and float(preset.wave_m) > 0.0, "preset '%s' has a wave height" % key)
+	var zone := ZoneData.new()
+	zone.origin_lat = 40.98
+	zone.origin_lon = 29.02
+	var svc := WeatherService.new()
+	svc.setup(zone, "storm")
+	check(svc.current.wave_m == WeatherService.PRESETS.storm.wave_m, "preset mode uses the preset's own wave state")
+
+
 ## Ambient pedestrians: plenty of them, on pavements (not in buildings),
 ## moving smoothly, the same for everyone.
 func test_crowd() -> void:
@@ -764,9 +840,10 @@ func test_transit_network() -> void:
 		for st in t3.stops:
 			if st.in_zone:
 				names.append(st.name)
-		check(names == ["Altıyol", "Bahariye"], "T3 stops inside the zone: %s" % [names])
-		check(t3.reachable(names.size() - 1 + t3.stops.find(t3.stops.filter(func(x): return x.name == "Altıyol")[0]), 1).is_empty(),
-			"riders cannot stay on past Bahariye, where T3 leaves the zone")
+		# The enlarged zone (İskele to Moda) now holds the whole real loop.
+		check(names.size() == t3.stops.size(), "every T3 stop is inside the zone (%d of %d)" % [names.size(), t3.stops.size()])
+		var altiyol: int = t3.stops.find(t3.stops.filter(func(x): return x.name == "Altıyol")[0])
+		check(t3.reachable(altiyol, 1).size() == t3.stops.size(), "riders can now ride the whole loop without leaving the zone")
 
 
 func test_transit_timetable() -> void:

@@ -21,6 +21,7 @@ var ready_to_play := false
 var _samples := {}  # name -> AudioStreamWAV
 var _ambient: AudioStreamPlayer
 var _rain: AudioStreamPlayer
+var _sea: AudioStreamPlayer
 var _steps: AudioStreamPlayer
 var _ui: AudioStreamPlayer
 var _one_shots: Array = []  # AudioStreamPlayer3D pool
@@ -28,6 +29,7 @@ var _tram_voices := {}  # veh root -> AudioStreamPlayer3D
 var _next_critter := 0.0
 var _step_phase := 0.0
 var rain := 0.0  # 0..1, set by the weather
+var sea := 0.0  # 0..1, set by WeatherView from distance to shore and wave height
 var _rng := RandomNumberGenerator.new()
 
 
@@ -36,6 +38,7 @@ func setup(game: GameClient) -> void:
 	_rng.seed = hash(game.display_name)
 	_ambient = _player2d(-16.0)
 	_rain = _player2d(-80.0)
+	_sea = _player2d(-80.0)
 	_steps = _player2d(-28.0)
 	_ui = _player2d(-8.0)
 	for i in 4:
@@ -118,6 +121,13 @@ func update(night: float, delta: float) -> void:
 		_rain.volume_db = linear_to_db(rain) - 6.0
 	elif _rain.playing:
 		_rain.stop()
+	if sea > 0.02:
+		if not _sea.playing:
+			_sea.stream = _samples.wave
+			_sea.play()
+		_sea.volume_db = linear_to_db(sea) - 4.0
+	elif _sea.playing:
+		_sea.stop()
 	_update_trams()
 	_next_critter -= delta
 	if _next_critter <= 0.0:
@@ -200,12 +210,12 @@ func _one_shot(sample: String, at: Vector3, db: float, pitch: float) -> void:
 
 func _generate() -> void:
 	var specs := [["step", 0.12], ["thump", 0.25], ["clang", 0.7], ["chime", 0.7], ["bell", 1.4], ["sparrow", 0.5], ["gull", 1.1],
-		["rumble", 2.0], ["ambient", 6.0], ["rain", 3.0], ["thunder", 3.5], ["purr", 1.8]]
+		["rumble", 2.0], ["ambient", 6.0], ["rain", 3.0], ["thunder", 3.5], ["purr", 1.8], ["wave", 7.0]]
 	for spec in specs:
 		var data := PackedFloat32Array()
 		data.resize(int(float(spec[1]) * RATE))
 		await _fill(str(spec[0]), data)
-		var loop: bool = spec[0] in ["rumble", "ambient", "rain"]
+		var loop: bool = spec[0] in ["rumble", "ambient", "rain", "wave"]
 		_samples[spec[0]] = _to_wav(data, loop)
 	ready_to_play = true
 
@@ -274,10 +284,17 @@ func _fill(sound: String, out: PackedFloat32Array) -> void:
 				var white := _rng.randf_range(-1.0, 1.0)
 				lp += (white - lp) * 0.6
 				s = (white - lp) * 0.5 + (0.3 if _rng.randf() < 0.0015 else 0.0)
+			"wave":
+				# Surf lapping the shore: filtered noise, swelling and receding.
+				var white2 := _rng.randf_range(-1.0, 1.0)
+				lp += (white2 - lp) * 0.08
+				lp2 += (lp - lp2) * 0.012
+				var swell := 0.5 + 0.5 * sin(TAU * t / 6.5)
+				s = (lp - lp2) * (0.5 + 0.9 * swell)
 		out[i] = s
 		if i % 12000 == 11999:
 			await get_tree().process_frame
-	if sound in ["rumble", "ambient", "rain"]:
+	if sound in ["rumble", "ambient", "rain", "wave"]:
 		_crossfade_loop(out)
 
 
