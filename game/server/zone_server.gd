@@ -63,6 +63,8 @@ class Player:
 var zone: ZoneData
 var store: ServerStore
 var social: SocialRules
+var groups: GroupRules
+var games: GameRules
 var spawner: SpawnPicker
 var transit: TransitNetwork
 var props: PropWorld
@@ -98,6 +100,8 @@ func setup(opts: Dictionary) -> Error:
 	WorldBuilder.build(zone, self, false)
 	store = ServerStore.new(str(opts.data_dir))
 	social = SocialRules.new(_blocked_either, _players_near.bind(Protocol.EMOTE_RANGE))
+	groups = GroupRules.new(_name_of, func() -> Array: return players.keys())
+	games = GameRules.new(_players_near.bind(Protocol.EMOTE_RANGE), _blocked_either, _name_of, Net.rtt)
 	spawner = SpawnPicker.new(zone)
 	transit = zone.transit
 	props = PropWorld.new()
@@ -152,8 +156,12 @@ func _on_peer_disconnected(peer: int) -> void:
 	var pl: Player = players[peer]
 	_release_seat(pl)
 	_save_location(pl)
+	# Groups first: the others hear the leaver's name (their own effects are
+	# dropped by _dispatch once the player is gone).
+	_dispatch(groups.on_disconnect(peer))
 	players.erase(peer)
 	_dispatch(social.on_disconnect(peer))
+	_dispatch(games.cancel(peer, "left"))
 	for other in players.values():
 		if other.known.erase(peer) and Net.is_open(other.id):
 			Net.s_entity_leave.rpc_id(other.id, peer)
@@ -226,6 +234,8 @@ func on_hello(peer: int, payload: Dictionary) -> void:
 	if not moved.is_empty():
 		Net.s_props.rpc_id(peer, SnapshotCodec.encode_props(moved))
 	Net.s_weather.rpc_id(peer, weather.current)
+	if not groups.groups.is_empty():
+		_dispatch(groups.marks_for(peer))
 	log_line("%s joined at %s via %s (%d online)" % [display_name, spawn.pos.snapped(Vector3.ONE * 0.1), spawn.how, players.size()])
 
 
@@ -336,6 +346,8 @@ func _physics_process(_delta: float) -> void:
 	_stats.motor_us += t_motor - t_trams
 	_stats.props_us += t_sim - t_motor
 	_stats.sim_us += t_sim - t0
+	if games.active():
+		_dispatch(games.update(now(), _distance_between))
 	if tick % 10 == 0:
 		_dispatch(social.update(now(), _distance_between))
 	if tick % Protocol.SNAPSHOT_EVERY_TICKS == 0:
@@ -750,18 +762,73 @@ func on_interaction_request(peer: int, target: int, kind: String) -> void:
 	var b: Player = players.get(target)
 	if a == null or b == null:
 		return
+	# Group invitations and minigames are refused up front when they cannot
+	# work (full group, someone already playing), before anyone is asked.
+	var problem := ""
+	if kind == "group":
+		problem = groups.invite_problem(peer, target)
+	elif Protocol.GAME_KINDS.has(kind):
+		problem = games.start_problem(peer, target)
+	if problem != "":
+		_dispatch([SocialRules._notice(peer, problem)])
+		return
 	var d := a.body.global_position.distance_to(b.body.global_position)
 	_dispatch(social.request(peer, target, kind, now(), d, a.blocked_accounts.has(b.account_id)))
 
 
 func on_interaction_response(peer: int, request_id: int, accept: bool) -> void:
-	if players.has(peer):
-		_dispatch(social.respond(peer, request_id, accept, now()))
+	if not players.has(peer):
+		return
+	_dispatch(social.respond(peer, request_id, accept, now()))
+	# Accepted invitations and game challenges are acted on here.
+	for acc: Dictionary in social.take_accepted():
+		if not players.has(acc.from) or not players.has(acc.to):
+			continue
+		if acc.kind == "group":
+			_dispatch(groups.accept_invite(acc.from, acc.to))
+			log_line("group: %s invited %s (%d groups)" % [_name_of(acc.from), _name_of(acc.to), groups.groups.size()])
+		else:
+			_dispatch(games.start(acc.kind, acc.from, acc.to, now()))
+			log_line("game %s: %s vs %s" % [acc.kind, _name_of(acc.from), _name_of(acc.to)])
 
 
+## other == 0 walks out of every conversation at once (leaving a circle).
 func on_conversation_leave(peer: int, other: int) -> void:
-	if players.has(peer):
+	if not players.has(peer):
+		return
+	if other == 0:
+		_dispatch(social.leave_all(peer))
+	else:
 		_dispatch(social.close_conversation(peer, other, "left"))
+
+
+func on_group_create(peer: int, group_name: String) -> void:
+	if players.has(peer):
+		_dispatch(groups.create(peer, group_name))
+
+
+func on_group_leave(peer: int) -> void:
+	if players.has(peer):
+		_dispatch(groups.leave(peer))
+
+
+func on_group_chat(peer: int, text: String) -> void:
+	if not players.has(peer):
+		return
+	# Nobody receives the words of someone they have blocked (or who blocked them).
+	var effects := groups.chat(peer, text, now())
+	_dispatch(effects.filter(func(e: Dictionary) -> bool: return e.to == peer or e.rpc != "s_group_chat" or not _blocked_either(peer, e.to)))
+
+
+func on_game_input(peer: int, match_id: int, value: int) -> void:
+	if players.has(peer) and games.active():
+		_dispatch(games.input(peer, match_id, value, now()))
+
+
+func on_game_quit(peer: int, match_id: int) -> void:
+	var m := games.match_of(peer)
+	if not m.is_empty() and int(m.id) == match_id:
+		_dispatch(games.cancel(peer, "quit"))
 
 
 func on_chat(peer: int, text: String) -> void:
@@ -783,6 +850,7 @@ func on_block(peer: int, target: int) -> void:
 	store.block(a.account_id, b.account_id)
 	store.audit("block", {"blocker": a.account_id, "blocked": b.account_id})
 	_dispatch(social.on_block(peer, target))
+	_dispatch(games.on_block(peer, target))
 	# Blocked pairs stop seeing each other entirely.
 	for pair in [[a, b], [b, a]]:
 		if pair[0].known.erase(pair[1].id):
@@ -900,6 +968,11 @@ func _dispatch(effects: Array) -> void:
 	for e in effects:
 		if players.has(e.to) and Net.is_open(e.to):
 			Net.callv("rpc_id", [e.to, StringName(e.rpc)] + e.args)
+
+
+func _name_of(peer: int) -> String:
+	var pl: Player = players.get(peer)
+	return pl.display_name if pl != null else "?"
 
 
 func _blocked_either(a: int, b: int) -> bool:

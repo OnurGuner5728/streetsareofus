@@ -11,6 +11,11 @@ extends RefCounted
 ## - A request to someone who has blocked you is swallowed silently.
 ## - Same-target cooldown, and a longer one after repeated refusals.
 ## - Only people in an accepted conversation receive your text.
+## - Groups and minigames use the same request flow (kinds "group", "rps",
+##   "slap"): consent, cooldowns and blocks behave identically. An accepted
+##   non-talk request is queued in `accepted` for the zone server to act on.
+## - A conversation is a circle: joining someone's talk also joins you to
+##   everyone they are already talking with, so text reaches the whole circle.
 
 var requests := {}  # request_id -> {id, from, to, kind, expires, declined}
 var conversations := {}  # "a:b" (a < b) -> {a, b, lines: []}
@@ -19,6 +24,7 @@ var _last_request_at := {}  # "from>to" -> time
 var _refusals := {}  # "from>to" -> {count, until}
 var _chat_tokens := {}  # peer -> {tokens, at}
 var _emote_at := {}  # peer -> time
+var accepted: Array = []  # accepted requests of kinds other than "talk", drained by take_accepted()
 
 ## Callable(a: int, b: int) -> bool, true when either side blocks the other.
 var is_blocked: Callable
@@ -56,7 +62,7 @@ func request(from: int, to: int, kind: String, now: float, distance: float, requ
 		return [_notice(from, "you_blocked")]
 	if distance > Protocol.INTERACTION_RANGE + Protocol.INTERACTION_RANGE_TOLERANCE:
 		return [_notice(from, "too_far")]
-	if in_conversation(from, to):
+	if kind == "talk" and in_conversation(from, to):
 		return [_notice(from, "already_talking")]
 	var pair := "%d>%d" % [from, to]
 	var refusal: Dictionary = _refusals.get(pair, {})
@@ -95,12 +101,30 @@ func respond(responder: int, request_id: int, accept: bool, now: float) -> Array
 		return []
 	requests.erase(request_id)
 	_refusals.erase("%d>%d" % [r.from, r.to])
-	conversations[conv_key(r.from, r.to)] = {"a": mini(r.from, r.to), "b": maxi(r.from, r.to), "lines": []}
-	return [
-		_rpc(r.from, "s_interaction_result", [request_id, "accepted"]),
-		_rpc(r.from, "s_conversation_open", [r.to]),
-		_rpc(r.to, "s_conversation_open", [r.from]),
-	]
+	var effects := [_rpc(r.from, "s_interaction_result", [request_id, "accepted"])]
+	if r.kind != "talk":
+		accepted.append({"kind": r.kind, "from": r.from, "to": r.to})
+		return effects
+	# Joining a circle: the newcomer also talks with everyone the accepter is
+	# already talking with (the accepter's word covers the circle).
+	var circle := partners(r.to)
+	effects.append_array(_open_conversation(r.from, r.to))
+	for p: int in circle:
+		if p != r.from and not in_conversation(r.from, p) and not is_blocked.call(r.from, p):
+			effects.append_array(_open_conversation(r.from, p))
+	return effects
+
+
+## Accepted group and minigame requests since the last call.
+func take_accepted() -> Array:
+	var out := accepted
+	accepted = []
+	return out
+
+
+func _open_conversation(a: int, b: int) -> Array:
+	conversations[conv_key(a, b)] = {"a": mini(a, b), "b": maxi(a, b), "lines": []}
+	return [_rpc(a, "s_conversation_open", [b]), _rpc(b, "s_conversation_open", [a])]
 
 
 ## Expires requests and closes conversations whose members drifted apart.
@@ -129,6 +153,14 @@ func close_conversation(a: int, b: int, reason: String) -> Array:
 		return []
 	conversations.erase(key)
 	return [_rpc(a, "s_conversation_close", [b, reason]), _rpc(b, "s_conversation_close", [a, reason])]
+
+
+## Leaves every conversation of `peer` at once (walking out of a circle).
+func leave_all(peer: int, reason := "left") -> Array:
+	var effects := []
+	for p: int in partners(peer):
+		effects.append_array(close_conversation(peer, p, reason))
+	return effects
 
 
 func chat(from: int, raw_text: String, now: float) -> Array:

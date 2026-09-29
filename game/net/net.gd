@@ -142,6 +142,16 @@ func is_open(peer_id: int) -> bool:
 	return true
 
 
+## Round-trip time to a peer in seconds (ENet only; 0.0 over WebSocket, where
+## the transport does not measure it). The reaction games use it to be fair.
+func rtt(peer_id: int) -> float:
+	if peer is ENetMultiplayerPeer:
+		var ep: ENetPacketPeer = (peer as ENetMultiplayerPeer).get_peer(peer_id)
+		if ep != null:
+			return ep.get_statistic(ENetPacketPeer.PEER_ROUND_TRIP_TIME) / 1000.0
+	return 0.0
+
+
 ## Disconnects a peer once the messages already queued for it are sent.
 func kick(peer_id: int) -> void:
 	if peer is ENetMultiplayerPeer:
@@ -285,6 +295,39 @@ func c_alight() -> void:
 		server.on_alight(_sender())
 
 
+## Groups: make one (name optional), leave it, chat with its members.
+@rpc("any_peer", "call_remote", "reliable", 1)
+func c_group_create(group_name: String) -> void:
+	if server:
+		server.on_group_create(_sender(), group_name)
+
+
+@rpc("any_peer", "call_remote", "reliable", 1)
+func c_group_leave() -> void:
+	if server:
+		server.on_group_leave(_sender())
+
+
+@rpc("any_peer", "call_remote", "reliable", 1)
+func c_group_chat(text: String) -> void:
+	if server:
+		server.on_group_chat(_sender(), text)
+
+
+## Minigames: a pick (rock/paper/scissors 0..2) or a slap/dodge press (1),
+## and quitting the match.
+@rpc("any_peer", "call_remote", "reliable", 1)
+func c_game_input(match_id: int, value: int) -> void:
+	if server:
+		server.on_game_input(_sender(), match_id, value)
+
+
+@rpc("any_peer", "call_remote", "reliable", 1)
+func c_game_quit(match_id: int) -> void:
+	if server:
+		server.on_game_quit(_sender(), match_id)
+
+
 # --- server -> client --------------------------------------------------------
 
 @rpc("authority", "call_remote", "reliable", 1)
@@ -421,3 +464,31 @@ func s_injury(id: int, kind: String, left: float) -> void:
 func s_fitness(value: float) -> void:
 	if client:
 		client.on_fitness(value)
+
+
+## Your group: {id, name, color, members: [{id, name}]}, or {} when in none.
+@rpc("authority", "call_remote", "reliable", 1)
+func s_group_state(info: Dictionary) -> void:
+	if client:
+		client.on_group_state(info)
+
+
+## Who wears which group colour, flat [peer, colour index, ...]; everyone gets
+## it so groupmates show up in their colour.
+@rpc("authority", "call_remote", "reliable", 1)
+func s_group_marks(marks: Array) -> void:
+	if client:
+		client.on_group_marks(marks)
+
+
+@rpc("authority", "call_remote", "reliable", 1)
+func s_group_chat(from_id: int, text: String) -> void:
+	if client:
+		client.on_group_chat(from_id, text)
+
+
+## One event of a minigame match you are in (see GameRules): {"ev": ...}.
+@rpc("authority", "call_remote", "reliable", 1)
+func s_game(event: Dictionary) -> void:
+	if client:
+		client.on_game(event)

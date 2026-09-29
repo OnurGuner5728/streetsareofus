@@ -3,7 +3,7 @@ extends RefCounted
 ## Constants shared by client and server. Bump PROTOCOL_VERSION on any
 ## change to RPC signatures or the binary snapshot/input layout.
 
-const PROTOCOL_VERSION := 5
+const PROTOCOL_VERSION := 6
 const CLIENT_BUILD := "0.3.0-alpha"
 const DEFAULT_PORT := 7000
 const DEFAULT_ZONE := "tr_istanbul_kadikoy_001"
@@ -47,7 +47,41 @@ const EMOTES := ["wave", "nod", "dance"]
 ## Benches: how close you must be to sit down, and two seats per bench.
 const SIT_RANGE := 2.2
 const BENCH_SEATS := [-0.45, 0.45]
-const REQUEST_KINDS := ["talk"]
+## Every request kind goes through the same consent flow: "talk" opens a
+## conversation, "group" invites into your group, "rps" and "slap" challenge
+## to a minigame (the server starts it only after an accept).
+const REQUEST_KINDS := ["talk", "group", "rps", "slap"]
+## Groups: at most ten live at once, one colour each (no two share one).
+const GROUP_MAX_MEMBERS := 8
+const GROUP_NAME_MAX := 16
+const GROUP_COLORS := [Color("e6194b"), Color("4363d8"), Color("3cb44b"), Color("ffe119"), Color("f58231"),
+	Color("911eb4"), Color("42d4f4"), Color("f032e6"), Color("9a6324"), Color("bfef45")]
+const GROUP_COLOR_NAMES := ["Kırmızı", "Mavi", "Yeşil", "Sarı", "Turuncu", "Mor", "Turkuaz", "Pembe", "Kahverengi", "Limon"]
+## Minigames between two people: a match is cancelled when they drift apart.
+const GAME_KINDS := ["rps", "slap"]
+const GAME_RANGE := 8.0
+const GAME_INTRO := 1.2
+const GAME_REVEAL := 2.4
+## Taş-kâğıt-makas (0 rock, 1 paper, 2 scissors): best of three, the fists
+## shake for three beats, then a short window to lock in a choice.
+const RPS_WINS := 2
+const RPS_MAX_ROUNDS := 6  # draws replay the round, up to this many
+const RPS_COUNT_STEP := 0.8
+const RPS_PICK_TIME := 2.0
+## El kızartmaca: one is on top, one has palms up. At the cue the top slaps
+## and the bottom pulls away; whoever reacts faster wins the round (the top
+## wins ties within SLAP_TIE). Five rounds, roles swap every round.
+const SLAP_WINS := 3
+const SLAP_ROUNDS := 5
+const SLAP_READY := 1.0
+const SLAP_DELAY_MIN := 1.5
+const SLAP_DELAY_MAX := 4.0
+const SLAP_WINDOW := 1.2  # seconds after the cue in which a press counts
+const SLAP_MIN_REACTION := 0.08  # faster than this (latency removed) is a guess
+const SLAP_TIE := 0.03
+const SLAP_MAX_RTT := 0.5  # latency credit is capped, so lag cannot be faked
+## Server-sent poses for the minigames (players cannot trigger these).
+const GAME_EMOTES := ["shake", "rock", "paper", "scissors", "slap", "dodge"]
 const REPORT_REASONS := ["harassment", "hate", "spam", "impersonation", "other"]
 
 # Movement. Identical on both sides so client prediction matches the server.
