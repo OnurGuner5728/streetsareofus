@@ -1,6 +1,6 @@
 {
-  "zone.json": "sha256:9898fc559c87166293c270f6bc8a7b1f9658ab0fa0d9abbc888b65f7ab38b471",
-  "spawn_points.json": "sha256:cd2254884b40de952fd0f77963139447a449bc027ee661e53d6aca5e3ca251da",
-  "attribution.json": "sha256:f4f848278977500fa639a587bd02b27bbee57dff4f5312df3452fdfd9e5104e4",
-  "metadata.json": "sha256:f3dd1c0c711b241b6ea3b54cce8a8548d5465c65c4e887710a74747b9e01db21"
+  "zone.json": "sha256:9cc0dcd6bb019c8c46306569f5811624ad07eb5e279985920ce0a2e1e4214d03",
+  "spawn_points.json": "sha256:eb4e188e4844c5f9b57ec02607f7c7c363bfcd1d32ba357f1c65186ddbad410b",
+  "attribution.json": "sha256:8d5ad98b4f2bfd22183553a9b1c52a7803827393b046ba809ebaeb5641ce8972",
+  "metadata.json": "sha256:f5124a9abc0a6a712cd423d150ea2a33b72aa365b0270b6f325905891c3738ad"
 }
