@@ -15,7 +15,7 @@ func _ready() -> void:
 		test_store, test_spawn_picker, test_zone_load,
 		test_world_collision, test_motor_walks_and_is_blocked, test_replay_matches_realtime,
 		test_client_and_server_worlds_agree, test_step_up, test_tram_shoves_and_blocks, test_props, test_crowd,
-		test_crowd_view_pool, test_terrain, test_bench_sitting, test_knockdown, test_stamina, test_limp, test_ball_kick, test_poser_arm,
+		test_crowd_view_pool, test_terrain, test_bench_sitting, test_knockdown, test_stamina, test_limp, test_ball_kick, test_poser_arm, test_game_emotes, test_group_notices_turkish, test_cooldown_per_kind,
 		test_coastline, test_coast_sea_blocking, test_weather_wave_mapping, test_tree_road_grid,
 		test_transit_network, test_transit_timetable, test_walking_routes, test_route_prefers_tram,
 	]
@@ -1651,3 +1651,50 @@ func test_poser_arm() -> void:
 	check((results[0] as Vector3).y > 0.9 and (results[1] as Vector3).y > 0.9, "the forearm points up when waving (%s, %s)" % results)
 	check((results[0] as Vector3).distance_to(results[1]) < 0.05, "same wave standing and sitting")
 	view.queue_free()
+
+
+## Every game emote the server can send plays on an avatar without error and
+## moves the arm away from the idle pose.
+func test_game_emotes() -> void:
+	var view := AvatarView.new()
+	add_child(view)
+	view.build(AvatarSpec.defaults())
+	var sk: Skeleton3D = view.find_children("*", "Skeleton3D", true, false)[0]
+	var poser: AvatarPoser = sk.find_children("*", "AvatarPoser", false, false)[0]
+	var hand := sk.find_bone("hand_r")
+	for k in 60:
+		view.animate(0.0, 1.0 / 30.0)
+	await poser.modification_processed
+	var idle := sk.get_bone_global_pose(hand).origin
+	for kind: String in Protocol.GAME_EMOTES:
+		check(AvatarView.EMOTE_SECONDS.has(kind), "%s has a duration" % kind)
+		view.play_emote(kind)
+		view.animate(0.0, 0.3)
+		await poser.modification_processed
+		var moved := sk.get_bone_global_pose(hand).origin.distance_to(idle)
+		check(moved > 0.02, "%s moves the hand (%.3f)" % [kind, moved])
+		for k in 120:
+			view.animate(0.0, 1.0 / 30.0)
+	view.queue_free()
+
+
+## Each code the group and minigame rules can send has a Turkish line.
+func test_group_notices_turkish() -> void:
+	for code in ["group_created", "group_joined", "group_joined_you", "group_left", "group_left_you",
+			"already_in_group", "not_in_group", "groups_full", "group_full", "target_in_group", "game_busy", "bad_target"]:
+		check(GameClient.NOTICES.has(code), "notice %s is translated" % code)
+	for kind: String in Protocol.REQUEST_KINDS:
+		check(GameClient.REQUEST_TEXT.has(kind), "request text for %s" % kind)
+
+
+## The same-target cooldown is per kind: inviting to a group right before a
+## game challenge is fine, repeating the same kind is not.
+func test_cooldown_per_kind() -> void:
+	var s := _rules({})
+	var fx := s.request(1, 2, "group", 0.0, 3.0, false)
+	s.respond(2, fx[0].args[0], true, 1.0)
+	fx = s.request(1, 2, "rps", 2.0, 3.0, false)
+	check(rpcs(fx, 2) == ["s_interaction_incoming"], "another kind is not on cooldown")
+	s.respond(2, fx[0].args[0], true, 3.0)
+	fx = s.request(1, 2, "rps", 4.0, 3.0, false)
+	check(rpcs(fx, 1) == ["notice:cooldown"], "the same kind is")
