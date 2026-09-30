@@ -1,11 +1,14 @@
 class_name CityMaterials
 extends RefCounted
-## Procedural surface shaders for the city. No texture files: patterns come
-## from world-space coordinates, so nothing stretches and the phone download
-## stays small. All shaders work in the Compatibility renderer (web, phones).
+## Procedural surface shaders for the city. Ground, roads and vegetation are
+## pure maths on world-space coordinates, so nothing stretches and the phone
+## download stays small; building walls and roofs also carry a few small CC0
+## photo textures (assets/textures, ambientCG, under 200 KB in total) that
+## only modulate the palette colours. All shaders work in the Compatibility
+## renderer (web, phones).
 ## `night` is a project-wide shader global driven by SkyController.
-## Every shader also compiles a LITE variant (one noise octave, no Voronoi)
-## that low-end phones switch to at runtime.
+## Every shader also compiles a LITE variant (one noise octave, no Voronoi,
+## no normal maps) that low-end phones switch to at runtime.
 
 const COMMON := """
 global uniform float wetness;
@@ -185,16 +188,37 @@ shader_type spatial;
 global uniform float night;
 uniform float floor_height = 3.1;
 uniform float bay_width = 3.0;
+uniform sampler2D tex_plaster : source_color, repeat_enable, filter_linear_mipmap;
+uniform sampler2D tex_brick : source_color, repeat_enable, filter_linear_mipmap;
+uniform sampler2D tex_stone : source_color, repeat_enable, filter_linear_mipmap;
+uniform sampler2D nrm_plaster : repeat_enable, filter_linear_mipmap;
+uniform sampler2D nrm_brick : repeat_enable, filter_linear_mipmap;
 varying vec4 v_color;
 varying vec2 v_info;
 varying vec3 wpos;
 %s
+// 1 inside (v < 0), 0 outside, with an anti-aliased edge `aa` wide.
+float edge_mask(float v, float aa) { return clamp(0.5 - v / aa, 0.0, 1.0); }
 void vertex() {
 	v_color = COLOR;
 	v_info = UV2;
 	wpos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+#ifndef LITE
+	// Tangent frame of the facade normal maps: U runs along the wall, V up
+	// it. Derived from the normal so the meshes carry no tangents.
+	vec3 t = cross(vec3(0.0, 1.0, 0.0), NORMAL);
+	t = length(t) > 0.01 ? normalize(t) : vec3(1.0, 0.0, 0.0);
+	TANGENT = t;
+	BINORMAL = cross(NORMAL, t);
+#endif
 }
 void fragment() {
+	// Vertex alpha: bit 3 = wall faces a street, bit 0 = shopfront, bits 1-2 = material.
+	float code = floor(v_color.a * 15.0 + 0.5);
+	float street = step(8.0, code);
+	code -= street * 8.0;
+	float shop_edge = mod(code, 2.0);
+	float mtl = floor(code * 0.5);
 	vec3 base = srgb(v_color.rgb);
 	// Quantise first: interpolated vertex colours differ by float noise per
 	// pixel, and a hash would turn that into speckles.
@@ -205,23 +229,92 @@ void fragment() {
 	float edge_len = v_info.y;
 	float bays = floor(edge_len / bay_width);
 	float u = UV.x - (edge_len - bays * bay_width) * 0.5;
-	float in_bays = step(0.0, u) * step(u, bays * bay_width) * step(1.0, bays) * step(up, top - 0.9);
+	float in_bays = step(0.0, u) * step(u, bays * bay_width) * step(1.0, bays) * step(up, top - 0.9) * step(0.0, up);
 	vec2 cell = vec2(fract(u / bay_width), fract(up / floor_height));
 	vec2 cell_id = vec2(floor(u / bay_width), floor(up / floor_height));
-	float shop = step(0.5, v_color.a) * (1.0 - step(0.5, cell_id.y));
-	// Window style varies per building: narrow, wide, or tall french doors.
-	float half_w = mix(0.19, 0.27, step(0.5, seed));
-	float low = mix(0.30, 0.10, step(0.66, fract(seed * 7.0)));
-	float high = mix(0.80, 0.86, seed);
-	float dx = abs(cell.x - 0.5);
-	float win = step(dx, half_w) * step(low, cell.y) * step(cell.y, high);
-	float frame = step(dx, half_w + 0.035) * step(low - 0.035, cell.y) * step(cell.y, high + 0.035) - win;
-	float sill = step(dx, half_w + 0.06) * step(low - 0.07, cell.y) * step(cell.y, low - 0.035);
-	float shop_win = step(dx, 0.45) * step(0.04, cell.y) * step(cell.y, 0.68);
-	float signboard = step(0.73, cell.y) * step(cell.y, 0.93) * step(dx, 0.49) * shop * in_bays;
-	win = mix(win, shop_win, shop) * in_bays;
-	float trim = clamp(frame + sill, 0.0, 1.0) * (1.0 - shop) * in_bays;
-	float band = (1.0 - step(0.035, cell.y)) * step(0.5, cell_id.y);
+	float ground = 1.0 - step(0.5, cell_id.y);
+	float shopf = shop_edge * ground;
+
+	// Facade material: the texture only modulates the vertex colour (which
+	// is the facade's average colour), so hues stay under the palette's control.
+	vec2 tuv = vec2(UV.x, -UV.y);
+	vec2 dux = dFdx(tuv);
+	vec2 duy = dFdy(tuv);
+	vec3 texel = vec3(1.0);
+	vec3 avg = vec3(1.0);
+	vec3 nm = vec3(0.5, 0.5, 1.0);
+	float nstr = 0.0;
+	if (mtl > 0.5 && mtl < 1.5) {
+		texel = textureGrad(tex_brick, tuv / 2.0, dux / 2.0, duy / 2.0).rgb;
+		avg = vec3(0.311, 0.198, 0.143);
+#ifndef LITE
+		nm = textureGrad(nrm_brick, tuv / 2.0, dux / 2.0, duy / 2.0).rgb;
+		nstr = 1.0;
+#endif
+	} else if (mtl > 1.5 && mtl < 2.5) {
+		texel = textureGrad(tex_stone, tuv / 3.0, dux / 3.0, duy / 3.0).rgb;
+		avg = vec3(0.700, 0.462, 0.273);
+	} else {
+		texel = textureGrad(tex_plaster, tuv / 2.5, dux / 2.5, duy / 2.5).rgb;
+		avg = vec3(0.696, 0.669, 0.640);
+#ifndef LITE
+		nm = textureGrad(nrm_plaster, tuv / 2.5, dux / 2.5, duy / 2.5).rgb;
+		nstr = 0.8;
+#endif
+	}
+	float lum_t = dot(texel, vec3(0.299, 0.587, 0.114));
+	float lum_a = dot(avg, vec3(0.299, 0.587, 0.114));
+	vec3 ratio = clamp(mix(vec3(lum_t / lum_a), texel / avg, 0.4), vec3(0.3), vec3(2.0));
+
+	// Openings. Sizes in metres from the floor: window style varies per
+	// building (narrow, wide, tall french doors); shopfronts are wide and
+	// low; every so often a bay of the ground floor is the entrance door.
+	float wide = step(0.5, seed);
+	float french = step(0.66, fract(seed * 7.0));
+	vec2 wm = vec2((cell.x - 0.5) * bay_width, cell.y * floor_height);
+	float sill_y = mix(0.93, 0.15, french);
+	float head_y = mix(2.45, 2.7, fract(seed * 3.7));
+	vec2 open_c = vec2(0.0, (sill_y + head_y) * 0.5);
+	vec2 open_h = vec2(mix(0.55, 0.8, wide), (head_y - sill_y) * 0.5);
+	float door_bay = floor(fract(seed * 5.31 + edge_len * 0.173) * bays);
+	float is_door = ground * street * (1.0 - shop_edge) * step(2.0, bays) * (1.0 - step(0.5, abs(cell_id.x - door_bay)));
+	french *= (1.0 - shopf) * (1.0 - is_door);
+	open_c = mix(open_c, vec2(0.0, 1.2), shopf);
+	open_h = mix(open_h, vec2(1.3, 0.9), shopf);
+	open_c = mix(open_c, vec2(0.0, 1.06), is_door);
+	open_h = mix(open_h, vec2(0.55, 1.06), is_door);
+	vec2 d = abs(wm - open_c) - open_h;
+	float sd = max(d.x, d.y);
+	float aa = fwidth(sd) * 1.2 + 0.002;
+	float inside = edge_mask(sd, aa) * in_bays;
+	float glass_m = edge_mask(sd + 0.07, aa) * in_bays;
+	float frame_m = inside - glass_m;
+	float ring_m = edge_mask(sd - 0.09, aa) * in_bays - inside;
+	// Sash bars: vertical ones split the opening, a transom cuts tall ones.
+	float nsash = mix(2.0 + wide, 3.0, shopf);
+	float fx = (wm.x - open_c.x + open_h.x) / (2.0 * open_h.x) * nsash;
+	float mull = 1.0 - smoothstep(0.0, 0.03 + aa, abs(fx - floor(fx + 0.5)) * (2.0 * open_h.x / nsash));
+	float has_transom = step(0.3, fract(seed * 9.1)) * (1.0 - is_door);
+	float transom = (1.0 - smoothstep(0.0, 0.025 + aa, abs(wm.y - (open_c.y + open_h.y * 0.45)))) * has_transom;
+	float bars = clamp(mull + transom, 0.0, 1.0) * (1.0 - is_door);
+	float win = glass_m * (1.0 - bars) * (1.0 - is_door);
+
+	// Sill slab under ordinary windows, a stone surround for the door.
+	float sill_m = edge_mask(abs(wm.x - open_c.x) - (open_h.x + 0.1), aa) * step(open_c.y - open_h.y - 0.12, wm.y)
+		* step(wm.y, open_c.y - open_h.y) * in_bays * (1.0 - french) * (1.0 - is_door) * (1.0 - shopf);
+	float surround = (edge_mask(sd - 0.16, aa) * in_bays - inside) * is_door;
+
+	// The recess: the inner face of the opening shows on the side away from
+	// the viewer and under the lintel; no parallax, just shading and a bevel.
+	vec3 nw = normalize((INV_VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz);
+	vec3 tw = normalize(cross(vec3(0.0, 1.0, 0.0), nw) + vec3(0.00001));
+	float side = dot(normalize((INV_VIEW_MATRIX * vec4(VIEW, 0.0)).xyz), tw);
+	float rx = wm.x - open_c.x;
+	float vis_side = step(0.0, -rx * side);
+	float top_side = step(0.0, wm.y - open_c.y);
+	float reveal = ring_m * mix(mix(0.12, 0.42, vis_side), 0.5, top_side);
+
+	float band = (1.0 - step(0.035, cell.y)) * step(0.5, cell_id.y) * step(0.5, fract(seed * 13.7));
 	float plinth = 1.0 - step(0.55, up);
 	float n = fbm(vec2(wpos.x + wpos.z, wpos.y) * 0.9);
 #ifdef LITE
@@ -229,38 +322,145 @@ void fragment() {
 #else
 	float grime = smoothstep(2.8, 0.0, up) * 0.16 + smoothstep(0.55, 0.9, fbm(vec2((wpos.x + wpos.z) * 2.5, wpos.y * 0.25))) * 0.2;
 #endif
-	vec3 wall = base * (0.86 + 0.22 * n) * (1.0 - grime);
+	// Rain streaks under every sill.
+	float streak = in_bays * step(abs(wm.x - open_c.x), open_h.x) * step(wm.y, open_c.y - open_h.y)
+		* smoothstep(1.1, 0.0, open_c.y - open_h.y - wm.y) * (1.0 - french) * (1.0 - is_door);
+	vec3 wall = base * ratio * (0.9 + 0.16 * n) * (1.0 - grime) * (1.0 - 0.07 * streak);
 	wall = mix(wall, wall * 0.8, band);
 	wall = mix(wall, srgb(vec3(0.40, 0.38, 0.36)) * (0.8 + 0.3 * n), plinth);
+	// Shopfront piers and fascia read darker than the storeys above.
+	wall = mix(wall, wall * 0.78, shopf * (1.0 - inside));
+	wall *= 1.0 - reveal;
+
 	float fres = pow(1.0 - clamp(dot(NORMAL, VIEW), 0.0, 1.0), 3.0);
 	vec3 glass = mix(srgb(vec3(0.10, 0.14, 0.18)), srgb(vec3(0.55, 0.66, 0.78)), 0.2 + fres * 0.6);
 	float r = hash12(cell_id + seed * 91.0);
-	float lit = step(0.55, r) * night + shop * night * 0.8;
+	// Curtains on some windows: a light cloth over the upper part of the glass.
+	float curtain = step(0.65, fract(r * 23.0)) * (1.0 - shopf) * smoothstep(open_c.y - open_h.y * 0.3, open_c.y + open_h.y * 0.1, wm.y);
+	vec3 cloth = srgb(mix(vec3(0.88, 0.82, 0.70), vec3(0.62, 0.68, 0.78), fract(r * 7.0)));
+	glass = mix(glass, cloth * 0.8, curtain * 0.85);
+	// Shade under the lintel and at the sides: the glass sits deep in the wall.
+	glass *= 1.0 - 0.5 * smoothstep(0.3, 0.0, open_c.y + open_h.y - wm.y) - 0.3 * smoothstep(0.2, 0.0, open_h.x - abs(wm.x - open_c.x));
+
+	float signboard = step(2.26, wm.y) * step(wm.y, 2.88) * step(abs(wm.x), 1.47) * shopf * in_bays;
+	float lit = step(0.55, r) * night + shopf * night * 0.8;
 	vec3 lamp = srgb(mix(vec3(1.0, 0.76, 0.42), vec3(0.92, 0.9, 0.84), fract(r * 13.0)));
+	lamp = mix(lamp, srgb(vec3(1.0, 0.86, 0.6)), curtain);
 	vec3 sign_col = srgb(vec3(fract(seed * 3.1), fract(seed * 5.7), fract(seed * 9.3)) * 0.65 + 0.25);
-	vec3 col = mix(wall, srgb(vec3(0.86, 0.86, 0.84)), trim);
+	vec3 frame_col = mix(srgb(vec3(0.92, 0.91, 0.88)), srgb(vec3(0.28, 0.20, 0.14)), step(0.7, fract(seed * 11.3)));
+	frame_col = mix(frame_col, srgb(vec3(0.16, 0.16, 0.17)), shopf);
+	vec3 door_col = mix(srgb(vec3(0.23, 0.16, 0.11)), srgb(vec3(0.12, 0.2, 0.15)), step(0.5, fract(seed * 17.3)));
+
+	vec3 col = wall;
+	col = mix(col, srgb(vec3(0.84, 0.82, 0.78)), max(sill_m, surround));
+	col = mix(col, glass, glass_m);
+	col = mix(col, frame_col, frame_m);
+	col = mix(col, frame_col, glass_m * bars);
+	col = mix(col, door_col, glass_m * is_door);
 	col = mix(col, sign_col, signboard);
-	col = mix(col, glass, win);
+	// Juliet railing over the french doors: top rail and thin bars.
+	float bar_x = 1.0 - smoothstep(0.0, 0.02 + aa, abs(fract(wm.x / 0.13 + 0.5) - 0.5) * 0.13);
+	float rail_area = step(abs(wm.x - open_c.x), open_h.x + 0.06) * step(0.22, wm.y) * step(wm.y, 1.0) * in_bays * french;
+	float rail_m = rail_area * clamp(step(0.94, wm.y) + bar_x * step(wm.y, 0.94), 0.0, 1.0);
+	col = mix(col, srgb(vec3(0.13, 0.14, 0.15)), rail_m);
+	float glass_face = win * (1.0 - rail_m);
+
+#ifndef LITE
+	// Facade relief from the normal map, plus a bevel around each opening
+	// and flat glass.
+	vec2 nxy = (nm.xy * 2.0 - 1.0) * nstr;
+	vec2 bev = d.x > d.y ? vec2(-sign(wm.x - open_c.x), 0.0) : vec2(0.0, -sign(wm.y - open_c.y));
+	nxy += bev * ring_m * 0.9;
+	nxy *= 1.0 - glass_m;
+	vec3 nn = normalize(vec3(nxy, max(nm.z * 2.0 - 1.0, 0.25)));
+	NORMAL_MAP = nn * 0.5 + 0.5;
+	NORMAL_MAP_DEPTH = 1.0;
+#endif
 	ALBEDO = col;
-	ROUGHNESS = mix(0.9, 0.1, win);
-	SPECULAR = mix(0.25, 0.85, win);
-	EMISSION = lamp * win * lit * 1.1 + sign_col * signboard * night * 0.9;
+	ROUGHNESS = mix(0.9, 0.1, glass_face);
+	SPECULAR = mix(0.25, 0.85, glass_face);
+	EMISSION = lamp * glass_face * lit * 1.1 + sign_col * signboard * night * 0.9;
 }
 """
 
 const ROOF := """
 shader_type spatial;
+uniform sampler2D tex_tiles : source_color, repeat_enable, filter_linear_mipmap;
+uniform sampler2D tex_flat : source_color, repeat_enable, filter_linear_mipmap;
+uniform sampler2D nrm_tiles : repeat_enable, filter_linear_mipmap;
+uniform sampler2D nrm_flat : repeat_enable, filter_linear_mipmap;
 varying vec3 wpos;
 varying vec3 tint;
+varying float surf;
 %s
-void vertex() { wpos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz; tint = COLOR.rgb; }
+void vertex() {
+	wpos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	tint = COLOR.rgb;
+	surf = COLOR.a;
+#ifndef LITE
+	vec3 t = cross(vec3(0.0, 1.0, 0.0), NORMAL);
+	t = length(t) > 0.01 ? normalize(t) : vec3(1.0, 0.0, 0.0);
+	TANGENT = t;
+	BINORMAL = cross(NORMAL, t);
+#endif
+}
+// Vertex alpha picks the surface: 0 flat roof (asphalt, world-space texture),
+// 1 clay tiles, 2 metal sheet, 3 plaster, 4 brick (chimneys).
 void fragment() {
+	float kind = floor(surf * 15.0 + 0.5);
+	vec3 base = srgb(tint);
 	vec2 p = wpos.xz;
-	float n = fbm(p * 0.7) * 0.5 + hash12(floor(p * 12.0)) * 0.12;
+	vec2 tc = kind < 0.5 ? p : vec2(UV.x, -UV.y);
+	vec2 dcx = dFdx(tc);
+	vec2 dcy = dFdy(tc);
 	float stain = smoothstep(0.55, 0.8, fbm(p * 0.2 + 11.0));
-	vec3 col = srgb(tint) * (0.75 + n) * (1.0 - stain * 0.35);
+	float n = fbm(p * 0.7);
+	vec3 col = base;
+	vec3 nm = vec3(0.5, 0.5, 1.0);
+	float nstr = 0.0;
 	float rough = 0.95;
+	if (kind < 0.5) {
+		vec3 texel = textureGrad(tex_flat, tc / 3.0, dcx / 3.0, dcy / 3.0).rgb;
+		float ratio = dot(texel, vec3(0.299, 0.587, 0.114)) / 0.19;
+		col = base * clamp(ratio, 0.3, 2.0) * (0.8 + 0.4 * n) * (1.0 - stain * 0.35);
+#ifndef LITE
+		nm = textureGrad(nrm_flat, tc / 3.0, dcx / 3.0, dcy / 3.0).rgb;
+		nstr = 0.6;
+#endif
+	} else if (kind < 1.5) {
+		vec3 texel = textureGrad(tex_tiles, tc / 2.4, dcx / 2.4, dcy / 2.4).rgb;
+		vec3 avg = vec3(0.382, 0.118, 0.063);
+		float lum_t = dot(texel, vec3(0.299, 0.587, 0.114));
+		float lum_a = dot(avg, vec3(0.299, 0.587, 0.114));
+		vec3 ratio = clamp(mix(vec3(lum_t / lum_a), texel / avg, 0.35), vec3(0.3), vec3(2.0));
+		// Every tile is a little different, and the old ones grow dark patches.
+		float per_tile = 0.86 + 0.28 * hash12(floor(tc / 0.2));
+		col = base * ratio * per_tile * (0.85 + 0.3 * n) * (1.0 - stain * 0.3);
+#ifndef LITE
+		nm = textureGrad(nrm_tiles, tc / 2.4, dcx / 2.4, dcy / 2.4).rgb;
+		nstr = 1.0;
+#endif
+	} else if (kind < 2.5) {
+		// Standing-seam sheet metal: a seam every 55 cm.
+		float seam = 1.0 - smoothstep(0.0, 0.03, abs(fract(UV.x / 0.55) - 0.5) - 0.47);
+		col = base * (0.85 + 0.25 * n) * (1.0 - 0.25 * seam) * (1.0 - stain * 0.2);
+		rough = 0.5;
+	} else if (kind < 3.5) {
+		col = base * (0.85 + 0.3 * n);
+	} else {
+		vec2 bq = vec2(UV.x / 0.24, -UV.y / 0.075);
+		bq.x += step(1.0, mod(floor(bq.y), 2.0)) * 0.5;
+		vec2 bf = fract(bq);
+		float body = step(0.06, bf.x) * step(0.14, bf.y);
+		vec3 mortar = srgb(vec3(0.62, 0.6, 0.56));
+		col = mix(mortar, base * (0.8 + 0.4 * hash12(floor(bq))), body);
+	}
 	weather(col, rough, 0.8);
+#ifndef LITE
+	vec2 nxy = (nm.xy * 2.0 - 1.0) * nstr;
+	NORMAL_MAP = normalize(vec3(nxy, max(nm.z * 2.0 - 1.0, 0.25))) * 0.5 + 0.5;
+	NORMAL_MAP_DEPTH = 1.0;
+#endif
 	ALBEDO = col;
 	ROUGHNESS = rough;
 }
@@ -379,6 +579,19 @@ void fragment() {
 #endif
 """
 
+## Shader key -> {sampler uniform: file under assets/textures}. Albedo maps
+## are 256-512 px JPEGs, normals RGB (no RG packing) so ETC2/ASTC/S3TC all read them.
+const TEXTURES := {
+	"walls": {
+		"tex_plaster": "facade_plaster_albedo", "tex_brick": "facade_brick_albedo", "tex_stone": "facade_stone_albedo",
+		"nrm_plaster": "facade_plaster_normal", "nrm_brick": "facade_brick_normal",
+	},
+	"roof": {
+		"tex_tiles": "roof_tiles_albedo", "tex_flat": "roof_flat_albedo",
+		"nrm_tiles": "roof_tiles_normal", "nrm_flat": "roof_flat_normal",
+	},
+}
+
 static var _cache := {}
 static var _variants := {}  # key -> [full Shader, lite Shader]
 static var lite := false
@@ -401,6 +614,8 @@ static func get_shader(key: String) -> ShaderMaterial:
 	_variants[key] = [full, cheap]
 	var mat := ShaderMaterial.new()
 	mat.shader = cheap if lite else full
+	for uniform_name in TEXTURES.get(key, {}):
+		mat.set_shader_parameter(uniform_name, load("res://assets/textures/%s.jpg" % TEXTURES[key][uniform_name]))
 	_cache[key] = mat
 	return mat
 
