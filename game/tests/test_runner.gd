@@ -17,6 +17,7 @@ func _ready() -> void:
 		test_crowd_view_pool, test_terrain, test_bench_sitting, test_knockdown, test_stamina, test_limp, test_ball_kick, test_poser_arm,
 		test_coastline, test_coast_sea_blocking, test_weather_wave_mapping, test_tree_road_grid,
 		test_transit_network, test_transit_timetable, test_walking_routes, test_route_prefers_tram,
+		test_building_style, test_roof_geometry, test_nostalgic_tram_model,
 	]
 	for t in tests:
 		_test = t.get_method()
@@ -1211,3 +1212,145 @@ func test_poser_arm() -> void:
 	check((results[0] as Vector3).y > 0.9 and (results[1] as Vector3).y > 0.9, "the forearm points up when waving (%s, %s)" % results)
 	check((results[0] as Vector3).distance_to(results[1]) < 0.05, "same wave standing and sitting")
 	view.queue_free()
+
+
+# --- building looks ---------------------------------------------------------------
+
+func _footprints(limit: int) -> Array:
+	var zone := ZoneData.load_zone("tr_istanbul_kadikoy_001")
+	var out := []
+	for b in zone.buildings:
+		var poly := WorldBuilder.footprint_xz(b.footprint)
+		if poly.size() < 3:
+			continue
+		out.append([b, poly])
+		if out.size() >= limit:
+			break
+	return out
+
+
+func test_building_style() -> void:
+	var pitched := 0
+	var flat := 0
+	var counts := {}
+	for entry in _footprints(1500):
+		var b: Dictionary = entry[0]
+		var poly: PackedVector2Array = entry[1]
+		var key := str(b.id)
+		var kind := str(b.kind)
+		var top := float(b.height)
+		var bottom := float(b.min_height)
+		var box := BuildingStyle.obb(poly)
+		var area := BuildingStyle.polygon_area(poly)
+		var r1 := BuildingStyle.roof(b, key, kind, top, bottom, box, area)
+		var r2 := BuildingStyle.roof(b, key, kind, top, bottom, box, area)
+		check(r1 == r2, "roof choice is deterministic for " + key)
+		check(BuildingStyle.facade_material(b, key, kind, top) == BuildingStyle.facade_material(b, key, kind, top),
+			"material is deterministic")
+		var material := BuildingStyle.facade_material(b, key, kind, top)
+		counts[material] = int(counts.get(material, 0)) + 1
+		var alpha := BuildingStyle.wall_alpha(material, true, true)
+		check(int(round(alpha * 15.0)) == material * 2 + 1 + 8, "wall alpha carries material, shop and street bits")
+		if r1.shape == BuildingStyle.HIPPED or r1.shape == BuildingStyle.GABLED:
+			pitched += 1
+			check(float(r1.rise) > 0.5 and float(r1.rise) < 8.1, "roof rise is plausible")
+			check(bottom < 0.1, "no pitched roof on a building part above ground")
+		else:
+			flat += 1
+		for prop in BuildingStyle.roof_props(key, poly, box, str(r1.shape), top, area):
+			if str(prop.kind) == "chimney":
+				check(absf((prop.at as Vector2).x) <= float(box.hl) and absf((prop.at as Vector2).y) <= float(box.hw),
+					"chimney inside the roof rectangle")
+			else:
+				check(Geometry2D.is_point_in_polygon(prop.at, poly), "roof prop inside the footprint")
+	check(pitched > 100 and flat > 100, "both pitched and flat roofs occur (%d/%d)" % [pitched, flat])
+	check(counts.size() >= 3, "several facade materials are used")
+	# Tags win over the hash.
+	var tagged := {"material": "brick", "roof": "gabled", "colour": "#aa5533", "roof_colour": "#334455"}
+	check(BuildingStyle.facade_material(tagged, "x", "generic", 10.0) == BuildingStyle.MAT_BRICK, "OSM material wins")
+	var box := BuildingStyle.obb(PackedVector2Array([Vector2(0, 0), Vector2(14, 0), Vector2(14, 9), Vector2(0, 9)]))
+	var roof := BuildingStyle.roof(tagged, "x", "generic", 10.0, 0.0, box, 126.0)
+	check(roof.shape == BuildingStyle.GABLED and roof.colour == Color("#334455"), "OSM roof shape and colour win")
+	var dome := BuildingStyle.roof({"type": "mosque"}, "m", "religious", 12.0, 0.0,
+		BuildingStyle.obb(PackedVector2Array([Vector2(0, 0), Vector2(20, 0), Vector2(20, 20), Vector2(0, 20)])), 400.0)
+	check(dome.shape == BuildingStyle.DOME, "a mosque gets a dome")
+
+
+func test_roof_geometry() -> void:
+	var poly := PackedVector2Array([Vector2(0, 0), Vector2(14, 0), Vector2(14, 8), Vector2(0, 8)])
+	var box := BuildingStyle.obb(poly)
+	near(float(box.hl), 7.0, 0.01, "half length")
+	near(float(box.hw), 4.0, 0.01, "half width")
+	for shape in [BuildingStyle.GABLED, BuildingStyle.HIPPED]:
+		# Wall tops meet the roof plane along every edge.
+		for i in 4:
+			var p0 := poly[i]
+			var p1 := poly[(i + 1) % 4]
+			var tops := RoofBuilder.wall_top(p0, p1, box, shape, 2.5)
+			check(tops.size() >= 2, "wall top has end points")
+			for t in tops:
+				var q := p0.lerp(p1, float(t[0]))
+				var local := Vector2((q - (box.c as Vector2)).dot(box.u), (q - (box.c as Vector2)).dot(box.v))
+				near(float(t[1]), maxf(RoofBuilder.height_at(shape, float(box.hl), float(box.hw), 2.5, local.x, local.y), 0.0), 1e-4,
+					"wall top follows the roof plane")
+		# Ridge height at the middle of the roof equals the rise.
+		near(RoofBuilder.height_at(shape, 7.0, 4.0, 2.5, 0.0, 0.0), 2.5, 1e-4, "ridge height is the rise")
+		near(RoofBuilder.height_at(shape, 7.0, 4.0, 2.5, 0.0, 4.0), 0.0, 1e-4, "eave height is zero")
+		# Vertex budget of one roof with eaves, soffit and fascia.
+		var st := SurfaceTool.new()
+		st.begin(Mesh.PRIMITIVE_TRIANGLES)
+		RoofBuilder.emit_pitched(st, box, shape, 2.5, 10.0, Color("b9593b"), BuildingStyle.SURF_TILES)
+		st.index()
+		var mesh := st.commit()
+		var verts: PackedVector3Array = mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+		check(verts.size() > 0 and verts.size() <= 160, "a pitched roof stays within its vertex budget (%d)" % verts.size())
+	# Landmarks stay light too.
+	var dst := SurfaceTool.new()
+	dst.begin(Mesh.PRIMITIVE_TRIANGLES)
+	RoofBuilder.emit_dome(dst, Vector2(5, 5), 6.0, 10.0, Color("efe8dc"), Color("8d979d"))
+	var dome_mesh := dst.commit()
+	var dome_verts: PackedVector3Array = dome_mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+	check(dome_verts.size() > 0 and dome_verts.size() <= 700, "a dome stays within its vertex budget (%d)" % dome_verts.size())
+	var wst := SurfaceTool.new()
+	wst.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var rst := SurfaceTool.new()
+	rst.begin(Mesh.PRIMITIVE_TRIANGLES)
+	RoofBuilder.emit_minaret(wst, rst, Vector2.ZERO, 0.0, 30.0, Color("efe8dc"), Color("8d979d"))
+	var m1 := wst.commit()
+	var m2 := rst.commit()
+	var mv: PackedVector3Array = m1.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+	var cv: PackedVector3Array = m2.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+	check(mv.size() + cv.size() > 0 and mv.size() + cv.size() <= 500, "a minaret stays within its vertex budget (%d)" % (mv.size() + cv.size()))
+
+
+func test_nostalgic_tram_model() -> void:
+	var zone := ZoneData.load_zone("tr_istanbul_kadikoy_001")
+	var fleet := TramFleet.new()
+	fleet.setup(zone.transit, zone.half_size())
+	var checked := 0
+	for veh in fleet.vehicle_nodes():
+		if (zone.transit.lines[veh.line] as TransitNetwork.TransitLine).vehicle_type != "nostalgic":
+			continue
+		checked += 1
+		var section: Node3D = veh.sections[0]
+		var verts := 0
+		var names := {}
+		var far_only := 0
+		for child in section.get_children():
+			if child is MeshInstance3D:
+				var mi := child as MeshInstance3D
+				check(not names.has(mi.name), "one merged mesh per part type (%s)" % mi.name)
+				names[mi.name] = true
+				var box := mi.mesh.get_aabb()
+				check(box.size.x <= 2.5 and box.size.z <= 11.0, "the model fits the collision box (%s)" % str(box.size))
+				if mi.visibility_range_begin > 0.0:
+					far_only += 1
+					check(mi.mesh.get_faces().size() <= 100 * 3, "the distant stand-in is a simple box")
+				else:
+					verts += mi.mesh.get_faces().size()
+		check(names.has("body") and names.has("glass") and names.has("interior") and names.has("lights"), "the car has body, glazing, interior and lamps")
+		check(far_only >= 1, "a simple box takes over at a distance")
+		check(verts > 600 and verts <= 30000, "the detailed car stays within its vertex budget (%d)" % verts)
+	check(checked >= 1, "the fleet has a nostalgic car")
+	check(TramFleet._tr_upper("Kadıköy – Moda") == "KADIKÖY – MODA", "the destination board is uppercase Turkish")
+	fleet.free()
