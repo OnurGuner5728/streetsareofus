@@ -810,6 +810,7 @@ func on_group_create(peer: int, group_name: String) -> void:
 func on_group_leave(peer: int) -> void:
 	if players.has(peer):
 		_dispatch(groups.leave(peer))
+		log_line("group: %s left (%d groups)" % [_name_of(peer), groups.groups.size()])
 
 
 func on_group_chat(peer: int, text: String) -> void:

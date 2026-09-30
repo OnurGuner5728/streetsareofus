@@ -10,6 +10,9 @@ extends RefCounted
 ## the next stop and gets off; exercises routing and the tram rules.
 ## block_test (social): after the chat, blocks the partner, opens the
 ## blocked list and unblocks them again.
+## group_test (social, two bots): the one whose name sorts first invites the
+## other to a group; both chat in the group, play a rock-paper-scissors match
+## and a hand-slap match, then leave the group.
 
 var mode := "wander"
 var rng := RandomNumberGenerator.new()
@@ -28,6 +31,11 @@ var block_test := false
 var _saw_props := false
 var _block_phase := ""
 var _block_at := 0.0
+var group_test := false
+var _gt := ""  # group test progress: "", "grouped", "playing", "leaving", "done"
+var _due: Array = []  # [{at, act}]: things to do a little later
+var _game_key := ""
+var _game_at := 0.0
 
 
 func _init(bot_mode: String, seed_value: int) -> void:
@@ -38,6 +46,9 @@ func _init(bot_mode: String, seed_value: int) -> void:
 
 ## Returns movement for this tick: {mx, my, yaw, buttons}.
 func think(client: GameClient, now: float) -> Dictionary:
+	if group_test:
+		_run_due(client, now)
+		_game_tick(client, now)
 	if mode == "commuter":
 		return _commute_tick(client)
 	if mode == "idle":
@@ -77,6 +88,9 @@ func _social_tick(client: GameClient) -> void:
 			_block_phase = "blocked"
 			_block_at = GameClient.now()
 			client.block_player(int(client.conversations.keys()[0]))
+		elif group_test and _gt == "" and _is_leader(client):
+			_gt = "inviting"
+			client.request_interaction(int(client.conversations.keys()[0]), "group")
 		return
 	if _block_phase == "blocked" and GameClient.now() - _block_at > 3.0:
 		_block_phase = "listed"
@@ -87,6 +101,87 @@ func _social_tick(client: GameClient) -> void:
 	var target := client.nearest_remote(Protocol.INTERACTION_RANGE - 0.5)
 	if target > 0:
 		client.request_talk(target)
+
+
+## The bot whose name sorts first drives the group test.
+func _is_leader(client: GameClient) -> bool:
+	if client.conversations.is_empty():
+		return false
+	return client.display_name < client._name_of(int(client.conversations.keys()[0]))
+
+
+func _later(seconds: float, act: String) -> void:
+	_due.append({"at": GameClient.now() + seconds, "act": act})
+
+
+func _run_due(client: GameClient, now: float) -> void:
+	var i := 0
+	while i < _due.size():
+		if now < float(_due[i].at):
+			i += 1
+			continue
+		var act := str(_due[i].act)
+		_due.remove_at(i)
+		var other := int(client.conversations.keys()[0]) if not client.conversations.is_empty() else -1
+		match act:
+			"group_chat":
+				client.send_group_chat("grup merhaba, ben %s" % client.display_name)
+			"request_rps":
+				if other > 0:
+					client.request_interaction(other, "rps")
+			"request_slap":
+				if other > 0:
+					client.request_interaction(other, "slap")
+			"leave_group":
+				client.group_leave()
+
+
+## Plays whatever match is running: picks after a human-ish delay, presses on
+## the cue (the top player slaps, the bottom one pulls away).
+func _game_tick(client: GameClient, now: float) -> void:
+	if not client.game_active():
+		_game_key = ""
+		return
+	var g: Dictionary = client.game
+	var key := "%s:%d:%s" % [g.kind, int(g.round), g.phase]
+	if key != _game_key:
+		_game_key = key
+		_game_at = now + rng.randf_range(0.2, 0.5)
+	if now < _game_at:
+		return
+	if g.kind == "rps" and str(g.phase) in ["count", "pick"] and int(g.pick) < 0:
+		client.game_pick(rng.randi() % 3)
+	elif g.kind == "slap" and str(g.phase) == "go" and not bool(g.pressed):
+		client.game_press()
+
+
+func on_group(client: GameClient) -> void:
+	if not group_test:
+		return
+	if not client.group.is_empty() and _gt in ["", "inviting"]:
+		_gt = "grouped"
+		_later(0.5, "group_chat")
+	elif client.group.is_empty() and _gt == "leaving":
+		_gt = "done"
+		client.log_line("group test complete")
+
+
+func on_group_chat(client: GameClient, from_id: int, _text: String) -> void:
+	# The leader starts the games once the other one has spoken in the group.
+	if group_test and from_id != client.my_id and _gt == "grouped" and _is_leader(client):
+		_gt = "playing"
+		_later(0.5, "request_rps")
+
+
+func on_game(client: GameClient, event: Dictionary) -> void:
+	if not group_test or str(event.get("ev", "")) != "end":
+		return
+	if str(event.get("kind", "")) == "rps":
+		if _is_leader(client):
+			_later(1.0, "request_slap")
+	elif _gt in ["grouped", "playing"]:
+		_gt = "leaving"
+		_later(1.0 if not _is_leader(client) else 3.0, "leave_group")
 
 
 func on_blocked_list(client: GameClient, list: Array) -> void:

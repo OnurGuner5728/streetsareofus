@@ -86,8 +86,25 @@ func _buttons() -> Array:
 		list.append({"id": "sit", "label": "Otur", "pos": Vector2(w - 62, h - 170), "r": 34.0, "tint": Color("8a6d4b")})
 	if not _context.get("seated", false):
 		list.append({"id": "dance", "label": "Dans", "pos": Vector2(w - 300, h - 50), "r": 26.0})
-	if _context.get("in_conversation", false):
+	if _context.get("in_conversation", false) or _context.get("in_group", false):
 		list.append({"id": "chat", "label": "Yaz", "pos": Vector2(w - 228, h - 130), "r": 30.0, "tint": Color("2f9e6f")})
+	# The group button wears the group's colour once you are in one.
+	var in_group: bool = _context.get("in_group", false)
+	list.append({"id": "group", "label": "Grup", "pos": Vector2(w - 168, 40), "r": 26.0,
+		"tint": _context.get("group_tint", Color("2e86de")) if in_group else Color(0, 0, 0)})
+	var game_kind: String = _context.get("game", "")
+	if game_kind != "":
+		list.append({"id": "game_quit", "label": "Bırak", "pos": Vector2(w - 232, 40), "r": 26.0, "tint": Color("c0392b")})
+	if game_kind == "rps":
+		var picked: int = _context.get("game_pick", -1)
+		var names := ["Taş", "Kâğıt", "Makas"]
+		for i in 3:
+			list.append({"id": "rps%d" % i, "label": names[i], "pos": Vector2(w / 2.0 - 100 + 80 * i, h - 60), "r": 34.0,
+				"tint": Color("2e86de"), "on": picked == i})
+	elif game_kind == "slap":
+		var top: bool = _context.get("game_role", "") == "top"
+		list.append({"id": "slap", "label": "VUR!" if top else "ÇEK!", "pos": Vector2(w / 2.0, h - 70), "r": 52.0,
+			"tint": Color("c0392b") if top else Color("2f9e6f")})
 	var tram_label: String = _context.get("tram_label", "")
 	if tram_label != "":
 		list.append({"id": "tram", "label": tram_label, "pos": Vector2(w - 240, h - 205), "r": 32.0,

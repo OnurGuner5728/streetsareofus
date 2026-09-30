@@ -48,6 +48,9 @@ const SKIN_REFERENCE := Color(0.665, 0.467, 0.323)
 ## Natural ground speed of the in-place loops (m/s), for foot-matched playback.
 const CLIP_SPEED := {"walk": 1.25, "jog": 3.4, "sprint": 6.0}
 const GETUP_SECONDS := 1.0
+## How long each emote pose lasts (default 0.9 s); the minigame poses come
+## from the server (shake: 3 pumps of the countdown, signs held at the reveal).
+const EMOTE_SECONDS := {"wave": 1.6, "shake": 2.4, "rock": 2.2, "paper": 2.2, "scissors": 2.2, "slap": 0.9, "dodge": 0.9}
 const CAST_COLOR := Color(0.95, 0.95, 0.93)
 const SLING_COLOR := Color(0.34, 0.48, 0.72)
 const FACE_SCALE := {"oval": Vector3(0.97, 1.02, 1.0), "round": Vector3(1.04, 0.97, 1.0),
@@ -60,6 +63,8 @@ var avatar := {}
 var visual_height := 1.7
 var detail := true
 var talking := false
+## Head turn towards whoever is speaking (radians, + to the character's left).
+var gaze_yaw := 0.0
 var sitting := false
 var knocked := false  # lying on the ground
 var winded := false
@@ -608,19 +613,25 @@ func animate(speed: float, delta: float, pitch := 0.0, air := false) -> void:
 	if _clip == "walk" and _anim.current_animation_length > 0.0:
 		_poser.limp_phase = _anim.current_animation_position / _anim.current_animation_length
 	_poser.hold_arm = move_toward(_poser.hold_arm, 1.0 if injury == "arm" and upright else 0.0, delta * 3.0)
+	_poser.look_yaw = lerpf(_poser.look_yaw, gaze_yaw, minf(1.0, delta * 6.0))
 	if _emote_left > 0.0:
 		_emote_left -= delta
-		var total := 1.6 if _emote == "wave" else 0.9
+		var total := float(EMOTE_SECONDS.get(_emote, 0.9))
 		var fade := clampf(minf(_emote_left, total - _emote_left) * 5.0, 0.0, 1.0)
 		if _emote == "wave":
 			_poser.wave = fade
 			_poser.wave_time += delta
+		elif Protocol.GAME_EMOTES.has(_emote):
+			_poser.game = _emote
+			_poser.game_blend = fade
+			_poser.game_time += delta
 		else:
 			_poser.nod = fade
 			_poser.nod_time += delta
 	else:
 		_poser.wave = 0.0
 		_poser.nod = 0.0
+		_poser.game_blend = 0.0
 
 
 func _play(clip: String, blend: float) -> void:
@@ -633,7 +644,8 @@ func play_emote(kind: String) -> void:
 		_dance_left = 8.0
 		return
 	_emote = kind
-	_emote_left = 1.6 if kind == "wave" else 0.9
+	_emote_left = float(EMOTE_SECONDS.get(kind, 0.9))
 	if _poser:
 		_poser.wave_time = 0.0
 		_poser.nod_time = 0.0
+		_poser.game_time = 0.0

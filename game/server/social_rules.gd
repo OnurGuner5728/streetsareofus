@@ -20,7 +20,7 @@ extends RefCounted
 var requests := {}  # request_id -> {id, from, to, kind, expires, declined}
 var conversations := {}  # "a:b" (a < b) -> {a, b, lines: []}
 var _next_request_id := 1
-var _last_request_at := {}  # "from>to" -> time
+var _last_request_at := {}  # "from>to" + kind -> time
 var _refusals := {}  # "from>to" -> {count, until}
 var _chat_tokens := {}  # peer -> {tokens, at}
 var _emote_at := {}  # peer -> time
@@ -68,7 +68,7 @@ func request(from: int, to: int, kind: String, now: float, distance: float, requ
 	var refusal: Dictionary = _refusals.get(pair, {})
 	if now < float(refusal.get("until", 0.0)):
 		return [_notice(from, "cooldown")]
-	if now - float(_last_request_at.get(pair, -INF)) < Protocol.SAME_TARGET_COOLDOWN:
+	if now - float(_last_request_at.get(pair + kind, -INF)) < Protocol.SAME_TARGET_COOLDOWN:
 		return [_notice(from, "cooldown")]
 	var incoming := 0
 	for r in requests.values():
@@ -76,7 +76,7 @@ func request(from: int, to: int, kind: String, now: float, distance: float, requ
 			return [_notice(from, "request_pending")]
 		if r.to == to:
 			incoming += 1
-	_last_request_at[pair] = now
+	_last_request_at[pair + kind] = now
 
 	var id := _next_request_id
 	_next_request_id += 1

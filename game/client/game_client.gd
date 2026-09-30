@@ -19,7 +19,7 @@ const VOLUMES := {"on": 0.0, "low": -10.0, "off": -80.0}
 const VOLUME_NAMES := {"on": "Açık", "low": "Kısık", "off": "Kapalı"}
 
 const NOTICES := {
-	"too_far": "Konuşma isteği için daha yakına gel (4 m).",
+	"too_far": "İstek için daha yakına gel (4 m).",
 	"cooldown": "Biraz bekle; aynı kişiye hemen tekrar istek gönderemezsin.",
 	"request_pending": "Zaten yanıt bekleyen bir isteğin var.",
 	"already_talking": "Zaten sohbettesiniz.",
@@ -39,7 +39,33 @@ const NOTICES := {
 	"treat_dressed": "Eczacı pansuman yaptı. Daha çabuk iyileşeceksin.",
 	"treat_again": "Eczacı elinden geleni yaptı; gerisi zamana kalmış.",
 	"treat_doctor": "Doktor tedavi etti; iyileştin.",
+	"game_busy": "Bu kişi ya da sen zaten bir oyundasınız.",
+	"group_created": "%s grubu kuruldu.",
+	"group_joined": "%s gruba katıldı.",
+	"group_joined_you": "%s grubuna katıldın.",
+	"group_left": "%s gruptan ayrıldı.",
+	"group_left_you": "%s grubundan ayrıldın.",
+	"already_in_group": "Zaten bir grupta.",
+	"not_in_group": "Bir grupta değilsin.",
+	"groups_full": "Şu an yeni grup kurulamıyor; tüm renkler dolu.",
+	"group_full": "Grup dolu (en fazla 8 kişi).",
+	"target_in_group": "Bu kişi başka bir grupta.",
+	"bad_target": "Geçersiz hedef.",
 }
+## What a request asks for, in the prompt shown to the other person.
+const REQUEST_TEXT := {
+	"talk": "seninle konuşmak istiyor",
+	"group": "seni gruba davet ediyor",
+	"rps": "seninle taş kâğıt makas oynamak istiyor",
+	"slap": "seninle el kızartmaca oynamak istiyor",
+}
+## Game names as spoken in notices.
+const GAME_NAMES := {"rps": "Taş kâğıt makas", "slap": "El kızartmaca"}
+const RPS_NAMES := ["Taş", "Kâğıt", "Makas"]
+## Seconds a finished game's result stays on screen.
+const GAME_RESULT_SECONDS := 3.5
+## How fast you turn to face your opponent (per second, exponential).
+const FACE_TURN_RATE := 9.0
 ## Your injury on the HUD (with the time left), and the news when it happens.
 const INJURY_LINES := {"bruise": "Başında bir morluk var", "arm": "Sol kolun alçıda", "leg": "Bacağın alçıda, topallıyorsun"}
 const INJURY_NEWS := {"bruise": "Tramvay çarptı! Başın morardı; birkaç dakikada geçer.",
@@ -90,6 +116,11 @@ var conversations := {}  # other id -> true
 var incoming := {}  # request id -> {from, expires}
 var outgoing_request := -1
 var muted := {}  # id -> true, local only
+var group := {}  # {id, name, color, members: [{id, name}]}, empty when in none
+var group_marks := {}  # peer id -> palette index, everyone in a group
+## The minigame you are in (see on_game): {match, kind, opp, opp_name, wins,
+## rounds, round, score, phase, role, pick, opp_ready, face_until, ...}.
+var game := {}
 
 var _eye_height := 1.6
 var _input_seq := 0
@@ -130,6 +161,9 @@ var _cam_dist := 0.0
 var _cam_zoom := 1.0
 var _self_view: AvatarView  # you, seen from behind or in the wardrobe
 var _fallen_yaw := 0.0  # which way you face while knocked down
+var _self_speak_left := 0.0  # your own avatar talks for a moment after each line
+var _self_gaze_id := 0  # the last one who spoke in your circle: your head follows
+var _self_gaze_left := 0.0
 var _wardrobe_open := false
 var volume := "on"
 var _seat_yaw := 0.0
@@ -157,6 +191,7 @@ func start(opts: Dictionary) -> void:
 	if str(opts.get("bot", "")) != "":
 		bot = BotBrain.new(str(opts.bot), hash(display_name))
 		bot.block_test = opts.has("block_test")
+		bot.group_test = opts.has("group_test")
 	Net.client = self
 	multiplayer.connected_to_server.connect(_on_connected)
 	multiplayer.connection_failed.connect(_on_connection_failed)
@@ -334,6 +369,9 @@ func on_welcome(info: Dictionary) -> void:
 			hud = GameHud.new()
 			add_child(hud)
 			hud.chat_submitted.connect(send_chat)
+			hud.group_chat_submitted.connect(send_group_chat)
+			hud.group_action.connect(_on_group_action)
+			hud.group_closed.connect(_on_group_panel_closed)
 			hud.resume_requested.connect(_set_paused.bind(false))
 			hud.disconnect_requested.connect(_finish.bind("Bağlantı kesildi."))
 			hud.person_action.connect(_on_person_action)
@@ -453,6 +491,7 @@ func on_entity_enter(id: int, info: Dictionary) -> void:
 	r.setup(id, info)
 	r.set_conversation(conversations.has(id))
 	r.set_muted(muted.has(id))
+	r.set_group(int(group_marks.get(id, -1)), _group_name_of(id))
 	remotes[id] = r
 	log_line("sees %s (%d)" % [r.display_name, id])
 
@@ -475,13 +514,13 @@ func on_avatar(id: int, new_avatar: Dictionary) -> void:
 		remotes[id].set_avatar(new_avatar)
 
 
-func on_interaction_incoming(request_id: int, from_id: int, _kind: String) -> void:
+func on_interaction_incoming(request_id: int, from_id: int, kind: String) -> void:
 	if muted.has(from_id):
 		return  # muted players' requests are silently ignored
-	incoming[request_id] = {"from": from_id, "expires": now() + Protocol.REQUEST_TIMEOUT}
+	incoming[request_id] = {"from": from_id, "kind": kind, "expires": now() + Protocol.REQUEST_TIMEOUT}
 	if sounds:
 		sounds.chime()
-	log_line("incoming request %d from %s" % [request_id, _name_of(from_id)])
+	log_line("incoming %s request %d from %s" % [kind, request_id, _name_of(from_id)])
 	if bot:
 		bot.on_incoming(self, request_id, from_id)
 
@@ -507,8 +546,14 @@ func on_conversation_open(other_id: int) -> void:
 		remotes[other_id].set_conversation(true)
 	log_line("conversation open with %s" % _name_of(other_id))
 	if hud:
-		hud.add_system_line("%s ile sohbet başladı." % _name_of(other_id))
-		hud.notice("%s ile sohbet başladı. %s" % [_name_of(other_id), "Yazmak için Yaz'a dokun." if touch else "Yazmak için Enter."])
+		# Three or more people can share one circle: the later arrivals join
+		# a conversation that is already going.
+		if conversations.size() > 1:
+			hud.add_system_line("%s sohbete katıldı." % _name_of(other_id))
+			hud.notice("%s sohbete katıldı." % _name_of(other_id))
+		else:
+			hud.add_system_line("%s ile sohbet başladı." % _name_of(other_id))
+			hud.notice("%s ile sohbet başladı. %s" % [_name_of(other_id), "Yazmak için Yaz'a dokun." if touch else "Yazmak için Enter."])
 
 
 func on_conversation_close(other_id: int, reason: String) -> void:
@@ -517,18 +562,50 @@ func on_conversation_close(other_id: int, reason: String) -> void:
 		remotes[other_id].set_conversation(false)
 	log_line("conversation closed with %s (%s)" % [_name_of(other_id), reason])
 	if hud:
-		var why := {"distance": "uzaklaştınız", "left": "sohbet bitti", "blocked": "engellendi", "ended": "sohbet bitti"}
-		hud.add_system_line("%s ile sohbet kapandı: %s." % [_name_of(other_id), why.get(reason, reason)])
+		if not conversations.is_empty():
+			# The circle goes on without them.
+			hud.add_system_line("%s sohbetten ayrıldı." % _name_of(other_id))
+		else:
+			var why := {"distance": "uzaklaştınız", "left": "sohbet bitti", "blocked": "engellendi", "ended": "sohbet bitti"}
+			hud.add_system_line("%s ile sohbet kapandı: %s." % [_name_of(other_id), why.get(reason, reason)])
 
 
 func on_chat(from_id: int, text: String) -> void:
 	if muted.has(from_id):
 		return
 	log_line("chat from %s: %s" % [_name_of(from_id), text])
+	_note_speaker(from_id)
 	if remotes.has(from_id):
 		remotes[from_id].say(text)
 	if hud:
 		hud.add_chat_line(_name_of(from_id), text, from_id == my_id)
+
+
+## A line was said in the circle: the speaker talks, everybody else in the
+## circle (you included) turns to look at them.
+func _note_speaker(from_id: int) -> void:
+	var speaker: Node3D = body if from_id == my_id else remotes.get(from_id)
+	if speaker == null:
+		return
+	if from_id == my_id:
+		_self_speak_left = RemotePlayer.SPEAK_SECONDS
+	else:
+		_self_gaze_id = from_id
+		_self_gaze_left = RemotePlayer.SPEAK_SECONDS
+	for id: int in remotes:
+		if id != from_id and conversations.has(id):
+			remotes[id].gaze_at(speaker)
+
+
+func _update_self_talk(delta: float) -> void:
+	_self_speak_left = maxf(0.0, _self_speak_left - delta)
+	_self_gaze_left = maxf(0.0, _self_gaze_left - delta)
+	_self_view.talking = not conversations.is_empty() and _self_speak_left > 0.0
+	_self_view.gaze_yaw = 0.0
+	if _self_gaze_left > 0.0 and remotes.has(_self_gaze_id) and conversations.has(_self_gaze_id):
+		var to: Vector3 = (remotes[_self_gaze_id] as RemotePlayer).global_position - _self_view.global_position
+		if to.length_squared() > 0.01:
+			_self_view.gaze_yaw = clampf(wrapf(atan2(-to.x, -to.z) - _self_view.rotation.y, -PI, PI), -RemotePlayer.GAZE_LIMIT, RemotePlayer.GAZE_LIMIT)
 
 
 func on_emote(from_id: int, kind: String) -> void:
@@ -538,9 +615,346 @@ func on_emote(from_id: int, kind: String) -> void:
 		remotes[from_id].view.play_emote(kind)
 	elif from_id == my_id and _self_view:
 		_self_view.play_emote(kind)
+	if Protocol.GAME_EMOTES.has(kind):
+		return  # minigame poses speak for themselves (the overlay has the words)
 	if from_id != my_id:
 		log_line("%s did %s" % [_name_of(from_id), kind])
 		_notice("%s %s." % [_name_of(from_id), "el salladı" if kind == "wave" else "selam verdi"])
+
+
+# --- groups -------------------------------------------------------------------
+
+func on_group_state(info: Dictionary) -> void:
+	var before := int(group.get("id", 0))
+	group = info
+	if hud:
+		hud.set_group(group, my_id)
+	if group.is_empty():
+		log_line("group state: none")
+	else:
+		log_line("group state: %s members=%d" % [group.name, (group.members as Array).size()])
+	if before != 0 and group.is_empty() and hud:
+		hud.add_system_line("Gruptan ayrıldın.")
+	elif before == 0 and not group.is_empty() and hud:
+		hud.add_system_line("%s grubundasın. Grup sohbeti için Enter'a bas ve Tab ile kanalı değiştir." % group.name)
+	for id: int in remotes:
+		remotes[id].set_group(int(group_marks.get(id, -1)), _group_name_of(id))
+	if bot:
+		bot.on_group(self)
+
+
+func on_group_marks(flat: Array) -> void:
+	group_marks.clear()
+	for i in range(0, flat.size() - 1, 2):
+		group_marks[int(flat[i])] = int(flat[i + 1])
+	for id: int in remotes:
+		remotes[id].set_group(int(group_marks.get(id, -1)), _group_name_of(id))
+
+
+func on_group_chat(from_id: int, text: String) -> void:
+	if muted.has(from_id):
+		return
+	var who := _member_name(from_id)
+	log_line("group chat from %s: %s" % [who, text])
+	if hud:
+		hud.add_group_line(who, text, from_id == my_id, int(group.get("color", 0)))
+	if bot:
+		bot.on_group_chat(self, from_id, text)
+
+
+## Name of a group member (the nameplate names may be hidden from far away).
+func _member_name(id: int) -> String:
+	if id == my_id:
+		return display_name
+	for m: Dictionary in group.get("members", []):
+		if int(m.id) == id:
+			return str(m.name)
+	return _name_of(id)
+
+
+## Name of the group someone belongs to as far as we know: only your own
+## group's name is known, everyone else's shows just the colour.
+func _group_name_of(id: int) -> String:
+	if not group.is_empty() and int(group_marks.get(id, -1)) == int(group.color) and id != my_id:
+		return str(group.name)
+	return ""
+
+
+func group_create(group_name := "") -> void:
+	if not group.is_empty():
+		_notice(NOTICES.already_in_group)
+		return
+	Net.c_group_create.rpc_id(1, group_name)
+
+
+func group_leave() -> void:
+	if group.is_empty():
+		_notice(NOTICES.not_in_group)
+		return
+	Net.c_group_leave.rpc_id(1)
+
+
+func send_group_chat(text: String) -> void:
+	var clean := text.strip_edges()
+	if clean.is_empty() or group.is_empty():
+		return
+	Net.c_group_chat.rpc_id(1, clean.substr(0, Protocol.CHAT_MAX_LEN))
+
+
+## Invites whoever you look at (or the nearest person) to your group; makes
+## the group on the spot when you have none (the server does that on accept).
+func invite_nearest() -> void:
+	var target := _look_target()
+	if target < 0 or not remotes.has(target):
+		target = nearest_remote(Protocol.INTERACTION_RANGE)
+	if target < 0:
+		_notice("Yakınında kimse yok.")
+		return
+	request_interaction(target, "group")
+
+
+func _on_group_action(what: String) -> void:
+	match what:
+		"create":
+			group_create()
+		"leave":
+			group_leave()
+		"invite":
+			invite_nearest()
+
+
+func _on_group_panel_closed() -> void:
+	if not _touch_mode and not (hud.is_paused() or hud.is_modal_open() or _map_open()):
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+func toggle_group_panel() -> void:
+	if hud == null:
+		return
+	if hud.is_group_panel_open():
+		hud.close_group_panel()
+		return
+	hud.open_group_panel()
+	if not _touch_mode:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+
+# --- minigames ----------------------------------------------------------------
+
+## Everything the referee (the server) tells us about our match. The client
+## only keeps what it needs to draw: the phase decides which buttons work.
+func on_game(event: Dictionary) -> void:
+	var ev := str(event.get("ev", ""))
+	if ev == "start":
+		var opp := int(event.opp)
+		game = {"match": int(event.match), "kind": str(event.kind), "opp": opp, "opp_name": str(event.opp_name),
+			"wins": int(event.wins), "rounds": int(event.rounds), "round": 0, "score": [0, 0], "phase": "intro",
+			"role": "", "pick": -1, "opp_ready": false, "pressed": false, "go_at": 0.0,
+			"face_until": now() + Protocol.GAME_INTRO + 0.5}
+		log_line("game %s start vs %s" % [game.kind, game.opp_name])
+		_game_text("%s · %s" % [GAME_NAMES[game.kind], game.opp_name], "Hazır ol!", _game_rule_text(), Color("f1c40f"))
+		if bot:
+			bot.on_game(self, event)
+		return
+	if game.is_empty():
+		return
+	match ev:
+		"round":
+			game.round = int(event.round)
+			game.score = event.score
+			game.pick = -1
+			game.opp_ready = false
+			game.pressed = false
+			game.role = str(event.get("role", ""))
+			if game.kind == "rps":
+				game.phase = "count"
+				_game_text(null, "Tur %d" % game.round, "Yumruğunu hazırla…", Color("f1c40f"))
+			else:
+				game.phase = "ready"
+				if game.role == "top":
+					_game_text(null, "Avuçlar altında, sen üstesin", "Sinyali bekle. Sinyalden önce vurursan turu kaybedersin.", Color("e67e22"))
+				else:
+					_game_text(null, "Avuçların yukarıda", "Sinyali bekle. Sinyalden önce çekersen turu kaybedersin.", Color("3498db"))
+		"count":
+			if int(game.pick) < 0:
+				game.phase = "count"
+				_game_text(null, str(int(event.n)), "Seç: %s" % _pick_hint(), Color("f1c40f"))
+			if sounds:
+				sounds.chime()
+		"go":
+			game.go_at = now()
+			if game.kind == "rps":
+				if int(game.pick) < 0:
+					game.phase = "pick"
+					_game_text(null, "ŞİMDİ!", "Seç: %s" % _pick_hint(), Color("2ecc71"))
+			else:
+				game.phase = "go"
+				var top: bool = game.role == "top"
+				_game_text(null, "VUR!" if top else "ÇEK!", "Tıkla" if not _touch_mode else "Düğmeye bas", Color("e74c3c") if top else Color("2ecc71"))
+			if sounds:
+				sounds.chime()
+		"picked":
+			game.pick = int(event.value)
+			game.phase = "picked"
+			_game_text(null, "Seçtin: %s" % RPS_NAMES[game.pick], "Rakip bekleniyor…" if not game.opp_ready else "Rakip de seçti", Color("2ecc71"))
+		"opp_ready":
+			game.opp_ready = true
+			if int(game.pick) >= 0:
+				_game_text(null, null, "Rakip de seçti", null)
+			else:
+				_game_text(null, null, "Rakip seçti; sıra sende!", null)
+		"reveal":
+			_game_reveal(event)
+		"end":
+			_game_end(event)
+
+
+func _game_rule_text() -> String:
+	if game.kind == "rps":
+		return "İlk %d turu kazanan kazanır" % game.wins
+	return "İlk %d turu kazanan kazanır (en çok %d tur). Roller her tur değişir." % [game.wins, game.rounds]
+
+
+## "1 taş · 2 kâğıt · 3 makas" on a keyboard, or "aşağıdan seç" on touch.
+func _pick_hint() -> String:
+	return "aşağıdaki düğmelerden" if _touch_mode else "1 taş · 2 kâğıt · 3 makas"
+
+
+func _game_reveal(event: Dictionary) -> void:
+	game.phase = "reveal"
+	game.score = event.score
+	var winner := str(event.winner)
+	if game.kind == "rps":
+		var you := int(event.you)
+		var opp := int(event.opp)
+		var line := "%s  —  %s" % [RPS_NAMES[you] if you >= 0 else "seçmedin", RPS_NAMES[opp] if opp >= 0 else "seçmedi"]
+		match winner:
+			"you":
+				_game_text(null, line, "Turu sen aldın!", Color("2ecc71"))
+			"opp":
+				_game_text(null, line, "Turu %s aldı." % game.opp_name, Color("e74c3c"))
+			_:
+				_game_text(null, line, "Berabere; tur yeniden.", Color("f1c40f"))
+		return
+	var role := str(event.get("role", ""))
+	var how := str(event.how)
+	var text := ""
+	var tint := Color("f1c40f")
+	if how == "false_start":
+		text = "Erken davrandın; tur rakibin." if bool(event.false_start) else "%s erken davrandı; tur senin." % game.opp_name
+	elif how == "slapped":
+		text = ("Vurdun!" if role == "top" else "Elin yakalandı!")
+	elif how == "dodged":
+		text = ("Elini çektin!" if role == "bottom" else "Iskaladın; rakip elini çekti.")
+	else:
+		text = "İkiniz de kaçırdınız; tur berabere."
+	match winner:
+		"you":
+			tint = Color("2ecc71")
+		"opp":
+			tint = Color("e74c3c")
+	var you_rt := float(event.you_rt)
+	var opp_rt := float(event.opp_rt)
+	var times := "Sen %s · %s %s" % [_rt_text(you_rt), game.opp_name, _rt_text(opp_rt)]
+	_game_text(null, text, times if how != "false_start" else "", tint)
+
+
+static func _rt_text(rt: float) -> String:
+	return "%d ms" % roundi(rt * 1000.0) if rt >= 0.0 else "—"
+
+
+func _game_end(event: Dictionary) -> void:
+	var kind := str(game.get("kind", event.get("kind", "rps")))
+	var score: Array = event.score
+	var winner := str(event.winner)
+	var reason := str(event.reason)
+	var opp_name := str(game.get("opp_name", "rakip"))
+	var big := "Berabere"
+	var tint := Color("f1c40f")
+	if winner == "you":
+		big = "Kazandın!"
+		tint = Color("2ecc71")
+	elif winner == "opp":
+		big = "Kaybettin"
+		tint = Color("e74c3c")
+	var why := {"distance": "Uzaklaştığınız için oyun bitti.", "quit": "Oyun yarıda kaldı.",
+		"left": "Rakip oyundan ayrıldı.", "ended": "Oyun sona erdi."}
+	var sub := "%d - %d" % [score[0], score[1]]
+	if why.has(reason):
+		sub = "%s (%s)" % [why[reason], sub]
+	log_line("game %s end: %s %s reason=%s" % [kind, winner, score, reason])
+	game.phase = "end"
+	game.end_at = now() + GAME_RESULT_SECONDS
+	_game_text(null, big, sub, tint)
+	if hud:
+		hud.add_system_line("%s: %s %d - %d %s" % [GAME_NAMES.get(kind, "Oyun"), big, score[0], score[1], opp_name])
+	if bot:
+		bot.on_game(self, event)
+
+
+## Updates the overlay; null keeps what it shows now (title, big, sub, tint).
+func _game_text(title, big, sub, tint) -> void:
+	if title != null:
+		game.title = title
+	if big != null:
+		game.big = big
+	if sub != null:
+		game.sub = sub
+	if tint != null:
+		game.tint = tint
+	if hud:
+		hud.set_game(str(game.get("title", "")), _game_score_text(), str(game.get("big", "")), str(game.get("sub", "")),
+			game.get("tint", Color.WHITE))
+
+
+func _game_score_text() -> String:
+	var score: Array = game.get("score", [0, 0])
+	return "Sen %d - %d %s" % [score[0], score[1], game.get("opp_name", "")]
+
+
+func game_active() -> bool:
+	return not game.is_empty() and str(game.get("phase", "")) != "end"
+
+
+func game_pick(value: int) -> void:
+	if not game_active() or game.kind != "rps" or int(game.pick) >= 0 or not str(game.phase) in ["count", "pick"]:
+		return
+	game.pick = value  # the server answers with "picked"; do not send twice
+	Net.c_game_input.rpc_id(1, int(game.match), value)
+
+
+## Slap: the one button. Before the cue it is a false start (loses the round).
+func game_press() -> void:
+	if not game_active() or game.kind != "slap" or bool(game.pressed) or not str(game.phase) in ["ready", "go"]:
+		return
+	game.pressed = true
+	if str(game.phase) == "go":
+		game.phase = "pressed"
+		_game_text(null, "Bastın!", "Sonuç bekleniyor…", null)
+	Net.c_game_input.rpc_id(1, int(game.match), 1)
+
+
+func game_quit() -> void:
+	if game_active():
+		Net.c_game_quit.rpc_id(1, int(game.match))
+
+
+## While a match runs you face your opponent (a full turn at the start, then
+## only a nudge when you drift far off).
+func _face_opponent(delta: float) -> void:
+	var opp := int(game.get("opp", 0))
+	if not remotes.has(opp) or not riding.is_empty() or body.has_meta("seat"):
+		return
+	var to: Vector3 = remotes[opp].global_position - body.global_position
+	to.y = 0.0
+	if to.length() < 0.3:
+		return
+	var err := wrapf(atan2(-to.x, -to.z) - yaw, -PI, PI)
+	var rate := 1.0 - exp(-FACE_TURN_RATE * delta)
+	if now() < float(game.face_until):
+		yaw = wrapf(yaw + err * rate, -PI, PI)
+	elif absf(err) > 1.0:
+		yaw = wrapf(yaw + (err - signf(err)) * rate, -PI, PI)
 
 
 func on_ride(info: Dictionary) -> void:
@@ -772,8 +1186,26 @@ func request_talk(target_id: int) -> void:
 	if conversations.has(target_id):
 		_notice(NOTICES.already_talking)
 		return
+	request_interaction(target_id, "talk")
+
+
+## Asks someone for a conversation ("talk"), to join your group ("group") or
+## to a minigame ("rps", "slap"); they have to accept first.
+func request_interaction(target_id: int, kind: String) -> void:
+	if kind == "group" and group.has("members") and (group.members as Array).size() >= Protocol.GROUP_MAX_MEMBERS:
+		_notice(NOTICES.group_full)
+		return
+	if (kind == "rps" or kind == "slap") and game_active():
+		_notice(NOTICES.game_busy)
+		return
 	_outgoing_target = target_id
-	Net.c_interaction_request.rpc_id(1, target_id, "talk")
+	Net.c_interaction_request.rpc_id(1, target_id, kind)
+
+
+## Leaves the whole conversation circle, everybody in it.
+func leave_circle() -> void:
+	if not conversations.is_empty():
+		leave_conversation(0)
 
 
 func respond_incoming(request_id: int, accept: bool) -> void:
@@ -980,6 +1412,8 @@ func _process(delta: float) -> void:
 		var look := touch.take_look()
 		yaw = wrapf(yaw - look.x, -PI, PI)
 		pitch = clampf(pitch - look.y, -1.45, 1.45)
+	if bot == null and game_active():
+		_face_opponent(delta)
 	if camera:
 		_update_camera(render_pos, cam_pos, delta)
 	t0 = FrameProfiler.start()
@@ -1073,6 +1507,8 @@ func _update_camera(render_pos: Vector3, eye: Vector3, delta: float) -> void:
 	# Knocked down: watch yourself from further back until you are up again.
 	var knocked := PlayerMotor.knock_ticks(body) > 0
 	var mode := "far" if knocked and _self_view != null else camera_mode
+	if mode == "first" and game_active():
+		mode = "near"  # a match is played face to face: see both pairs of hands
 	var third := _self_view != null and (mode != "first" or _wardrobe_open)
 	if _self_view:
 		_self_view.visible = third
@@ -1082,7 +1518,7 @@ func _update_camera(render_pos: Vector3, eye: Vector3, delta: float) -> void:
 			_self_view.global_position = render_pos
 			_self_view.rotation.y = _fallen_yaw
 			_self_view.sitting = body.has_meta("seat")
-			_self_view.talking = not conversations.is_empty()
+			_update_self_talk(delta)
 			_self_view.knocked = PlayerMotor.is_down(body)
 			_self_view.winded = bool(body.get_meta("winded", false))
 			_self_view.limp = bool(body.get_meta("limp", false))
@@ -1386,6 +1822,9 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif event is InputEventMouseButton and event.pressed and camera_mode != "first" and not _map_open() \
 			and event.button_index in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
 		_cam_zoom = clampf(_cam_zoom * (0.9 if event.button_index == MOUSE_BUTTON_WHEEL_UP else 1.1), 0.5, 1.6)
+	elif event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT \
+			and game_active() and game.kind == "slap" and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not hud.is_modal_open():
+		game_press()  # the click is the slap (or the pull-away)
 	elif event is InputEventMouseButton and event.pressed and not hud.is_modal_open() and touch == null and not _map_open():
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	elif event is InputEventKey and event.pressed and not event.echo:
@@ -1407,6 +1846,9 @@ func _on_key(key: Key) -> void:
 		if key == KEY_ESCAPE:
 			hud.close_wardrobe(false)
 		return
+	if key == KEY_ESCAPE and hud.is_group_panel_open():
+		hud.close_group_panel()
+		return
 	if key == KEY_ESCAPE:
 		_set_paused(not hud.is_paused())
 		return
@@ -1416,6 +1858,18 @@ func _on_key(key: Key) -> void:
 		report_player(int(_report_target.id), REPORT_KEYS[key])
 		_report_target.until = 0.0
 		return
+	if game_active():
+		# In a match the keys are the game's: 1/2/3 pick (rock, paper, scissors),
+		# E slaps or pulls away, Q gives up.
+		if key in [KEY_1, KEY_2, KEY_3] and game.kind == "rps":
+			game_pick(key - KEY_1)
+			return
+		if key == KEY_E and game.kind == "slap":
+			game_press()
+			return
+		if key == KEY_Q:
+			game_quit()
+			return
 	var target := _look_target()
 	match key:
 		KEY_F:
@@ -1427,10 +1881,24 @@ func _on_key(key: Key) -> void:
 		KEY_F3:
 			hud.toggle_stats()
 		KEY_ENTER, KEY_KP_ENTER:
-			if conversations.is_empty():
+			if conversations.is_empty() and group.is_empty():
 				_notice(NOTICES.not_in_conversation)
 			else:
 				hud.open_chat()
+		KEY_T:
+			if target > 0:
+				request_interaction(target, "rps")
+			else:
+				_notice("Taş kâğıt makas için birine bak ve yaklaş (4 m).")
+		KEY_K:
+			if target > 0:
+				request_interaction(target, "slap")
+			else:
+				_notice("El kızartmaca için birine bak ve yaklaş (4 m).")
+		KEY_I:
+			invite_nearest()
+		KEY_P:
+			toggle_group_panel()
 		KEY_E:
 			if target > 0:
 				request_talk(target)
@@ -1454,9 +1922,11 @@ func _on_key(key: Key) -> void:
 			if target > 0:
 				toggle_mute(target)
 		KEY_X:
-			var other: int = target if conversations.has(target) else (conversations.keys().back() if not conversations.is_empty() else -1)
-			if other > 0:
-				leave_conversation(other)
+			# Looking at someone in your circle: leave just them; else the whole circle.
+			if conversations.has(target):
+				leave_conversation(target)
+			else:
+				leave_circle()
 		KEY_B:
 			if target > 0:
 				if int(_block_confirm.id) == target and t < float(_block_confirm.until):
@@ -1490,8 +1960,15 @@ func _on_touch_action(id: String) -> void:
 			else:
 				_notice("Konuşmak için birine bak ve yaklaş (4 m).")
 		"leave":
-			if target > 0:
-				leave_conversation(target)
+			leave_circle()
+		"group":
+			toggle_group_panel()
+		"rps0", "rps1", "rps2":
+			game_pick(int(id.trim_prefix("rps")))
+		"slap":
+			game_press()
+		"game_quit":
+			game_quit()
 		"person":
 			if target > 0:
 				_person_target = target
@@ -1560,6 +2037,10 @@ func _on_person_action(what: String) -> void:
 		Net.c_block.rpc_id(1, id)
 	elif what.begins_with("report:"):
 		report_player(id, what.trim_prefix("report:"))
+	elif what == "invite":
+		request_interaction(id, "group")
+	elif what.begins_with("game:"):
+		request_interaction(id, what.trim_prefix("game:"))
 
 
 ## A cat right in front of you (for stroking), or -1.
@@ -1634,6 +2115,10 @@ func _update_hud(delta: float) -> void:
 			"treat": target <= 0 and not clinic.is_empty(),
 			"bench": target <= 0 and _nearest_bench() >= 0, "seated": body.has_meta("seat"),
 			"in_conversation": not conversations.is_empty(), "incoming": latest >= 0,
+			"in_group": not group.is_empty(),
+			"group_tint": Protocol.GROUP_COLORS[int(group.color)] if not group.is_empty() else Color("2e86de"),
+			"game": str(game.kind) if game_active() else "", "game_phase": str(game.get("phase", "")),
+			"game_pick": int(game.get("pick", -1)), "game_role": str(game.get("role", "")),
 			"tram_label": tram.get("label", ""), "tram_tint": tram.get("tint", Color("2e86de"))})
 	t0 = FrameProfiler.start()
 	if navigator:
@@ -1653,6 +2138,7 @@ func _update_hud(delta: float) -> void:
 		else:
 			line += "[X] sohbetten ayrıl" if conversations.has(target) else "[E] konuşma isteği"
 			line += " · [G] el salla · [H] selam · [M] %s · [B] engelle · [R] şikayet" % ("sesi aç" if muted.has(target) else "sustur")
+			line += "\n[T] taş kâğıt makas · [K] el kızartmaca · [I] gruba davet"
 		hud.set_target(line)
 	elif _cat_in_reach() >= 0:
 		hud.set_target("Sokak kedisi  ·  " + ("sevmek için Sev'e dokun" if touch else "sevmek için [E]"))
@@ -1663,11 +2149,14 @@ func _update_hud(delta: float) -> void:
 	if latest >= 0:
 		var req: Dictionary = incoming[latest]
 		var keys := "" if touch else "   [Y] kabul   [N] reddet"
-		hud.set_incoming("%s seninle konuşmak istiyor%s   (%d)" % [
-			_name_of(int(req.from)), keys, ceili(float(req.expires) - now())])
+		hud.set_incoming("%s %s%s   (%d)" % [_name_of(int(req.from)), REQUEST_TEXT.get(str(req.get("kind", "talk")), REQUEST_TEXT.talk),
+			keys, ceili(float(req.expires) - now())])
 	else:
 		hud.set_incoming("")
 	hud.set_outgoing("%s kişisine istek gönderildi, yanıt bekleniyor..." % _name_of(_outgoing_target) if outgoing_request >= 0 else "")
+	if not game.is_empty() and str(game.phase) == "end" and now() > float(game.end_at):
+		game = {}
+		hud.hide_game()
 
 	_hud_refresh -= delta
 	if _hud_refresh > 0.0:
