@@ -26,6 +26,11 @@ kıyısına, 1800×1800 m, 3778 bina, 886 yol, OpenStreetMap'ten; gerçek kıyı
 | Konuşma isteği | Kabul, ret ve tepkisiz kalma; ret ile sessizlik isteyene aynı görünür |
 | Metin sohbeti | Yalnızca kabul edilmiş sohbetlerde; 30 m'den uzaklaşınca kapanır |
 | Jestler | El sallama, selam (20 m) |
+| **Gruplar** | **P** / **Grup** paneli: grup kur (sunucu "Grup 1" gibi bir ad verir ya da kendin adlandır), yakındakini davet et (**I** / **En yakını davet et**), davet kabul/ret, ayrıl. En fazla 8 kişi, ~10 renklik paletten aynı anda iki grup aynı rengi taşımaz; son üye çıkınca grup silinir, bağlantısı kopan üye çıkarılır. Üyeler başlarının üstünde grup renginde işaret ve isim etiketiyle, radar ve haritada grup renginde noktayla ayırt edilir |
+| **Grup sohbeti** | Bölgenin her yerinden grup üyelerine ulaşır, yakınlık sohbetinden ayrıdır (**Yakın / Grup** anahtarı); satırlar grup renginde ve grup adıyla gelir |
+| **Grup konuşması** | Üç ya da daha fazla kişi tek bir konuşma çemberi olur: birinin konuşmasına katılan çemberdeki herkesle konuşur, yazılan satır herkese gider, konuşana bakılır ve konuşma jesti yapılır, çemberden çıkmak yalnızca kendi bağlantılarını keser (test: `test_social_circle`) |
+| **Taş-kâğıt-makas** | **T** / kişi menüsü → **Taş kâğıt makas**: istek, kabul, karşılıklı dönme, 3-2-1 geri sayım ve yumruk sallama, gizli seçim (**1/2/3** ya da dokunmatik düğmeler), sonucu **sunucu** çözer, sonuç ekranı ve kısa 3B el işareti, **3 turun en iyisi**. Menzil dışındaki ya da uzaklaşan oyuncu maçı iptal eder; sunucu hileli girdiyi yok sayar |
+| **El kızartmaca** | **K** / kişi menüsü → **El kızartmaca**: biri avucunu açar, öteki elini üstüne koyar; sunucu rastgele gecikmeyle "şimdi" der. Üstteki vurmaya, alttaki çekilmeye çalışır; tepki süreleri **sunucuda** gecikme payı düşülerek karşılaştırılır, **5 turun en iyisi**, roller değişir, vuruş ve kaçış duruşları gösterilir |
 | Sustur / engelle / şikayet | Susturma yerel; engelleme kalıcı ve karşılıklı görünmezlik; şikayet olay numarası ve sohbet bağlamıyla kaydedilir |
 | **Engel kaldırma** | Menü → **Engellenenler**: engellediğin herkes (isim, tarih), iki dokunuşla **Engeli kaldır**. Karşı tarafa bildirim gitmez; birbirinizi bir sonraki snapshot'ta yeniden görürsünüz |
 | Hız sınırları | İstek bekleme süreleri, 3 retten sonra 60 sn, sohbet token-bucket, jest ve şikayet sınırları |
@@ -35,7 +40,7 @@ kıyısına, 1800×1800 m, 3778 bina, 886 yol, OpenStreetMap'ten; gerçek kıyı
 | **Kamera** | **V** (telefonda **Kamera** düğmesi) ya da Menü: **Birinci şahıs → Arkadan (omuz üstü) → Uzaktan**. Üçüncü şahısta kendi karakterini görürsün; fare tekerleği uzaklığı ayarlar, kamera duvara girmez (yay kolu). Seçim hatırlanır |
 | Görsel boy ≠ oyun boyu | 150–205 cm görsel; çarpışma kapsülü 155–195 cm'ye ve dar bir yarıçapa sabitlenir |
 | Kalıcılık | Hesap (ilk kullanımda güven), avatar, son konum, engellemeler, şikayetler, denetim logu |
-| Protokol sürümü | `PROTOCOL_VERSION` (şu an 4) ve zone sürümü eşleşmezse bağlantı reddedilir |
+| Protokol sürümü | `PROTOCOL_VERSION` (şu an 6) ve zone sürümü eşleşmezse bağlantı reddedilir |
 | Botlar ve yük testi | `tools/bots.py smoke` / `commute` / `load` |
 | Atıf | "© OpenStreetMap contributors" oyunda ve menüde her zaman görünür |
 | Telefon | Web export + WebSocket transport + dokunmatik kontroller; `tools/serve_web.py` |
@@ -187,6 +192,8 @@ Masaüstü istemci de bir WebSocket sunucusuna bağlanabilir: sunucu alanına
 | Y / N | Gelen isteği kabul et / reddet (ya da hiçbir şey yapma) |
 | Enter, X | Sohbette yaz / sohbetten ayrıl |
 | G, H | El salla, selam ver |
+| P, I | Grup paneli, en yakın kişiyi gruba davet et |
+| T, K | Bakılan kişiye taş-kâğıt-makas / el kızartmaca isteği; maçta **1 / 2 / 3** seçim, **E** vur ya da çekil, **Q** vazgeç |
 | M, B (iki kez), R + 1–5 | Sustur, engelle, şikayet et |
 | Tab | Büyük harita (dokun/tıkla: rota) |
 | F | Tramvaya bin / durak iste / in |

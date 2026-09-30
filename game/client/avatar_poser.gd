@@ -21,8 +21,35 @@ const WAVE_SWING := 0.4
 const HOLD_UPPER := Vector3(0.1, -0.97, 0.24)
 const HOLD_FORE := Vector3(-0.78, 0.14, 0.6)
 
+## Minigame poses, all in chest-rest directions (the right arm; the left one
+## mirrors X where both arms are used). The shake is a fist pumped between a
+## low and a high forearm; the sign is held out in front; the slap winds up
+## above the other player's hands and strikes down; the dodge pulls back.
+const SHAKE_UPPER := Vector3(-0.35, -0.85, 0.4)
+const SHAKE_LOW := Vector3(-0.15, -0.1, 1.0)
+const SHAKE_HIGH := Vector3(-0.15, 0.95, 0.35)
+const SIGN_UPPER := Vector3(-0.3, -0.55, 0.78)
+const SIGN_FORE := Vector3(-0.1, 0.2, 0.97)
+const SLAP_WIND_UPPER := Vector3(-0.35, 0.45, 0.6)
+const SLAP_WIND_FORE := Vector3(-0.1, 0.9, 0.35)
+const SLAP_HIT_UPPER := Vector3(-0.25, -0.5, 0.83)
+const SLAP_HIT_FORE := Vector3(-0.05, -0.3, 0.95)
+const DODGE_UPPER := Vector3(-0.3, -0.8, 0.15)
+const DODGE_FORE := Vector3(-0.2, 0.7, 0.6)
+## Finger flexion of a fist (radians for the 01, 02 and 03 joints).
+const FIST_CURL := [1.3, 1.6, 1.0]
+## Fingers curled per hand shape: index, middle, ring, pinky.
+const HAND_SHAPES := {
+	"fist": [1.0, 1.0, 1.0, 1.0],
+	"flat": [0.0, 0.0, 0.0, 0.0],
+	"scissors": [0.0, 0.0, 1.0, 1.0],
+}
+
 var look_pitch := 0.0   # radians, + looks up
 var look_yaw := 0.0     # radians, head turn relative to the body
+var game := ""          # minigame pose: shake, rock, paper, scissors, slap, dodge
+var game_blend := 0.0   # 0..1
+var game_time := 0.0    # seconds into the pose
 var wave := 0.0         # 0..1 blend
 var wave_time := 0.0
 var nod := 0.0          # 0..1 blend
@@ -39,11 +66,18 @@ var _spine1 := -1
 var _spine2 := -1
 var _calf_l := -1
 var _arms := {}  # "r"/"l" -> [upper, fore, hand]
+var _fingers := {}  # "r"/"l" -> [[01, 02, 03] of the index, middle, ring and pinky]
 
 
 func _ready() -> void:
 	var sk := get_skeleton()
 	if sk:
+		for side in ["r", "l"]:
+			var hand: Array = []
+			for finger in ["index", "middle", "ring", "pinky"]:
+				hand.append([sk.find_bone("%s_01_%s" % [finger, side]), sk.find_bone("%s_02_%s" % [finger, side]),
+					sk.find_bone("%s_03_%s" % [finger, side])])
+			_fingers[side] = hand
 		_neck = sk.find_bone("neck_01")
 		_head = sk.find_bone("Head")
 		_chest = sk.find_bone("spine_03")
@@ -74,13 +108,76 @@ func _process_modification() -> void:
 		_pose_arm(sk, "l", HOLD_UPPER, HOLD_FORE, 0.0, hold_arm)
 	if wave > 0.001:
 		_pose_arm(sk, "r", WAVE_UPPER, WAVE_FORE, sin(wave_time * 11.0) * WAVE_SWING, wave)
+	if game_blend > 0.001 and game != "":
+		_pose_game(sk)
+
+
+## The minigame poses (see the constants): arms and fingers, blended by
+## game_blend.
+func _pose_game(sk: Skeleton3D) -> void:
+	var w := game_blend
+	match game:
+		"shake":
+			# One pump per countdown step (0.8 s).
+			var s := 0.5 - 0.5 * cos(game_time * TAU / 0.8)
+			_pose_arm(sk, "r", SHAKE_UPPER, SHAKE_LOW.lerp(SHAKE_HIGH, s), 0.0, w)
+			_hand_shape(sk, "r", "fist", w)
+		"rock", "paper", "scissors":
+			var bob := sin(game_time * 8.0) * 0.06
+			var fore := SIGN_FORE + Vector3(0.0, bob, 0.0)
+			# Paper is shown flat, palm down; the others sideways, thumb up.
+			_pose_arm(sk, "r", SIGN_UPPER, fore, 0.0, w, -1.2 if game == "paper" else 0.0)
+			_hand_shape(sk, "r", {"rock": "fist", "paper": "flat", "scissors": "scissors"}[game], w)
+		"slap":
+			# Both hands: wind up, then strike down (0.25 s in).
+			var k := clampf((game_time - 0.25) / 0.1, 0.0, 1.0)
+			var upper := SLAP_WIND_UPPER.lerp(SLAP_HIT_UPPER, k)
+			var fore := SLAP_WIND_FORE.lerp(SLAP_HIT_FORE, k)
+			_pose_arm(sk, "r", upper, fore, 0.0, w, -1.2)
+			_pose_arm(sk, "l", Vector3(-upper.x, upper.y, upper.z), Vector3(-fore.x, fore.y, fore.z), 0.0, w, 1.2)
+			_hand_shape(sk, "r", "flat", w)
+			_hand_shape(sk, "l", "flat", w)
+		"dodge":
+			# Hands snatched back to the chest, leaning away.
+			_pose_arm(sk, "r", DODGE_UPPER, DODGE_FORE, 0.0, w)
+			_pose_arm(sk, "l", Vector3(-DODGE_UPPER.x, DODGE_UPPER.y, DODGE_UPPER.z), Vector3(-DODGE_FORE.x, DODGE_FORE.y, DODGE_FORE.z), 0.0, w)
+			_hand_shape(sk, "r", "flat", w)
+			_hand_shape(sk, "l", "flat", w)
+			for b in [_spine1, _spine2]:
+				_rotate_global(sk, b, Basis(Vector3.RIGHT, -0.1 * w))
+
+
+## Sets a hand's fingers to a shape ("fist", "flat", "scissors"), blended by
+## `weight`. The hand must already be posed: the curl axis is the T-pose one
+## (about Z, opposite for the two hands) carried along with the hand.
+func _hand_shape(sk: Skeleton3D, side: String, shape: String, weight: float) -> void:
+	var hand: int = _arms[side][2]
+	if hand < 0 or not _fingers.has(side):
+		return
+	var turn := sk.get_bone_global_pose(hand).basis.orthonormalized() * sk.get_bone_global_rest(hand).basis.orthonormalized().inverse()
+	var axis: Vector3 = (turn * (Vector3.BACK if side == "r" else Vector3.FORWARD)).normalized()
+	var curls: Array = HAND_SHAPES[shape]
+	var fingers: Array = _fingers[side]
+	for f in fingers.size():
+		for j in 3:
+			var bone: int = fingers[f][j]
+			if bone < 0:
+				continue
+			# Straight first (the baked walk leaves the fingers relaxed), then curled.
+			var rest_q := sk.get_bone_rest(bone).basis.get_rotation_quaternion()
+			sk.set_bone_pose_rotation(bone, sk.get_bone_pose_rotation(bone).slerp(rest_q, clampf(weight, 0.0, 1.0)))
+			var angle: float = FIST_CURL[j] * float(curls[f]) * weight
+			if angle > 0.001:
+				_rotate_global(sk, bone, Basis(axis, angle))
 
 
 ## Blends one arm towards an absolute pose: the upper arm along `upper_dir`,
 ## the forearm along `fore_dir` (both in the chest's rest frame), bent at
 ## the elbow like a hinge, the forearm then turned by `swing` radians about
-## the palm's axis; the wrist stays straight.
-func _pose_arm(sk: Skeleton3D, side: String, upper_dir: Vector3, fore_dir: Vector3, swing: float, weight: float) -> void:
+## the palm's axis; the wrist stays straight. `roll` turns the whole forearm
+## and hand about its own axis (palm towards the body at 0, down at -PI/2 for
+## the right arm).
+func _pose_arm(sk: Skeleton3D, side: String, upper_dir: Vector3, fore_dir: Vector3, swing: float, weight: float, roll := 0.0) -> void:
 	var bones: Array = _arms[side]
 	var upper: int = bones[0]
 	var fore: int = bones[1]
@@ -105,6 +202,8 @@ func _pose_arm(sk: Skeleton3D, side: String, upper_dir: Vector3, fore_dir: Vecto
 	var palm_axis := (palm - f * f.dot(palm)).normalized()
 	if swing != 0.0:
 		q_fore = Basis(palm_axis, swing) * q_fore
+	if roll != 0.0:
+		q_fore = Basis(f, roll) * q_fore
 	# In the chest's current frame, so the pose leans with the upper body.
 	var chest_now := sk.get_bone_global_pose(_chest).basis.orthonormalized()
 	var lean := chest_now * sk.get_bone_global_rest(_chest).basis.orthonormalized().inverse()

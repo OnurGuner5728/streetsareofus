@@ -7,6 +7,13 @@ const INTERP_DELAY := 0.12
 const MAX_EXTRAPOLATION := 0.15
 const NAME_RANGE := 15.0
 const BUBBLE_SECONDS := 6.0
+## After a chat line the speaker keeps talking (arms and jaw) for this long,
+## and the others in the circle turn their heads to them.
+const SPEAK_SECONDS := 3.0
+const GAZE_LIMIT := 1.0  # radians: heads do not turn further than this
+
+static var _marker_mesh: SphereMesh
+static var _marker_mats := {}  # group colour index -> material
 
 var id := 0
 var display_name := ""
@@ -14,6 +21,8 @@ var avatar := {}
 var view: AvatarView
 var in_conversation := false
 var muted := false
+var group_color := -1  ## palette index of this player's group, -1 for none
+var group_name := ""
 var ride: Array = []  # [line, vehicle, slot] while on a tram
 var transit: TransitNetwork
 
@@ -22,6 +31,10 @@ var _interval := 1.0 / 15.0
 var _label: Label3D
 var _bubble: Label3D
 var _bubble_left := 0.0
+var _marker: MeshInstance3D
+var _speak_left := 0.0
+var _gaze_node: Node3D
+var _gaze_left := 0.0
 var _speed := 0.0
 var _pitch := 0.0
 var _anim_skip := 0.0
@@ -40,6 +53,10 @@ func setup(entity_id: int, info: Dictionary) -> void:
 	_bubble = _make_label(26, Color("fff4c2"))
 	_bubble.visible = false
 	add_child(_bubble)
+	_marker = MeshInstance3D.new()
+	_marker.visible = false
+	_marker.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(_marker)
 	set_avatar(info.get("avatar", {}))
 	var r: Variant = info.get("ride", [])
 	ride = r if typeof(r) == TYPE_ARRAY else []
@@ -55,6 +72,7 @@ func set_avatar(new_avatar: Dictionary) -> void:
 	avatar = view.avatar
 	_label.position.y = view.visual_height + 0.25
 	_bubble.position.y = view.visual_height + 0.55
+	_marker.position.y = view.visual_height + 0.13
 	_refresh_label()
 
 
@@ -80,6 +98,40 @@ func say(text: String) -> void:
 	_bubble.text = text if text.length() <= 60 else text.substr(0, 57) + "..."
 	_bubble.visible = true
 	_bubble_left = BUBBLE_SECONDS
+	_speak_left = SPEAK_SECONDS
+
+
+## Somebody in the circle is speaking: turn the head to them for a while.
+func gaze_at(node: Node3D) -> void:
+	_gaze_node = node
+	_gaze_left = SPEAK_SECONDS
+
+
+## The group this player belongs to (colour index into Protocol.GROUP_COLORS,
+## -1 for none): a coloured bead over the head and a nameplate to match.
+func set_group(color_index: int, group_label: String) -> void:
+	group_color = color_index
+	group_name = group_label if color_index >= 0 else ""
+	if color_index >= 0 and color_index < Protocol.GROUP_COLORS.size():
+		if _marker_mesh == null:
+			_marker_mesh = SphereMesh.new()
+			_marker_mesh.radius = 0.08
+			_marker_mesh.height = 0.16
+			_marker_mesh.radial_segments = 10
+			_marker_mesh.rings = 5
+		if not _marker_mats.has(color_index):
+			var mat := StandardMaterial3D.new()
+			mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			mat.albedo_color = Protocol.GROUP_COLORS[color_index]
+			_marker_mats[color_index] = mat
+		_marker.mesh = _marker_mesh
+		_marker.material_override = _marker_mats[color_index]
+		_marker.visible = true
+		_label.modulate = Protocol.GROUP_COLORS[color_index].lightened(0.35)
+	else:
+		_marker.visible = false
+		_label.modulate = Color.WHITE
+	_refresh_label()
 
 
 func push_sample(t: float, pos: Vector3, yaw: float, pitch: float, speed: float, flags := 0) -> void:
@@ -139,7 +191,19 @@ func update_render(now_server: float, delta: float, camera_pos: Vector3) -> void
 	if delta > 0.0:
 		_vy = lerpf(_vy, (global_position.y - _last_y) / delta, minf(1.0, delta * 12.0))
 	_last_y = global_position.y
-	view.talking = in_conversation
+	# Talking is per line: the arms move while somebody speaks, and the circle
+	# looks at the speaker.
+	if _speak_left > 0.0:
+		_speak_left -= delta
+	view.talking = in_conversation and _speak_left > 0.0
+	view.gaze_yaw = 0.0
+	if _gaze_left > 0.0:
+		_gaze_left -= delta
+		if is_instance_valid(_gaze_node) and _gaze_node.is_inside_tree() and in_conversation:
+			var to := _gaze_node.global_position - global_position
+			if to.length_squared() > 0.01:
+				var rel := wrapf(atan2(-to.x, -to.z) - rotation.y, -PI, PI)
+				view.gaze_yaw = clampf(rel, -GAZE_LIMIT, GAZE_LIMIT)
 	# Limbs of people far away are a few pixels tall: animate them less often.
 	_anim_skip += delta
 	if dist < 40.0 or _anim_skip > 0.1:
@@ -164,6 +228,8 @@ func _refresh_label() -> void:
 	var text := display_name
 	if in_conversation:
 		text += "  · sohbette"
+	if group_color >= 0 and group_name != "":
+		text += "  · %s" % group_name
 	if muted:
 		text += "  · susturuldu"
 	_label.text = text

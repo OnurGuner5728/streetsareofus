@@ -2,6 +2,7 @@
 """Multiplayer smoke and load tests with headless bot clients.
 
   python tools/bots.py smoke            # 2 social bots must meet, talk, chat and wave
+  python tools/bots.py games            # 2 bots form a group, chat in it, play RPS and a hand slap
   python tools/bots.py load --bots 16   # wander bots, prints server tick/bandwidth stats
 
 Set GODOT to the Godot 4 console binary if it is not on PATH.
@@ -159,6 +160,57 @@ def cmd_smoke(args) -> int:
     return 0
 
 
+def cmd_games(args) -> int:
+    """Two social bots meet, form a group, chat in it, play RPS and a hand slap, then leave."""
+    data_dir = tempfile.mkdtemp(prefix="soa_games_")
+    server = start_server(args.port, data_dir, args.seconds + 20, ["--cluster", f"--transport={args.transport}"])
+    names = ("BotA", "BotB")
+    bots = [Proc(n, godot("--bot=social", "--group-test", f"--connect={address(args.port, args.transport)}",
+                          f"--name={n}", f"--quit-after={args.seconds}")) for n in names]
+    # Done when both bots have left the group again (or on the deadline).
+    end = time.time() + args.seconds + 15
+    while time.time() < end and not all(b.has("group test complete") for b in bots):
+        time.sleep(1)
+    for b in bots:
+        b.proc.terminate()
+        b.finish(10)
+    server.proc.terminate()
+    server.finish(10)
+
+    checks = [
+        (bots[0], "conversation open with BotB"), (bots[1], "conversation open with BotA"),
+        (bots[0], "group state: Grup 1 members=2"), (bots[1], "group state: Grup 1 members=2"),
+        (bots[0], "group chat from BotB: grup merhaba"), (bots[1], "group chat from BotA: grup merhaba"),
+        (bots[0], "game rps start vs BotB"), (bots[1], "game rps start vs BotA"),
+        (bots[0], "game rps end:"), (bots[1], "game rps end:"),
+        (bots[0], "game slap start vs BotB"), (bots[1], "game slap start vs BotA"),
+        (bots[0], "game slap end:"), (bots[1], "game slap end:"),
+        (bots[0], "group state: none"), (bots[1], "group state: none"),
+        (bots[0], "group test complete"), (bots[1], "group test complete"),
+        (server, "group: BotA invited BotB (1 groups)"), (server, "(0 groups)"),
+        (server, "game rps: BotA vs BotB"), (server, "game slap: BotA vs BotB"),
+    ]
+    failed = [f"{p.name}: missing '{needle}'" for p, needle in checks if not p.has(needle)]
+    for p in [server, *bots]:
+        failed += [f"{p.name}: {e}" for e in p.errors()]
+    for b in bots:
+        for l in b.lines:
+            if "game rps end:" in l or "game slap end:" in l:
+                print(f"[{b.name}] {l.split('] ', 1)[-1]}")
+    if args.verbose or failed:
+        for p in [server, *bots]:
+            print(f"--- {p.name} ---")
+            print("\n".join(p.lines[-60:]))
+    shutil.rmtree(data_dir, ignore_errors=True)
+    if failed:
+        print("GAMES TEST FAILED")
+        for f in failed:
+            print("  " + f)
+        return 1
+    print(f"GAMES TEST PASSED over {args.transport} ({len(checks)} checks: group, group chat, RPS match, slap match)")
+    return 0
+
+
 def cmd_commute(args) -> int:
     """Commuter bots run to a stop, board the next tram, request a stop and get off."""
     data_dir = tempfile.mkdtemp(prefix="soa_commute_")
@@ -240,6 +292,12 @@ def main() -> int:
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("--transport", choices=["enet", "ws"], default="enet")
     p.set_defaults(func=cmd_smoke)
+    p = sub.add_parser("games")
+    p.add_argument("--port", type=int, default=7014)
+    p.add_argument("--seconds", type=int, default=90)
+    p.add_argument("--transport", choices=["enet", "ws"], default="enet")
+    p.add_argument("-v", "--verbose", action="store_true")
+    p.set_defaults(func=cmd_games)
     p = sub.add_parser("commute")
     p.add_argument("--port", type=int, default=7013)
     p.add_argument("--seconds", type=int, default=240)
