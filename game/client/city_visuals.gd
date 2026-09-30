@@ -10,13 +10,9 @@ const COBBLE_KINDS := ["pedestrian", "living_street"]
 const MARKED_KINDS := ["primary", "secondary", "tertiary"]
 const GREEN_AREAS := {"park": Color("5c8a47"), "grass": Color("6a9650"), "playground": Color("8a9a55"), "pitch": Color("4f8a44")}
 const RAIL_GAUGE := 1.435
-const FACADES := ["e8dcc4", "d9c7a7", "c9b18f", "e3d5b8", "bfa98a", "d8cfc4", "c7b9a5", "e6c9a8",
-	"d4a88c", "b9b2a6", "cdd3d6", "e0d2c0", "c9a58a", "d6d0bd", "e2c7b1", "c4b8a8"]
-const FACADES_COMMERCIAL := ["c8ccd0", "b8c0c8", "d8d4cc", "bcc4c4", "d2cbc0"]
-const ROOFS := ["6f6a64", "7b746c", "8a8580", "5d5a57", "757069", "a4553b"]
 const AWNINGS := ["b03a2e", "2e7d4f", "1f5f99", "c77d20", "6d3b8f", "8a8a8a", "a52a4a"]
 ## Pure decoration, hidden on GraphicsQuality.LOW.
-const DETAIL_PROPS := ["BayWindows", "Awnings", "WaterTanks", "AirConditioners", "CatenaryArms"]
+const DETAIL_PROPS := ["BayWindows", "Awnings", "WaterTanks", "AirConditioners", "Aerials", "Dishes", "CatenaryArms"]
 ## Longest straight piece of anything draped over the ground.
 const DRAPE_STEP := 3.0
 
@@ -722,6 +718,9 @@ static func _buildings(ctx: StreetLayout, vis: Node3D) -> void:
 	var awning_col := []
 	var tank_xf := []
 	var ac_xf := []
+	var aerial_xf := []
+	var dish_xf := []
+	var shops := _shop_points(ctx)
 	for b in ctx.zone.buildings:
 		var poly := WorldBuilder.footprint_xz(b.footprint)
 		if poly.size() < 3:
@@ -748,12 +747,20 @@ static func _buildings(ctx: StreetLayout, vis: Node3D) -> void:
 		var bottom := float(b.min_height)
 		var top := float(b.height)
 		var kind := str(b.kind)
-		var facade := _facade_color(key, kind)
-		var shop: bool = kind in ["commercial", "generic"] and bottom < 0.1 and top > 6.0 and WorldBuilder._hash01(key + "shop") < 0.7
-		facade.a = 1.0 if shop else 0.0
-		var parapet := 0.9 if bottom < 0.1 and top > 5.0 else 0.0
+		var real_area := absf(area) / 2.0
+		var box := BuildingStyle.obb(poly)
+		var material := BuildingStyle.facade_material(b, key, kind, top)
+		var facade := BuildingStyle.facade_colour(b, key, kind, material)
+		var roof := BuildingStyle.roof(b, key, kind, top, bottom, box, real_area)
+		var shape: String = roof.shape
+		var rise: float = roof.rise
+		var pitched := shape == BuildingStyle.HIPPED or shape == BuildingStyle.GABLED
+		var shop_building: bool = kind in ["commercial", "generic"] and bottom < 0.1 and top > 6.0 \
+				and WorldBuilder._hash01(key + "shop") < 0.3
+		var parapet := 0.9 if bottom < 0.1 and top > 5.0 and not pitched else 0.0
 		var wst: SurfaceTool = walls[chunk]
-		var floors := int(top / 3.1)
+		var rst: SurfaceTool = roofs[chunk]
+		var floors := BuildingStyle.floors_of(top)
 		var style := WorldBuilder._hash01(key + "style")
 		for i in poly.size():
 			var p0 := poly[i]
@@ -763,17 +770,24 @@ static func _buildings(ctx: StreetLayout, vis: Node3D) -> void:
 			if length < 0.05:
 				continue
 			var n := Vector3(-edge.y, 0.0, edge.x).normalized()
+			var out := Vector2(n.x, n.z)
 			var info := Vector2(top, length)
 			var wall_from := bottom if bottom > 0.1 else -1.0
-			_wall_quad(wst, p0, p1, wall_from, top + parapet, n, facade, length, info, ref)
+			var street := bottom < 0.1 and length >= 3.0 and _faces_street(ctx, p0, p1, out)
+			var shop_edge := street and length >= 4.0 and (shop_building or _shop_near_edge(shops, p0, p1))
+			var col := facade
+			col.a = BuildingStyle.wall_alpha(material, shop_edge, street)
+			if pitched:
+				_wall_strip(wst, p0, p1, wall_from, top, RoofBuilder.wall_top(p0, p1, box, shape, rise), n, col, length, info, ref)
+			else:
+				_wall_quad(wst, p0, p1, wall_from, top + parapet, n, col, length, info, ref)
 			if parapet > 0.0:
 				# Inner face of the parapet, 20 cm in.
-				var inset := Vector2(n.x, n.z) * -0.2
-				_wall_quad(wst, p1 + inset, p0 + inset, top, top + parapet, -n, facade, length, Vector2(0, length), ref)
-			if bottom > 0.1 or length < 4.0 or not _faces_street(ctx, p0, p1, Vector2(n.x, n.z)):
+				var inset := out * -0.2
+				_wall_quad(wst, p1 + inset, p0 + inset, top, top + parapet, -n, col, length, Vector2(0, length), ref)
+			if bottom > 0.1 or length < 4.0 or not street:
 				continue
 			var dir := edge / length
-			var out := Vector2(n.x, n.z)
 			var bays := int((length - 1.0) / 3.0)
 			var start := (length - bays * 3.0) / 2.0 + 1.5
 			var yaw := atan2(-out.x, -out.y)  # -Z of the prop points out of the wall
@@ -781,33 +795,62 @@ static func _buildings(ctx: StreetLayout, vis: Node3D) -> void:
 				var along := start + k * 3.0
 				var base := p0 + dir * along
 				var h := WorldBuilder._hash01("%s:%d:%d" % [key, i, k])
-				if shop:
-					var col := Color(str(AWNINGS[int(h * AWNINGS.size())]))
+				if shop_edge:
+					var awning := Color(str(AWNINGS[int(h * AWNINGS.size())]))
 					awning_xf.append(Transform3D(Basis(Vector3.UP, yaw), Vector3(base.x + out.x * 0.6, ref + 2.75, base.y + out.y * 0.6)))
-					awning_col.append(col)
+					awning_col.append(awning)
 				for f in range(1, floors):
 					var hf := WorldBuilder._hash01("%s:%d:%d:%d" % [key, i, k, f])
 					var y := ref + f * 3.1
-					if style < 0.45 and hf < 0.55:
+					if style < 0.5 and hf < 0.8 and floors >= 3 and not pitched:
 						balcony_xf.append(Transform3D(Basis(Vector3.UP, yaw), Vector3(base.x + out.x * 0.55, y, base.y + out.y * 0.55)))
 						balcony_col.append(Color(facade.r, facade.g, facade.b).lightened(0.05))
 					elif style > 0.8 and f % 2 == 1 and k % 2 == 0 and f < floors - 1:
 						bay_xf.append(Transform3D(Basis(Vector3.UP, yaw), Vector3(base.x + out.x * 0.4, y + 0.2, base.y + out.y * 0.4)))
-						bay_col.append(facade)
-		var roof_color := Color(str(ROOFS[int(WorldBuilder._hash01(key + "roof") * ROOFS.size())]))
-		if not WorldBuilder._add_flat_polygon(roofs[chunk], poly, ref + top, roof_color):
-			WorldBuilder._add_flat_polygon(roofs[chunk], Geometry2D.convex_hull(poly), ref + top, roof_color)
-		if bottom > 0.1:
-			WorldBuilder._add_flat_polygon(roofs[chunk], poly, ref + bottom, roof_color.darkened(0.3), Vector3.DOWN)
-		# Istanbul roofs: water tanks and air conditioners.
-		if parapet > 0.0 and absf(area) > 60.0:
-			var r := WorldBuilder._hash01(key + "tank")
-			var spot := center + Vector2(cos(r * TAU), sin(r * TAU)) * 1.5
-			if Geometry2D.is_point_in_polygon(spot, poly) and r < 0.6:
-				tank_xf.append(Transform3D(Basis(), Vector3(spot.x, ref + top + 0.8, spot.y)))
-			var spot2 := center - Vector2(cos(r * TAU), sin(r * TAU)) * 2.0
-			if Geometry2D.is_point_in_polygon(spot2, poly) and r > 0.3:
-				ac_xf.append(Transform3D(Basis(Vector3.UP, r * TAU), Vector3(spot2.x, ref + top + 0.35, spot2.y)))
+						bay_col.append(Color(facade.r, facade.g, facade.b))
+		var wall_col := facade
+		wall_col.a = BuildingStyle.wall_alpha(material, false)
+		if pitched:
+			RoofBuilder.emit_pitched(rst, box, shape, rise, ref + top, roof.colour, roof.surface)
+		else:
+			var flat: Color = roof.colour if shape == BuildingStyle.FLAT else BuildingStyle.flat_roof_colour(b, key)
+			flat.a = BuildingStyle.roof_alpha(BuildingStyle.SURF_FLAT)
+			if not WorldBuilder._add_flat_polygon(rst, poly, ref + top, flat):
+				WorldBuilder._add_flat_polygon(rst, Geometry2D.convex_hull(poly), ref + top, flat)
+			if bottom > 0.1:
+				WorldBuilder._add_flat_polygon(rst, poly, ref + bottom, flat.darkened(0.3), Vector3.DOWN)
+		if shape == BuildingStyle.DOME and not box.is_empty():
+			var radius := minf(float(box.hw) * 0.7, 8.0)
+			RoofBuilder.emit_dome(rst, BuildingStyle.to_world(box, Vector2.ZERO), radius, ref + top, facade, roof.colour)
+		if not box.is_empty() and str(b.get("type", "")) == "mosque" and float(box.hw) > 3.5:
+			var count := 1 + int(WorldBuilder._hash01(key + "minarets") < 0.5)
+			var yaw := atan2(float((box.u as Vector2).y), float((box.u as Vector2).x))
+			var cap := Color(str(BuildingStyle.METAL_ROOFS[0]))
+			for m in count:
+				var sx := 1.0 if m == 0 else -1.0
+				var at := BuildingStyle.to_world(box, Vector2(sx * (float(box.hl) + 0.4), float(box.hw) + 0.4))
+				RoofBuilder.emit_minaret(wst, rst, at, ref, 24.0 + WorldBuilder._hash01(key + "minh") * 10.0, wall_col, cap, yaw)
+		if not box.is_empty() and str(b.get("type", "")) == "church" and float(box.hw) > 3.0 and pitched:
+			var spire := Color(BuildingStyle.SLATE)
+			RoofBuilder.emit_tower(wst, rst, BuildingStyle.to_world(box, Vector2(-(float(box.hl) - 2.3), 0.0)), box.u,
+				2.0, ref + top - 4.0, 12.0, wall_col, spire)
+		for prop in BuildingStyle.roof_props(key, poly, box, shape, top, real_area):
+			var at: Vector2 = prop.at
+			match str(prop.kind):
+				"chimney":
+					var brick := Color(str(BuildingStyle.BRICKS[int(WorldBuilder._hash01(key + "chimc") * BuildingStyle.BRICKS.size())]))
+					RoofBuilder.emit_chimney(rst, box, shape, rise, ref + top, at, brick)
+				"stairs":
+					RoofBuilder.emit_block(wst, rst, at, box.u, prop.size, ref + top, ref + top + 2.6, wall_col,
+						BuildingStyle.flat_roof_colour(b, key), ref, 0.0)
+				"tank":
+					tank_xf.append(Transform3D(Basis(), Vector3(at.x, ref + top + 0.8, at.y)))
+				"ac":
+					ac_xf.append(Transform3D(Basis(Vector3.UP, float(prop.yaw)), Vector3(at.x, ref + top + 0.35, at.y)))
+				"aerial":
+					aerial_xf.append(Transform3D(Basis(Vector3.UP, WorldBuilder._hash01(key + "aer") * TAU), Vector3(at.x, ref + top, at.y)))
+				"dish":
+					dish_xf.append(Transform3D(Basis(Vector3.UP, WorldBuilder._hash01(key + "dsh") * TAU), Vector3(at.x, ref + top + 0.3, at.y)))
 	var wall_mat := CityMaterials.get_shader("walls")
 	var roof_mat := CityMaterials.get_shader("roof")
 	for chunk in walls:
@@ -832,6 +875,75 @@ static func _buildings(ctx: StreetLayout, vis: Node3D) -> void:
 	var ac := BoxMesh.new()
 	ac.size = Vector3(0.9, 0.7, 0.6)
 	_multimesh(vis, ac, CityMaterials.solid(Color("c7cacc"), 0.6), ac_xf, [], 140.0, "AirConditioners")
+	_multimesh(vis, _aerial_mesh(), CityMaterials.instanced(), aerial_xf, [], 110.0, "Aerials")
+	var dish := SphereMesh.new()
+	dish.radius = 0.4
+	dish.height = 0.4
+	dish.is_hemisphere = true
+	dish.radial_segments = 10
+	dish.rings = 3
+	_multimesh(vis, dish, CityMaterials.solid(Color("dcdcd8"), 0.5), dish_xf, [], 110.0, "Dishes")
+
+
+## Rooftop TV aerial: a mast with three cross elements.
+static func _aerial_mesh() -> Mesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var metal := Color(0.7, 0.72, 0.74)
+	_box_into(st, Vector3(0.05, 3.0, 0.05), Vector3(0, 1.5, 0), metal)
+	for k in 3:
+		_box_into(st, Vector3(0.9 - k * 0.2, 0.03, 0.03), Vector3(0, 2.3 + k * 0.3, 0), metal)
+	return st.commit()
+
+
+## Shop and café points of interest by 16 m cell, to tell which street walls carry a shopfront.
+static func _shop_points(ctx: StreetLayout) -> Dictionary:
+	var cells := {}
+	for poi in ctx.zone.pois:
+		var kind := str(poi.get("kind", ""))
+		if kind in SIGN_SKIP:
+			continue
+		var p := Vector2(float(poi.e), -float(poi.n))
+		var cell := Vector2i(floori(p.x / 16.0), floori(p.y / 16.0))
+		if not cells.has(cell):
+			cells[cell] = []
+		cells[cell].append(p)
+	return cells
+
+
+static func _shop_near_edge(shops: Dictionary, p0: Vector2, p1: Vector2) -> bool:
+	if shops.is_empty():
+		return false
+	var mid := (p0 + p1) / 2.0
+	var reach := int(ceil(p0.distance_to(p1) / 32.0)) + 1
+	var cell := Vector2i(floori(mid.x / 16.0), floori(mid.y / 16.0))
+	for dx in range(-reach, reach + 1):
+		for dy in range(-reach, reach + 1):
+			for p: Vector2 in shops.get(Vector2i(cell.x + dx, cell.y + dy), []):
+				if p.distance_to(Geometry2D.get_closest_point_to_segment(p, p0, p1)) < 6.0:
+					return true
+	return false
+
+
+## A wall from y0 to a roof line that rises along the edge (`tops` from
+## RoofBuilder.wall_top: [[t, metres above the eave], ...]).
+static func _wall_strip(st: SurfaceTool, p0: Vector2, p1: Vector2, y0: float, eave: float, tops: Array, n: Vector3,
+		col: Color, length: float, info: Vector2, base := 0.0) -> void:
+	for k in range(tops.size() - 1):
+		var ta: float = tops[k][0]
+		var tb: float = tops[k + 1][0]
+		var qa := p0.lerp(p1, ta)
+		var qb := p0.lerp(p1, tb)
+		var ya := eave + float(tops[k][1])
+		var yb := eave + float(tops[k + 1][1])
+		var a0 := Vector3(qa.x, base + y0, qa.y)
+		var a1 := Vector3(qa.x, base + ya, qa.y)
+		var b0 := Vector3(qb.x, base + y0, qb.y)
+		var b1 := Vector3(qb.x, base + yb, qb.y)
+		WorldBuilder._add_tri(st, a0, b1, b0, n, col,
+			PackedVector2Array([Vector2(ta * length, y0), Vector2(tb * length, yb), Vector2(tb * length, y0)]), info)
+		WorldBuilder._add_tri(st, a0, a1, b1, n, col,
+			PackedVector2Array([Vector2(ta * length, y0), Vector2(ta * length, ya), Vector2(tb * length, yb)]), info)
 
 
 ## A wall from y0 to y1 above `base` (the building's ground). UV.y stays
@@ -856,16 +968,6 @@ static func _faces_street(ctx: StreetLayout, p0: Vector2, p1: Vector2, out: Vect
 		if probe.distance_to(q) < float(seg[2]) / 2.0 + 3.5:
 			return true
 	return false
-
-
-static func _facade_color(key: String, kind: String) -> Color:
-	var palette: Array = FACADES
-	if kind == "commercial" or kind == "civic":
-		palette = FACADES_COMMERCIAL
-	elif kind == "religious":
-		palette = ["efe8dc"]
-	var base := Color(str(palette[int(WorldBuilder._hash01(key) * palette.size())]))
-	return base.darkened((WorldBuilder._hash01(key + "dark") - 0.5) * 0.14)
 
 
 ## Balcony slab with a solid parapet in the wall colour (the usual Istanbul
