@@ -94,7 +94,9 @@ var hud: GameHud
 var touch: TouchControls
 var bot: BotBrain
 var transit: TransitNetwork
+var traffic: Traffic
 var fleet: TramFleet
+var traffic_view: TrafficView
 var navigator: Navigator
 var city_map: CityMap
 var sky: SkyController
@@ -277,6 +279,10 @@ func on_welcome(info: Dictionary) -> void:
 	transit = zone.transit
 	# Trams need a clock before the first snapshot arrives.
 	_clock_offset = now() - float(info.get("server_time", 0.0))
+	# Road traffic is a function of the same clock; the server says which hour
+	# of the day its world time 0 is (an older server: our own clock).
+	traffic = Traffic.for_zone(zone)
+	traffic.hour0 = float(info.hour0) if info.has("hour0") else Traffic.clock_hour0(float(info.get("server_time", 0.0)))
 	_connect_started = 0.0  # welcomed: building the city may take a while on a phone
 	var loading: CanvasLayer = null
 	if not _headless:
@@ -321,6 +327,10 @@ func on_welcome(info: Dictionary) -> void:
 		fleet.name = "Trams"
 		add_child(fleet)
 		fleet.setup(transit, zone.half_size())
+		traffic_view = TrafficView.new()
+		traffic_view.name = "Traffic"
+		add_child(traffic_view)
+		traffic_view.setup(self, traffic)
 		props_view = PropView.new()
 		props_view.name = "Props"
 		add_child(props_view)
@@ -419,6 +429,8 @@ func on_welcome(info: Dictionary) -> void:
 			sounds.setup(self)
 			if props_view:
 				props_view.sounds = sounds
+			if traffic_view:
+				traffic_view.sounds = sounds
 			if touch:
 				touch.exclude = [Rect2(get_viewport().get_visible_rect().size.x - 2 * CityMap.MINI_RADIUS - 16, 70,
 					2 * CityMap.MINI_RADIUS, 2 * CityMap.MINI_RADIUS)]
@@ -978,7 +990,7 @@ func on_ride(info: Dictionary) -> void:
 	body.global_position = info.pos
 	body.velocity = Vector3.ZERO
 	for inp in _pending_inputs:
-		PlayerMotor.step(body, inp, transit)
+		PlayerMotor.step(body, inp, transit, traffic)
 		inp.pos = body.global_position
 		inp.vel = body.velocity
 		inp.st = PlayerMotor.motor_state(body)
@@ -1118,6 +1130,14 @@ func _on_tram_hit() -> void:
 		_tram_hit_at = now()
 		log_line("hit by a tram")
 		_notice("Tramvay çarptı! Rayların üstünde durma.")
+
+
+func _on_car_hit() -> void:
+	_shake = 1.0
+	if now() - _tram_hit_at > 3.0:
+		_tram_hit_at = now()
+		log_line("hit by a car")
+		_notice("Araba çarptı! Yola çıkarken dikkat et, yaya geçidini kullan.")
 
 
 ## Warns (and rings the bell) when a moving tram is coming straight at you.
@@ -1305,11 +1325,13 @@ func _physics_process(_delta: float) -> void:
 	var inp := SnapshotCodec.quantize_input(_input_seq, mx, my, yaw, pitch, buttons, wt)
 	_prev_pos = body.global_position
 	if riding.is_empty():
-		var events := PlayerMotor.step(body, inp, transit)
+		var events := PlayerMotor.step(body, inp, transit, traffic)
 		if events & PlayerMotor.EVENT_STEPPED:
 			_step_visual -= body.global_position.y - _prev_pos.y
 		if events & PlayerMotor.EVENT_TRAM_HIT:
 			_on_tram_hit()
+		if events & PlayerMotor.EVENT_CAR_HIT:
+			_on_car_hit()
 		if props_view:
 			props_view.touch_balls(body.global_position, body.velocity, events & PlayerMotor.EVENT_SPRINTED != 0)
 	else:
@@ -1359,7 +1381,7 @@ func _reconcile() -> void:
 	body.velocity = snap.self_vel
 	PlayerMotor.apply_state(body, snap.self_state)
 	for inp in _pending_inputs:
-		PlayerMotor.step(body, inp, transit)
+		PlayerMotor.step(body, inp, transit, traffic)
 		inp.pos = body.global_position
 		inp.vel = body.velocity
 		inp.st = PlayerMotor.motor_state(body)
@@ -1402,6 +1424,10 @@ func _process(delta: float) -> void:
 			fleet.view_distance = camera.far
 		fleet.update(server_now(), night)
 	FrameProfiler.add("fleet", t0)
+	t0 = FrameProfiler.start()
+	if traffic_view:
+		traffic_view.update(server_now(), night, camera.global_position if camera else render_pos, render_pos, delta)
+	FrameProfiler.add("traffic", t0)
 	_step_visual = lerpf(_step_visual, 0.0, 1.0 - exp(-12.0 * delta))
 	_sit_blend = move_toward(_sit_blend, 1.0 if body.has_meta("seat") else 0.0, delta * 1.5)
 	var cam_pos := render_pos + Vector3(0, _eye_height * (1.0 - 0.3 * _sit_blend) + _step_visual, 0)

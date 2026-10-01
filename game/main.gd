@@ -79,6 +79,7 @@ func _start_server(args: Dictionary) -> void:
 		"spawn_at": str(args.get("spawn-at", "")),
 		"quit_after": float(args.get("quit-after", 0.0)),
 		"weather": str(args.get("weather", "live")),
+		"traffic_hour": float(args.get("traffic-hour", -1.0)),  # test override of the road traffic's clock
 	})
 	if err != OK:
 		printerr("server failed to start: %s" % error_string(err))

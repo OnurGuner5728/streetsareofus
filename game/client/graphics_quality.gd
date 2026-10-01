@@ -63,6 +63,16 @@ static func range_scale() -> float:
 	return [0.5, 0.8, 1.0][level]
 
 
+## How far road traffic is drawn (m) and where cars turn into plain boxes. The
+## fleet itself is the server's and never shrinks; only what is drawn does.
+static func traffic_range() -> float:
+	return [130.0, 180.0, 250.0][level]
+
+
+static func traffic_lod() -> float:
+	return [65.0, 85.0, 100.0][level]
+
+
 static func camera_far() -> float:
 	return [380.0, 700.0, 1500.0][level]
 

@@ -19,8 +19,15 @@ func _ready() -> void:
 		test_coastline, test_coast_sea_blocking, test_weather_wave_mapping, test_tree_road_grid,
 		test_transit_network, test_transit_timetable, test_walking_routes, test_route_prefers_tram,
 		test_building_style, test_roof_geometry, test_nostalgic_tram_model,
+
+
+		test_traffic_model, test_traffic_road_rules, test_traffic_headway_and_signals, test_traffic_density,
+		test_traffic_collision,
 	]
+	var only := OS.get_environment("TEST_ONLY")  # e.g. TEST_ONLY=traffic runs the tests with that in their name
 	for t in tests:
+		if only != "" and not String(t.get_method()).contains(only):
+			continue
 		_test = t.get_method()
 		await t.call()
 	print("")
@@ -1841,3 +1848,342 @@ func test_cooldown_per_kind() -> void:
 	s.respond(2, fx[0].args[0], true, 3.0)
 	fx = s.request(1, 2, "rps", 4.0, 3.0, false)
 	check(rpcs(fx, 1) == ["notice:cooldown"], "the same kind is")
+
+
+# --- road traffic ------------------------------------------------------------
+
+var _traffic_zone: ZoneData
+var _traffic_twin: Traffic
+
+
+func _kadikoy_traffic() -> Traffic:
+	if _traffic_zone == null:
+		_traffic_zone = ZoneData.load_zone("tr_istanbul_kadikoy_001")
+	return Traffic.for_zone(_traffic_zone)
+
+
+## A second instance built from the same zone, for determinism checks.
+func _twin_traffic() -> Traffic:
+	_kadikoy_traffic()
+	if _traffic_twin == null:
+		_traffic_twin = Traffic.new(_traffic_zone)
+	return _traffic_twin
+
+
+## The fleet exists and two instances put every vehicle in the same place at
+## the same time, whatever was asked before (nothing is simulated per frame).
+func test_traffic_model() -> void:
+	var a := _kadikoy_traffic()
+	var b := _twin_traffic()
+	check(a.routes.size() >= 8, "enough drivable loops (%d)" % a.routes.size())
+	check(a.vehicles.size() >= 60, "enough vehicles (%d)" % a.vehicles.size())
+	check(a.gates_total >= 10, "pedestrian crossings gate the loops (%d)" % a.gates_total)
+	check(b.routes.size() == a.routes.size() and b.vehicles.size() == a.vehicles.size(), "both instances build the same fleet")
+	var mismatches := 0
+	var kinds := {}
+	var moving := 0
+	for tick in [0, 1, 37, 250, 900, 4321, 13337, 60011]:
+		var t: float = tick * Protocol.DT
+		for i in a.vehicles.size():
+			var va: Traffic.Vehicle = a.vehicles[i]
+			var vb: Traffic.Vehicle = b.vehicles[i]
+			a.place(va, t)
+			b.place(vb, t)
+			if va.pos != vb.pos or va.dir != vb.dir or va.speed != vb.speed or va.accel != vb.accel:
+				mismatches += 1
+			kinds[va.kind] = true
+			if va.speed > 1.0:
+				moving += 1
+	check(mismatches == 0, "the same tick gives the same vehicles (%d differ)" % mismatches)
+	check(moving > a.vehicles.size(), "vehicles actually drive (%d samples moving)" % moving)
+	check(kinds.size() >= 3, "several kinds of vehicle (%d)" % kinds.size())
+	# Asking about other times in between changes nothing.
+	var v0: Traffic.Vehicle = a.vehicles[5]
+	a.place(v0, 100.0)
+	var first := v0.pos
+	a.place(v0, 5000.0)
+	a.place(v0, 100.0)
+	check(v0.pos == first, "placing is a pure function of time")
+	# The collision boxes agree too, and are found where the vehicles are.
+	var boxes_seen := 0
+	var box_mismatch := 0
+	for k in 40:
+		var v: Traffic.Vehicle = a.vehicles[(k * 7) % a.vehicles.size()]
+		var tick := 300 + k * 211
+		a.place(v, tick * Protocol.DT)
+		var near_a := a.boxes_near(tick, v.pos, 6.0)
+		var near_b := b.boxes_near(tick, v.pos, 6.0)
+		boxes_seen += near_a.size()
+		if near_a != near_b:
+			box_mismatch += 1
+		for box in near_a:
+			var d: Vector2 = (box[0] as Vector2) - v.pos
+			check(d.length() <= 6.0 + float(box[2]) + 0.01, "boxes_near stays within its radius")
+	check(box_mismatch == 0, "collision boxes agree between instances (%d differ)" % box_mismatch)
+	check(boxes_seen >= 20, "boxes are found beside vehicles (%d)" % boxes_seen)
+	# Cheap enough for a server tick: a few lookups per player.
+	var t0 := Time.get_ticks_usec()
+	var calls := 2000
+	for k in calls:
+		var v: Traffic.Vehicle = a.vehicles[(k * 13) % a.vehicles.size()]
+		a.boxes_near(1000 + k * 3, v.pos, 8.0)
+	var per_call := float(Time.get_ticks_usec() - t0) / calls
+	check(per_call < 500.0, "a box lookup is cheap (%.0f us)" % per_call)
+
+
+## Cars stay on roads: never inside a building, in the sea, on the tram track
+## or outside the zone, and always close to some road's centre line.
+func test_traffic_road_rules() -> void:
+	var traffic := _kadikoy_traffic()
+	var zone := _traffic_zone
+	var layout := StreetLayout.for_zone(zone)
+	var off_road := 0
+	var in_building := 0
+	var in_sea := 0
+	var on_track := 0
+	var outside := 0
+	var samples := 0
+	var worst := 0.0
+	for tick in range(0, 7200, 90):
+		var t: float = tick * Protocol.DT
+		for v: Traffic.Vehicle in traffic.vehicles:
+			traffic.place(v, t)
+			samples += 1
+			var best := INF
+			for item in layout.roads_near(v.pos):
+				var q := Geometry2D.get_closest_point_to_segment(v.pos, item[0], item[1])
+				best = minf(best, v.pos.distance_to(q) - float(item[2]) * 0.5)
+			worst = maxf(worst, best)
+			if best > 0.6:
+				off_road += 1
+			for end in [-1.0, 0.0, 1.0]:
+				var p: Vector2 = v.pos + v.dir * v.length * 0.5 * end
+				if layout.building_clearance(p) < 0.0:
+					in_building += 1
+			if zone.coast != null and not zone.coast.is_land(v.pos):
+				in_sea += 1
+			if layout.near_track(v.pos, 3.0):
+				on_track += 1
+			if not layout.inside_zone(v.pos, 8.0):
+				outside += 1
+	check(samples > 3000, "enough samples (%d)" % samples)
+	check(off_road == 0, "cars follow roads (%d of %d off, worst %.2f m outside)" % [off_road, samples, worst])
+	check(in_building == 0, "no car drives through a building (%d)" % in_building)
+	check(in_sea == 0, "no car drives into the sea (%d)" % in_sea)
+	check(on_track == 0, "no car enters the tram track (%d)" % on_track)
+	check(outside == 0, "no car leaves the zone (%d)" % outside)
+
+
+## Cars never overlap the one ahead, and while a crossing is red nobody is on
+## it, so people can cross safely.
+func test_traffic_headway_and_signals() -> void:
+	var traffic := _kadikoy_traffic()
+	var tightest := INF
+	var on_red := 0
+	var red_samples := 0
+	var stopped_for_red := 0
+	for route: TrafficRoute in traffic.routes:
+		var vs := route.vehicles
+		for step in 960:
+			var t := step * 0.25
+			for v: Traffic.Vehicle in vs:
+				traffic.place(v, t)
+			for i in vs.size():
+				for j in range(i + 1, vs.size()):
+					var a: Traffic.Vehicle = vs[i]
+					var b: Traffic.Vehicle = vs[j]
+					var d := fposmod(b.arc - a.arc, route.length)
+					var half := (a.length + b.length) * 0.5
+					tightest = minf(tightest, minf(d, route.length - d) - half)
+			for gi in route.gates.size():
+				var ci: int = route.gate_ids[gi]
+				if not traffic.crossing_red(ci, t):
+					continue
+				red_samples += 1
+				var centre := float((route.gates[gi] as Array)[0]) + TrafficRoute.STOP_LINE
+				for v: Traffic.Vehicle in vs:
+					var d := fposmod(centre - v.arc + route.length * 0.5, route.length) - route.length * 0.5
+					if absf(d) < v.length * 0.5 + TrafficRoute.ZEBRA_CLEAR - 0.1:
+						on_red += 1
+					elif v.speed < 0.1 and d > 0.0 and d < 12.0 + v.length * 0.5:
+						stopped_for_red += 1
+	check(tightest >= 3.0, "cars keep a gap to the one ahead (%.2f m at the tightest)" % tightest)
+	check(red_samples > 200, "red phases were sampled (%d)" % red_samples)
+	check(on_red == 0, "nobody is on a crossing while it is red (%d)" % on_red)
+	check(stopped_for_red > 20, "cars wait for pedestrians (%d samples)" % stopped_for_red)
+	# The rule pedestrians rely on: 13 s of every 40 s, per crossing, spread out.
+	var red_now := 0
+	for ci in traffic.crossing_count():
+		if traffic.crossing_red(ci, 7.0):
+			red_now += 1
+	var share := float(red_now) / traffic.crossing_count()
+	check(share > 0.15 and share < 0.5, "crossings are red at different moments (%.2f red at once)" % share)
+
+
+## Busier at rush hour than at night, and never more than 60 vehicles within
+## 150 m of anywhere.
+func test_traffic_density() -> void:
+	var traffic := _twin_traffic()
+	check(Traffic.density(18.0) > Traffic.density(13.0) and Traffic.density(8.0) > Traffic.density(10.0), "rush hours are busier")
+	check(Traffic.density(3.5) < 0.25 and Traffic.density(18.0) <= 1.0, "quiet at night, at most full")
+	var old_hour := traffic.hour0
+	var most := 0
+	var counts := {}
+	for hour in [3.0, 8.0, 13.0, 18.0]:
+		traffic.hour0 = hour
+		var total := 0
+		for v: Traffic.Vehicle in traffic.vehicles:
+			if traffic.is_active(v, 0.0):
+				total += 1
+		counts[hour] = total
+		for k in 60:
+			var p := Vector2(-450.0 + (k % 10) * 100.0, -300.0 + (k / 10) * 120.0)
+			most = maxi(most, traffic.vehicles_near(0.0, p, 150.0).size())
+	traffic.hour0 = old_hour
+	check(counts[3.0] < counts[18.0] * 0.5, "far fewer cars at 03:00 than at 18:00 (%d vs %d)" % [counts[3.0], counts[18.0]])
+	check(counts[18.0] > 40, "a busy evening (%d vehicles)" % counts[18.0])
+	check(most <= 60, "at most 60 vehicles within 150 m (%d)" % most)
+
+
+## A car that runs into a standing player knocks them down and throws them
+## aside, the same way every time (and in a replay); a stopped car is a wall;
+## and nobody standing on a crossing in the lane is hit while it is red.
+func test_traffic_collision() -> void:
+	var traffic := _kadikoy_traffic()
+	var zone := _traffic_zone
+	var holder := Node3D.new()
+	add_child(holder)
+	WorldBuilder.build(zone, holder, false)
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	var layout := StreetLayout.for_zone(zone)
+	# A fast car well inside the zone, with clear road ahead.
+	var pick: Traffic.Vehicle = null
+	var tick0 := 0
+	var stand := Vector2.ZERO
+	var t := 60.0
+	while t < 400.0 and pick == null:
+		for v: Traffic.Vehicle in traffic.vehicles:
+			traffic.place(v, t)
+			if v.speed > 7.0 and traffic.is_active(v, t) and v.kind == Traffic.CAR and layout.inside_zone(v.pos, 60.0):
+				var ahead := v.pos + v.dir * (v.length * 0.5 + 5.0)
+				if layout.building_clearance(ahead) > 1.5 and layout.near_track(ahead, 4.0) == false:
+					pick = v
+					tick0 = roundi(t / Protocol.DT)
+					stand = ahead
+					break
+		t += 0.5
+	check(pick != null, "found a car at speed")
+	if pick == null:
+		holder.queue_free()
+		return
+	traffic.place(pick, tick0 * Protocol.DT)
+	var speed0 := pick.speed
+	var finals := []
+	var hits := 0
+	var hit_tick := -1
+	var states := []
+	var final_state := {}
+	for run in 2:
+		var body := PlayerMotor.make_body(AvatarSpec.defaults())
+		holder.add_child(body)
+		body.global_position = zone.ground(stand.x, -stand.y, 0.05)
+		await get_tree().physics_frame
+		for k in 60:
+			var inp := SnapshotCodec.quantize_input(k + 1, 0, 0, 0.0, 0, 0, tick0 + k)
+			if PlayerMotor.step(body, inp, null, traffic) & PlayerMotor.EVENT_CAR_HIT:
+				hits += 1
+				if run == 0 and hit_tick < 0:
+					hit_tick = k
+					check(PlayerMotor.knock_ticks(body) == PlayerMotor.KNOCK_TICKS, "the hit knocks the player down")
+					near(float(body.get_meta("hit_speed", 0.0)), speed0, 2.5, "the hit speed is recorded")
+					var fling := Vector2(body.velocity.x, body.velocity.z).length()
+					check(fling > 3.0 and body.velocity.y > 1.5, "flung along, sideways and up (%.1f m/s, up %.1f)" % [fling, body.velocity.y])
+			if run == 0:
+				states.append([body.global_position, body.velocity, PlayerMotor.motor_state(body)])
+		finals.append(body.global_position)
+		if run == 0:
+			final_state = PlayerMotor.motor_state(body)
+		body.queue_free()
+	check(hit_tick >= 0, "the car reached the player")
+	check(hits == 2, "one hit per run, not again while down (%d hits)" % hits)
+	check((finals[0] as Vector3).distance_to(finals[1]) < 0.001, "car collisions are deterministic")
+	if hit_tick >= 3:
+		var from := hit_tick - 3
+		var replay := PlayerMotor.make_body(AvatarSpec.defaults())
+		holder.add_child(replay)
+		await get_tree().physics_frame
+		replay.global_position = states[from][0]
+		replay.velocity = states[from][1]
+		PlayerMotor.apply_state(replay, states[from][2])
+		var replay_hits := 0
+		for k in range(from + 1, 60):
+			if PlayerMotor.step(replay, SnapshotCodec.quantize_input(k + 1, 0, 0, 0.0, 0, 0, tick0 + k), null, traffic) & PlayerMotor.EVENT_CAR_HIT:
+				replay_hits += 1
+		check(replay_hits == 1, "the replay sees the hit too")
+		check(replay.global_position.distance_to(finals[0]) < 0.001, "replaying a car hit lands where the realtime run did")
+		check(PlayerMotor.motor_state(replay) == final_state, "and in the same state")
+		replay.queue_free()
+	# A car waiting at a red light is a wall: walking into it only stops you.
+	var waiting: Traffic.Vehicle = null
+	var wait_tick := 0
+	t = 60.0
+	while t < 400.0 and waiting == null:
+		for v: Traffic.Vehicle in traffic.vehicles:
+			traffic.place(v, t)
+			if v.speed < 0.01 and traffic.is_active(v, t) and layout.inside_zone(v.pos, 60.0):
+				var front := v.pos + v.dir * (v.length * 0.5 + 2.0)
+				if layout.building_clearance(front) > 1.5:
+					waiting = v
+					wait_tick = roundi(t / Protocol.DT)
+					break
+		t += 0.5
+	check(waiting != null, "found a stopped car")
+	if waiting != null:
+		traffic.place(waiting, wait_tick * Protocol.DT)
+		var back := waiting.dir
+		var start := waiting.pos + back * (waiting.length * 0.5 + 1.5)
+		var body := PlayerMotor.make_body(AvatarSpec.defaults())
+		holder.add_child(body)
+		body.global_position = zone.ground(start.x, -start.y, 0.05)
+		await get_tree().physics_frame
+		var yaw := atan2(back.x, back.y)  # walk against the car's heading, towards it
+		var knocked := false
+		for k in 20:  # well inside the time it keeps standing
+			var ev := PlayerMotor.step(body, SnapshotCodec.quantize_input(k + 1, 0, 1, yaw, 0, 0, wait_tick + k), null, traffic)
+			if ev & PlayerMotor.EVENT_CAR_HIT:
+				knocked = true
+		var d := Vector2(body.global_position.x, body.global_position.z) - waiting.pos
+		check(not knocked and PlayerMotor.knock_ticks(body) == 0, "walking into a standing car does not knock you down")
+		check(d.dot(back) > waiting.length * 0.5 + 0.1, "a standing car is solid (%.2f m from its centre)" % d.dot(back))
+		body.queue_free()
+	# Standing in the lane on a crossing while it is red: nothing touches you.
+	var tested := 0
+	var touched := 0
+	for route: TrafficRoute in traffic.routes:
+		for gi in route.gates.size():
+			if tested >= 4:
+				break
+			var ci: int = route.gate_ids[gi]
+			var gate_arc := float((route.gates[gi] as Array)[0]) + TrafficRoute.STOP_LINE
+			var red_start := 100.0
+			while not (traffic.crossing_red(ci, red_start + 0.05) and not traffic.crossing_red(ci, red_start - 0.05)):
+				red_start += 0.05
+			var spot := route.point_at(gate_arc)
+			var person := PlayerMotor.make_body(AvatarSpec.defaults())
+			holder.add_child(person)
+			person.global_position = zone.ground(spot.x, -spot.y, 0.05)
+			await get_tree().physics_frame
+			var first := ceili((red_start + 1.0) / Protocol.DT)
+			var last := floori((red_start + TrafficRoute.RED - 0.6) / Protocol.DT)
+			for k in range(first, last):
+				if PlayerMotor.step(person, SnapshotCodec.quantize_input(k - first + 1, 0, 0, 0.0, 0, 0, k), null, traffic) & PlayerMotor.EVENT_CAR_HIT:
+					touched += 1
+				if Vector2(person.global_position.x, person.global_position.z).distance_to(spot) > 0.3:
+					touched += 1
+					break
+			person.queue_free()
+			tested += 1
+	check(tested >= 3, "crossings to stand on (%d)" % tested)
+	check(touched == 0, "nobody standing on a red crossing is hit or pushed (%d touches)" % touched)
+	holder.queue_free()
