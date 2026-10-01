@@ -235,8 +235,8 @@ func _nostalgic_section(veh: Dictionary, line: TransitNetwork.TransitLine) -> No
 	# Nose: coupler, destination board, headlamp, route lamp, doors.
 	for sgn in [-1.0, 1.0]:
 		var front: float = sgn * length / 2.0
-		m.box("body", Vector3(1.0, 0.16, 0.14), Vector3(0, 0.78, front + sgn * 0.04), dark)
-		m.box("body", Vector3(0.14, 0.14, 0.3), Vector3(0, 0.55, front + sgn * 0.1), dark)
+		m.box("body", Vector3(1.0, 0.16, 0.14), Vector3(0, 0.78, front), dark)
+		m.box("body", Vector3(0.14, 0.14, 0.3), Vector3(0, 0.55, front), dark)
 		m.box("body", Vector3(1.15, 0.26, 0.05), Vector3(0, 2.66, front + sgn * 0.02), Color("181b1f"))
 		m.sphere("lights", 0.14, Vector3(0, 1.2, front + sgn * 0.02), Color.WHITE, Vector3(1, 1, 0.6))
 		m.box("lights", Vector3(0.34, 0.24, 0.22), Vector3(0, 3.17, sgn * (length / 2.0 - 0.7)), Color.WHITE)
