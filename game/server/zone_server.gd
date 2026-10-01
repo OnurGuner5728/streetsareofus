@@ -937,7 +937,7 @@ func _update_seksek() -> void:
 			_dispatch(seksek.cancel(peer))
 			continue
 		var hopping: bool = pl.buttons & PlayerMotor.BUTTON_HOP != 0
-		_dispatch(seksek.update(peer, pl.body.global_position, pl.body.is_on_floor(), hopping, now()))
+		_dispatch(seksek.update(peer, pl.body.global_position, PlayerMotor.is_grounded(pl.body), hopping, now()))
 
 
 func on_chat(peer: int, text: String) -> void:

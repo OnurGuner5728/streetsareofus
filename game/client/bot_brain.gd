@@ -322,9 +322,9 @@ func _seksek_tick(client: GameClient, now: float) -> Dictionary:
 	var grid: Dictionary = client.hopscotch.grids[int(client.seksek.grid)]
 	var pos := client.body.global_position
 	var local := Hopscotch.to_local(grid, Vector2(pos.x, pos.z))
-	var row := int(client.seksek.score) - 1  # the row we stand in (-1: start strip)
+	var row := maxi(floori(local.y / Hopscotch.SQ), -1)  # the row we stand in (-1: start strip), from our own position since the server score lags
 	var launch_v := (row + 1) * Hopscotch.SQ - 0.32
-	var on_floor := client.body.is_on_floor()
+	var on_floor := PlayerMotor.is_grounded(client.body)
 	var aligned := absf(local.x + 0.45) < 0.2
 	var buttons := PlayerMotor.BUTTON_HOP
 	if on_floor and aligned and local.y >= launch_v:
