@@ -239,6 +239,7 @@ def cmd_hide(args) -> int:
         (seeker, "hide end reason=all found=1 freed=0"), (hider, "hide end reason=all found=1 freed=0"),
         (hider, "hide free: BotB"), (seeker, "hide free: BotB"),
         (seeker, "hide end reason=all found=0 freed=1"), (hider, "hide end reason=all found=0 freed=1"),
+        (hider, "notice hide_counting"), (hider, "notice hide_base_far"),  # the early and the far tap are refused
         (seeker, "hide test complete"), (hider, "hide test complete"),
         (server, "hide: BotA seeks 1 hiders"),
     ]
