@@ -68,6 +68,7 @@ var hud: GameHud
 var touch: TouchControls
 var bot: BotBrain
 var transit: TransitNetwork
+var traffic: Traffic
 var fleet: TramFleet
 var navigator: Navigator
 var city_map: CityMap
@@ -242,6 +243,10 @@ func on_welcome(info: Dictionary) -> void:
 	transit = zone.transit
 	# Trams need a clock before the first snapshot arrives.
 	_clock_offset = now() - float(info.get("server_time", 0.0))
+	# Road traffic is a function of the same clock; the server says which hour
+	# of the day its world time 0 is (an older server: our own clock).
+	traffic = Traffic.for_zone(zone)
+	traffic.hour0 = float(info.hour0) if info.has("hour0") else Traffic.clock_hour0(float(info.get("server_time", 0.0)))
 	_connect_started = 0.0  # welcomed: building the city may take a while on a phone
 	var loading: CanvasLayer = null
 	if not _headless:
@@ -564,7 +569,7 @@ func on_ride(info: Dictionary) -> void:
 	body.global_position = info.pos
 	body.velocity = Vector3.ZERO
 	for inp in _pending_inputs:
-		PlayerMotor.step(body, inp, transit)
+		PlayerMotor.step(body, inp, transit, traffic)
 		inp.pos = body.global_position
 		inp.vel = body.velocity
 		inp.st = PlayerMotor.motor_state(body)
@@ -704,6 +709,14 @@ func _on_tram_hit() -> void:
 		_tram_hit_at = now()
 		log_line("hit by a tram")
 		_notice("Tramvay çarptı! Rayların üstünde durma.")
+
+
+func _on_car_hit() -> void:
+	_shake = 1.0
+	if now() - _tram_hit_at > 3.0:
+		_tram_hit_at = now()
+		log_line("hit by a car")
+		_notice("Araba çarptı! Yola çıkarken dikkat et, yaya geçidini kullan.")
 
 
 ## Warns (and rings the bell) when a moving tram is coming straight at you.
@@ -873,11 +886,13 @@ func _physics_process(_delta: float) -> void:
 	var inp := SnapshotCodec.quantize_input(_input_seq, mx, my, yaw, pitch, buttons, wt)
 	_prev_pos = body.global_position
 	if riding.is_empty():
-		var events := PlayerMotor.step(body, inp, transit)
+		var events := PlayerMotor.step(body, inp, transit, traffic)
 		if events & PlayerMotor.EVENT_STEPPED:
 			_step_visual -= body.global_position.y - _prev_pos.y
 		if events & PlayerMotor.EVENT_TRAM_HIT:
 			_on_tram_hit()
+		if events & PlayerMotor.EVENT_CAR_HIT:
+			_on_car_hit()
 		if props_view:
 			props_view.touch_balls(body.global_position, body.velocity, events & PlayerMotor.EVENT_SPRINTED != 0)
 	else:
@@ -927,7 +942,7 @@ func _reconcile() -> void:
 	body.velocity = snap.self_vel
 	PlayerMotor.apply_state(body, snap.self_state)
 	for inp in _pending_inputs:
-		PlayerMotor.step(body, inp, transit)
+		PlayerMotor.step(body, inp, transit, traffic)
 		inp.pos = body.global_position
 		inp.vel = body.velocity
 		inp.st = PlayerMotor.motor_state(body)

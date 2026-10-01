@@ -28,6 +28,7 @@ const ROAD_SPEEDS := {"primary": 12.5, "secondary": 10.0, "tertiary": 9.0, "uncl
 const TRAM_CLEARANCE := 5.0
 const LANE_CLEARANCE := 1.4  # a lane this close to a wall is not driven (car half width is 0.9 to 1.25)
 const BUILDING_CLEARANCE := 2.0  # road centre lines this close to a wall are not driven
+const ZONE_UTC_OFFSET := 3.0  # Istanbul
 const ZONE_MARGIN := 25.0
 const LOOP_CLOSE := 280.0  # a lane trail may end as soon as it is this long and can reach its start
 const MIN_ROUTE := 150.0
@@ -108,6 +109,15 @@ static func density(hours: float) -> float:
 			var b: Array = keys[i + 1]
 			return lerpf(float(a[1]), float(b[1]), (h - float(a[0])) / (float(b[0]) - float(a[0])))
 	return 0.3
+
+
+## The hour0 to use so that world time `t` (seconds, the server's clock) falls on
+## the real local time in Istanbul; `forced_hour` >= 0 pins that hour instead.
+static func clock_hour0(t: float, forced_hour := -1.0) -> float:
+	var local := forced_hour
+	if local < 0.0:
+		local = fposmod(Time.get_unix_time_from_system() / 3600.0 + ZONE_UTC_OFFSET, 24.0)
+	return fposmod(local - t / 3600.0, 24.0)
 
 
 ## Local hour of day at world time t (seconds).

@@ -18,6 +18,7 @@ func _ready() -> void:
 		test_coastline, test_coast_sea_blocking, test_weather_wave_mapping, test_tree_road_grid,
 		test_transit_network, test_transit_timetable, test_walking_routes, test_route_prefers_tram,
 		test_traffic_model, test_traffic_road_rules, test_traffic_headway_and_signals, test_traffic_density,
+		test_traffic_collision,
 	]
 	var only := OS.get_environment("TEST_ONLY")  # e.g. TEST_ONLY=traffic runs the tests with that in their name
 	for t in tests:
@@ -1410,3 +1411,147 @@ func test_traffic_density() -> void:
 	check(counts[3.0] < counts[18.0] * 0.5, "far fewer cars at 03:00 than at 18:00 (%d vs %d)" % [counts[3.0], counts[18.0]])
 	check(counts[18.0] > 40, "a busy evening (%d vehicles)" % counts[18.0])
 	check(most <= 60, "at most 60 vehicles within 150 m (%d)" % most)
+
+
+## A car that runs into a standing player knocks them down and throws them
+## aside, the same way every time (and in a replay); a stopped car is a wall;
+## and nobody standing on a crossing in the lane is hit while it is red.
+func test_traffic_collision() -> void:
+	var traffic := _kadikoy_traffic()
+	var zone := _traffic_zone
+	var holder := Node3D.new()
+	add_child(holder)
+	WorldBuilder.build(zone, holder, false)
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	var layout := StreetLayout.for_zone(zone)
+	# A fast car well inside the zone, with clear road ahead.
+	var pick: Traffic.Vehicle = null
+	var tick0 := 0
+	var stand := Vector2.ZERO
+	var t := 60.0
+	while t < 400.0 and pick == null:
+		for v: Traffic.Vehicle in traffic.vehicles:
+			traffic.place(v, t)
+			if v.speed > 7.0 and traffic.is_active(v, t) and v.kind == Traffic.CAR and layout.inside_zone(v.pos, 60.0):
+				var ahead := v.pos + v.dir * (v.length * 0.5 + 5.0)
+				if layout.building_clearance(ahead) > 1.5 and layout.near_track(ahead, 4.0) == false:
+					pick = v
+					tick0 = roundi(t / Protocol.DT)
+					stand = ahead
+					break
+		t += 0.5
+	check(pick != null, "found a car at speed")
+	if pick == null:
+		holder.queue_free()
+		return
+	traffic.place(pick, tick0 * Protocol.DT)
+	var speed0 := pick.speed
+	var finals := []
+	var hits := 0
+	var hit_tick := -1
+	var states := []
+	var final_state := {}
+	for run in 2:
+		var body := PlayerMotor.make_body(AvatarSpec.defaults())
+		holder.add_child(body)
+		body.global_position = zone.ground(stand.x, -stand.y, 0.05)
+		await get_tree().physics_frame
+		for k in 60:
+			var inp := SnapshotCodec.quantize_input(k + 1, 0, 0, 0.0, 0, 0, tick0 + k)
+			if PlayerMotor.step(body, inp, null, traffic) & PlayerMotor.EVENT_CAR_HIT:
+				hits += 1
+				if run == 0 and hit_tick < 0:
+					hit_tick = k
+					check(PlayerMotor.knock_ticks(body) == PlayerMotor.KNOCK_TICKS, "the hit knocks the player down")
+					near(float(body.get_meta("hit_speed", 0.0)), speed0, 2.5, "the hit speed is recorded")
+					var fling := Vector2(body.velocity.x, body.velocity.z).length()
+					check(fling > 3.0 and body.velocity.y > 1.5, "flung along, sideways and up (%.1f m/s, up %.1f)" % [fling, body.velocity.y])
+			if run == 0:
+				states.append([body.global_position, body.velocity, PlayerMotor.motor_state(body)])
+		finals.append(body.global_position)
+		if run == 0:
+			final_state = PlayerMotor.motor_state(body)
+		body.queue_free()
+	check(hit_tick >= 0, "the car reached the player")
+	check(hits == 2, "one hit per run, not again while down (%d hits)" % hits)
+	check((finals[0] as Vector3).distance_to(finals[1]) < 0.001, "car collisions are deterministic")
+	if hit_tick >= 3:
+		var from := hit_tick - 3
+		var replay := PlayerMotor.make_body(AvatarSpec.defaults())
+		holder.add_child(replay)
+		await get_tree().physics_frame
+		replay.global_position = states[from][0]
+		replay.velocity = states[from][1]
+		PlayerMotor.apply_state(replay, states[from][2])
+		var replay_hits := 0
+		for k in range(from + 1, 60):
+			if PlayerMotor.step(replay, SnapshotCodec.quantize_input(k + 1, 0, 0, 0.0, 0, 0, tick0 + k), null, traffic) & PlayerMotor.EVENT_CAR_HIT:
+				replay_hits += 1
+		check(replay_hits == 1, "the replay sees the hit too")
+		check(replay.global_position.distance_to(finals[0]) < 0.001, "replaying a car hit lands where the realtime run did")
+		check(PlayerMotor.motor_state(replay) == final_state, "and in the same state")
+		replay.queue_free()
+	# A car waiting at a red light is a wall: walking into it only stops you.
+	var waiting: Traffic.Vehicle = null
+	var wait_tick := 0
+	t = 60.0
+	while t < 400.0 and waiting == null:
+		for v: Traffic.Vehicle in traffic.vehicles:
+			traffic.place(v, t)
+			if v.speed < 0.01 and traffic.is_active(v, t) and layout.inside_zone(v.pos, 60.0):
+				var front := v.pos + v.dir * (v.length * 0.5 + 2.0)
+				if layout.building_clearance(front) > 1.5:
+					waiting = v
+					wait_tick = roundi(t / Protocol.DT)
+					break
+		t += 0.5
+	check(waiting != null, "found a stopped car")
+	if waiting != null:
+		traffic.place(waiting, wait_tick * Protocol.DT)
+		var back := waiting.dir
+		var start := waiting.pos + back * (waiting.length * 0.5 + 1.5)
+		var body := PlayerMotor.make_body(AvatarSpec.defaults())
+		holder.add_child(body)
+		body.global_position = zone.ground(start.x, -start.y, 0.05)
+		await get_tree().physics_frame
+		var yaw := atan2(back.x, back.y)  # walk against the car's heading, towards it
+		var knocked := false
+		for k in 20:  # well inside the time it keeps standing
+			var ev := PlayerMotor.step(body, SnapshotCodec.quantize_input(k + 1, 0, 1, yaw, 0, 0, wait_tick + k), null, traffic)
+			if ev & PlayerMotor.EVENT_CAR_HIT:
+				knocked = true
+		var d := Vector2(body.global_position.x, body.global_position.z) - waiting.pos
+		check(not knocked and PlayerMotor.knock_ticks(body) == 0, "walking into a standing car does not knock you down")
+		check(d.dot(back) > waiting.length * 0.5 + 0.1, "a standing car is solid (%.2f m from its centre)" % d.dot(back))
+		body.queue_free()
+	# Standing in the lane on a crossing while it is red: nothing touches you.
+	var tested := 0
+	var touched := 0
+	for route: TrafficRoute in traffic.routes:
+		for gi in route.gates.size():
+			if tested >= 4:
+				break
+			var ci: int = route.gate_ids[gi]
+			var gate_arc := float((route.gates[gi] as Array)[0]) + TrafficRoute.STOP_LINE
+			var red_start := 100.0
+			while not (traffic.crossing_red(ci, red_start + 0.05) and not traffic.crossing_red(ci, red_start - 0.05)):
+				red_start += 0.05
+			var spot := route.point_at(gate_arc)
+			var person := PlayerMotor.make_body(AvatarSpec.defaults())
+			holder.add_child(person)
+			person.global_position = zone.ground(spot.x, -spot.y, 0.05)
+			await get_tree().physics_frame
+			var first := ceili((red_start + 1.0) / Protocol.DT)
+			var last := floori((red_start + TrafficRoute.RED - 0.6) / Protocol.DT)
+			for k in range(first, last):
+				if PlayerMotor.step(person, SnapshotCodec.quantize_input(k - first + 1, 0, 0, 0.0, 0, 0, k), null, traffic) & PlayerMotor.EVENT_CAR_HIT:
+					touched += 1
+				if Vector2(person.global_position.x, person.global_position.z).distance_to(spot) > 0.3:
+					touched += 1
+					break
+			person.queue_free()
+			tested += 1
+	check(tested >= 3, "crossings to stand on (%d)" % tested)
+	check(touched == 0, "nobody standing on a red crossing is hit or pushed (%d touches)" % touched)
+	holder.queue_free()

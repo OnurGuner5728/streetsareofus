@@ -18,8 +18,11 @@ const MAX_INPUT_LEAD_TICKS := 3
 ## Sprinting slowly makes you fitter (0..1); clients hear of it in steps.
 const FITNESS_PER_SPRINT_TICK := 0.00002
 const FITNESS_SEND_STEP := 0.01
-## Tram injuries by the tram's speed (m/s): [kind, below speed, seconds].
+## Tram and car injuries by the vehicle's speed (m/s): [kind, below speed, seconds].
 const INJURIES := [["bruise", 3.0, 120.0], ["arm", 6.0, 300.0], ["leg", INF, 480.0]]
+## A car hits a standing person with only part of its speed counted (the tram is
+## heavy and sharp-edged): the injury table is read at this share of the speed.
+const CAR_INJURY_FACTOR := 0.75
 const INJURY_RANK := {"": 0, "bruise": 1, "arm": 2, "leg": 3}
 ## Where to get patched up, and how close you must be (m).
 const HEAL_KINDS := ["pharmacy", "clinic", "hospital", "doctors"]
@@ -65,6 +68,7 @@ var store: ServerStore
 var social: SocialRules
 var spawner: SpawnPicker
 var transit: TransitNetwork
+var traffic: Traffic
 var props: PropWorld
 var weather: WeatherService
 var options := {}
@@ -100,6 +104,8 @@ func setup(opts: Dictionary) -> Error:
 	social = SocialRules.new(_blocked_either, _players_near.bind(Protocol.EMOTE_RANGE))
 	spawner = SpawnPicker.new(zone)
 	transit = zone.transit
+	traffic = Traffic.for_zone(zone)
+	traffic.hour0 = Traffic.clock_hour0(server_time(), float(opts.get("traffic_hour", -1.0)))
 	props = PropWorld.new()
 	props.name = "Props"
 	add_child(props)
@@ -221,6 +227,7 @@ func on_hello(peer: int, payload: Dictionary) -> void:
 		"tick_rate": Protocol.TICK_RATE, "tick": tick, "server_time": server_time(),
 		"spawn": spawn.pos, "yaw": spawn.yaw, "name": display_name, "avatar": pl.avatar,
 		"fitness": pl.fitness, "injury": str(pl.injury.get("kind", "")), "injury_left": _injury_left(pl),
+		"hour0": traffic.hour0,
 	})
 	var moved := props.displaced_poses()
 	if not moved.is_empty():
@@ -378,7 +385,7 @@ func _simulate(pl: Player) -> void:
 	var limit := MAX_INPUTS_PER_TICK if pl.queue.size() > 2 else 1
 	while not pl.queue.is_empty() and pl.input_credit >= 1.0 and processed < limit:
 		var inp: Dictionary = pl.queue.pop_front()
-		_after_step(pl, PlayerMotor.step(pl.body, inp, transit))
+		_after_step(pl, PlayerMotor.step(pl.body, inp, transit, traffic))
 		_stats.sim_steps += 1
 		if PlayerMotor.knock_ticks(pl.body) == 0:
 			pl.yaw = inp.yaw  # someone lying on the ground does not turn with the mouse
@@ -397,7 +404,7 @@ func _simulate(pl: Player) -> void:
 	pl.starved_ticks += 1
 	if pl.starved_ticks > STARVED_TICKS_BEFORE_IDLE:
 		_stats.idle_steps += 1
-		_after_step(pl, PlayerMotor.step(pl.body, SnapshotCodec.quantize_input(pl.last_processed_seq, 0, 0, pl.yaw, pl.pitch, 0, tick), transit))
+		_after_step(pl, PlayerMotor.step(pl.body, SnapshotCodec.quantize_input(pl.last_processed_seq, 0, 0, pl.yaw, pl.pitch, 0, tick), transit, traffic))
 
 
 func _after_step(pl: Player, events: int) -> void:
@@ -406,6 +413,11 @@ func _after_step(pl: Player, events: int) -> void:
 		pl.tram_hit_at = now()
 		log_line("%s was hit by a tram at %.1f m/s" % [pl.display_name, speed])
 		_injure(pl, speed)
+	if events & PlayerMotor.EVENT_CAR_HIT:
+		var speed := float(pl.body.get_meta("hit_speed", 0.0))
+		pl.tram_hit_at = now()
+		log_line("%s was hit by a car at %.1f m/s" % [pl.display_name, speed])
+		_injure(pl, speed * CAR_INJURY_FACTOR, "car")
 	if events & PlayerMotor.EVENT_SPRINTED and pl.fitness < 1.0:
 		pl.fitness = minf(1.0, pl.fitness + FITNESS_PER_SPRINT_TICK)
 		if pl.fitness - pl.fitness_sent >= FITNESS_SEND_STEP or (pl.fitness >= 1.0 and pl.fitness_sent < 1.0):
@@ -420,7 +432,7 @@ func _after_step(pl: Player, events: int) -> void:
 
 # --- injuries ------------------------------------------------------------------
 
-func _injure(pl: Player, speed: float) -> void:
+func _injure(pl: Player, speed: float, source := "tram") -> void:
 	var kind := ""
 	var seconds := 0.0
 	for entry in INJURIES:
@@ -433,7 +445,7 @@ func _injure(pl: Player, speed: float) -> void:
 	if INJURY_RANK[kind] < INJURY_RANK[current]:
 		return
 	_set_injury(pl, {"kind": kind, "until": ServerStore.unix_now() + seconds, "treated": false})
-	store.audit("injury", {"account": pl.account_id, "kind": kind, "speed": snappedf(speed, 0.1)})
+	store.audit("injury", {"account": pl.account_id, "kind": kind, "speed": snappedf(speed, 0.1), "source": source})
 
 
 func _set_injury(pl: Player, injury: Dictionary) -> void:

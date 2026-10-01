@@ -5,13 +5,13 @@ extends RefCounted
 ## to replay unacknowledged inputs after a server correction.
 ##
 ## Everything here depends only on the body's state, the input and static
-## geometry (plus trams, which are a pure function of the input's world
-## tick), so prediction and replays land exactly where the server does.
+## geometry (plus trams and road traffic, which are pure functions of the
+## input's world tick), so prediction and replays land exactly where the server does.
 ##
 ## Body state beyond position and velocity lives in metas on the body:
 ##   knock (int ticks left of being knocked down, incl. getting up),
 ##   stamina (int 0..STAMINA_MAX, integer math only), winded (bool),
-##   hit_speed (float, speed of the tram that last knocked you down);
+##   hit_speed (float, speed of the tram or car that last knocked you down);
 ## and parameters the server decides (not simulated here):
 ##   fitness (float 0..1), limp (bool, a leg injury).
 
@@ -26,6 +26,13 @@ const TRAM_FLING_ALONG := 0.8
 const TRAM_FLING_SIDE := 3.5
 const TRAM_FLING_UP := 3.0
 const TRAM_REACH := 16.0
+## Cars do the same, more gently: slower than CAR_HIT_SPEED they only push
+## you out of their way like a wall.
+const CAR_FLING_ALONG := 0.6
+const CAR_FLING_SIDE := 2.5
+const CAR_FLING_UP := 2.4
+const CAR_REACH := 6.0
+const CAR_HIT_SPEED := 2.5  # m/s, about 9 km/h
 
 ## Knocked down: inputs ignored, sliding to a stop, then getting up.
 const KNOCK_TICKS := 96  # 3.2 s in all
@@ -51,6 +58,7 @@ const LIMP_SPEED := 1.3
 const EVENT_TRAM_HIT := 1
 const EVENT_STEPPED := 2
 const EVENT_SPRINTED := 4  # stamina was spent sprinting this tick
+const EVENT_CAR_HIT := 8  # a car knocked the player down
 
 
 static func make_body(avatar: Dictionary) -> CharacterBody3D:
@@ -121,8 +129,8 @@ static func sprint_drain(fitness: float) -> int:
 
 
 ## `input` is a quantized input dictionary from SnapshotCodec; its "wt" is
-## the server tick at which trams are placed. Returns EVENT_* flags.
-static func step(body: CharacterBody3D, input: Dictionary, transit: TransitNetwork = null) -> int:
+## the server tick at which trams and cars are placed. Returns EVENT_* flags.
+static func step(body: CharacterBody3D, input: Dictionary, transit: TransitNetwork = null, traffic: Traffic = null) -> int:
 	var mx: float = input.mx
 	var my: float = input.my
 	var buttons: int = input.buttons
@@ -191,8 +199,15 @@ static func step(body: CharacterBody3D, input: Dictionary, transit: TransitNetwo
 	if grounded and v.y <= 0.0 and horizontal.length() > 0.1 and body.is_on_wall():
 		if _step_up(body, start, Vector3(v.x, 0.0, v.z) * Protocol.DT):
 			events |= EVENT_STEPPED
+	var tick := int(input.get("wt", 0))
 	if transit != null:
-		events |= _collide_trams(body, transit, int(input.get("wt", 0)))
+		var at := Vector2(body.global_position.x, body.global_position.z)
+		events |= _collide_vehicles(body, transit.boxes_near(tick, at, TRAM_REACH), EVENT_TRAM_HIT, 0.5,
+			TRAM_FLING_ALONG, TRAM_FLING_SIDE, TRAM_FLING_UP, 3.6)
+	if traffic != null:
+		var at := Vector2(body.global_position.x, body.global_position.z)
+		events |= _collide_vehicles(body, traffic.boxes_near(tick, at, CAR_REACH), EVENT_CAR_HIT, CAR_HIT_SPEED,
+			CAR_FLING_ALONG, CAR_FLING_SIDE, CAR_FLING_UP, 3.4)
 	return events
 
 
@@ -240,19 +255,20 @@ static func _step_up(body: CharacterBody3D, start: Transform3D, motion: Vector3)
 	return true
 
 
-## Trams are solid boxes (see TransitNetwork.boxes_near). Walking into one
-## stops you like a wall; one that runs into you from the front knocks you
-## down and throws you off the track (once: while you are down it only
-## keeps you out of its way).
-static func _collide_trams(body: CharacterBody3D, transit: TransitNetwork, tick: int) -> int:
-	var pos := body.global_position
+## Trams and cars are solid boxes (see TransitNetwork.boxes_near and
+## Traffic.boxes_near). Walking into one stops you like a wall; one faster
+## than `hit_speed` that runs into you from the front knocks you down and
+## throws you out of its path (once: while you are down it only keeps you
+## out of its way).
+static func _collide_vehicles(body: CharacterBody3D, boxes: Array, event: int, hit_speed: float, fling_along: float,
+		fling_side: float, fling_up: float, height: float) -> int:
 	var radius := 0.3
 	var capsule := body.get_node_or_null("Capsule") as CollisionShape3D
 	if capsule:
 		radius = (capsule.shape as CapsuleShape3D).radius
 	var events := 0
-	for box in transit.boxes_near(tick, Vector2(pos.x, pos.z), TRAM_REACH):
-		if body.global_position.y - float(box[5]) > 3.6:
+	for box in boxes:
+		if body.global_position.y - float(box[5]) > height:
 			continue  # above the roof
 		var p := Vector2(body.global_position.x, body.global_position.z)
 		var c: Vector2 = box[0]
@@ -283,17 +299,17 @@ static func _collide_trams(body: CharacterBody3D, transit: TransitNetwork, tick:
 			push = normal * (hw + radius - absf(across))
 		var speed: float = box[4]
 		var v := body.velocity
-		if speed > 0.5 and normal.dot(a) > 0.7:
-			# Caught by the front of a moving tram: out of its path, sideways.
+		if speed > hit_speed and normal.dot(a) > 0.7:
+			# Caught by the front of a moving vehicle: out of its path, sideways.
 			var side := n * (1.0 if across >= 0.0 else -1.0)
 			push = side * (hw + radius - absf(across) + 0.05)
 			if int(body.get_meta("knock", 0)) == 0:
-				v = Vector3(a.x * speed * TRAM_FLING_ALONG + side.x * TRAM_FLING_SIDE, TRAM_FLING_UP,
-					a.y * speed * TRAM_FLING_ALONG + side.y * TRAM_FLING_SIDE)
+				v = Vector3(a.x * speed * fling_along + side.x * fling_side, fling_up,
+					a.y * speed * fling_along + side.y * fling_side)
 				body.set_meta("knock", KNOCK_TICKS)
 				body.set_meta("hit_speed", speed)
 				body.remove_meta("seat")
-				events |= EVENT_TRAM_HIT
+				events |= event
 		else:
 			var into := Vector2(v.x, v.z).dot(normal)
 			if into < 0.0:
