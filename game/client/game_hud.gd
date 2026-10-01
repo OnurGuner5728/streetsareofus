@@ -24,6 +24,8 @@ const HELP := """[b]Hareket[/b]  WASD · Shift koş · Space zıpla · Fare bak
 [b]Sosyal[/b]  bakıyorken:  E konuşma isteği · G el salla · H selam ver · J dans
           M sustur/aç · B engelle (iki kez) · R şikayet et
 [b]Oyun[/b]  bakıyorken:  T taş kâğıt makas · K el kızartmaca · maçta 1/2/3 seç (taş, kâğıt, makas) · E ya da tık: vur/çek · Q bırak
+[b]Saklambaç[/b]  kişi menüsü → Saklambaç (grup arkadaşların da saklanır) · ebe 15 sn sayar, sonra arar · saklanan base'e koşup E: kurtul · Q bırak
+[b]Seksek[/b]  C sekerek yürüme · tebeşir ızgaranın başında E: seksek başlat · karelere sırayla Space ile zıpla, çizgiye basma
 [b]Grup[/b]  I en yakını gruba davet et · P grup paneli (kur, üyeler, ayrıl) · Enter'da Tab: Yakın/Grup kanalı
 [b]Gelen istek[/b]  Y kabul · N reddet (ya da hiçbir şey yapma)
 [b]Sohbet[/b]  Enter yaz · X sohbetten ayrıl (üç kişi ve fazlası aynı sohbete girebilir)
@@ -86,6 +88,7 @@ var _group_chat_button: Button
 var _group_leave_button: Button
 # The minigame overlay (score, big word, hint) at the top of the screen.
 var _game_panel: PanelContainer
+var _blindfold: ColorRect
 var _game_title: Label
 var _game_score: Label
 var _game_big: Label
@@ -99,6 +102,14 @@ func _ready() -> void:
 	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(root)
+
+	# The seeker's blindfold in saklambaç: under every other element.
+	_blindfold = ColorRect.new()
+	_blindfold.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_blindfold.color = Color(0, 0, 0, 0.0)
+	_blindfold.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_blindfold.visible = false
+	root.add_child(_blindfold)
 
 	var cross := ColorRect.new()
 	cross.color = Color(1, 1, 1, 0.85)
@@ -300,6 +311,7 @@ func _build_person_menu(root: Control) -> void:
 	box.add_child(games)
 	_menu_button(games, "Taş kâğıt makas", func(): _emit_person("game:rps"))
 	_menu_button(games, "El kızartmaca", func(): _emit_person("game:slap"))
+	_menu_button(games, "Saklambaç", func(): _emit_person("game:hide"))
 	_menu_button(box, "Gruba davet et", func(): _emit_person("invite"))
 	var safety := GridContainer.new()
 	safety.columns = 2
@@ -571,6 +583,16 @@ func hide_game() -> void:
 	_game_panel.visible = false
 	_route.visible = true
 	_refresh_chat_header()
+
+
+## Dims the screen for the blindfolded seeker (alpha 0 removes it).
+func set_blindfold(alpha: float) -> void:
+	_blindfold.visible = alpha > 0.01
+	_blindfold.color = Color(0.0, 0.0, 0.0, clampf(alpha, 0.0, 1.0))
+
+
+func is_blindfolded() -> bool:
+	return _blindfold.visible
 
 
 func is_game_shown() -> bool:

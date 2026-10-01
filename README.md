@@ -31,6 +31,9 @@ kıyısına, 1800×1800 m, 3778 bina, 886 yol, OpenStreetMap'ten; gerçek kıyı
 | **Grup konuşması** | Üç ya da daha fazla kişi tek bir konuşma çemberi olur: birinin konuşmasına katılan çemberdeki herkesle konuşur, yazılan satır herkese gider, konuşana bakılır ve konuşma jesti yapılır, çemberden çıkmak yalnızca kendi bağlantılarını keser (test: `test_social_circle`) |
 | **Taş-kâğıt-makas** | **T** / kişi menüsü → **Taş kâğıt makas**: istek, kabul, karşılıklı dönme, 3-2-1 geri sayım ve yumruk sallama, gizli seçim (**1/2/3** ya da dokunmatik düğmeler), sonucu **sunucu** çözer, sonuç ekranı ve kısa 3B el işareti, **3 turun en iyisi**. Menzil dışındaki ya da uzaklaşan oyuncu maçı iptal eder; sunucu hileli girdiyi yok sayar |
 | **El kızartmaca** | **K** / kişi menüsü → **El kızartmaca**: biri avucunu açar, öteki elini üstüne koyar; sunucu rastgele gecikmeyle "şimdi" der. Üstteki vurmaya, alttaki çekilmeye çalışır; tepki süreleri **sunucuda** gecikme payı düşülerek karşılaştırılır, **5 turun en iyisi**, roller değişir, vuruş ve kaçış duruşları gösterilir |
+| **Saklambaç** | Kişi menüsü → **Saklambaç**: istek, kabul; ebe istek yollayandır, saklananlar kabul eden ile ebenin yakındaki grup arkadaşlarıdır. Ebe ~15 sn bir yer işaretine (en yakın adlı yer) dönük, gözü bağlı (ekran kararır) ve kıpırdamadan sayar, saklananlar koşup saklanır; sonra ~120 sn'lik arama başlar. **Bulundu kararını sunucu verir:** ebeye 4 m'den yakın **ve** aradaki çizgide dünya çarpışması yoksa (duvar arkasında saklanan bulunamaz). Bulunanlar herkese duyurulur ("Buldum!"); saklanan bulunmadan base'e (ebenin başladığı yer, 3 m) koşup **E**'ye (ya da **Kurtul** düğmesine) basarsa kurtulur. Herkes bulunur/kurtulursa ya da süre dolarsa biter; ebe ayrılırsa tur kapanır. Engelleme turdan çıkarır (test: `test_hide_rules`, `bots.py hide`) |
+| **Seksek** | Haritada sabit birkaç yerde (oyun alanı, meydan, park, yoksa yürünebilir spawn noktaları) yere çizilmiş tebeşir ızgara (BAŞLA şeridi + 8 kare, 6 sıra); ızgaralar zone'dan deterministik türetilir, **ağ trafiği yok**. Başlangıç şeridinde **E** (ya da **Seksek** düğmesi) tura başlatır: **sekerek yürüme** açıkken sıra sıra karelere **zıplayarak** (Space) in. Sunucu her inişi yargılar: çizgiye ya da dışarıya iniş, sırayı atlamak, geri dönmek, zıplamadan yürüyüp karelere geçmek, sekerek yürümeyi bırakmak ya da çok beklemek turu bitirir. Skor ulaşılan sıra sayısıdır ve bildirimde gösterilir; en iyi skor oturum boyunca tutulur (test: `test_hopscotch_grid`, `test_seksek_rules`, `bots.py seksek`) |
+| **Sekerek yürüme** | **C** (telefonda **Sek** düğmesi) ile açılır/kapanır: yürüyüş hızının altında sabit (1,5 m/s) bir hız sınırı (koşu devre dışı), tek ayak üstünde yürüyen prosedürel poz. Durum anlık görüntüde bayrak **128** ile taşınır, herkes görür; `PlayerMotor` ortak olduğu için tahmin sunucuyla uyuşur (test: `test_hop_walk`) |
 | Sustur / engelle / şikayet | Susturma yerel; engelleme kalıcı ve karşılıklı görünmezlik; şikayet olay numarası ve sohbet bağlamıyla kaydedilir |
 | **Engel kaldırma** | Menü → **Engellenenler**: engellediğin herkes (isim, tarih), iki dokunuşla **Engeli kaldır**. Karşı tarafa bildirim gitmez; birbirinizi bir sonraki snapshot'ta yeniden görürsünüz |
 | Hız sınırları | İstek bekleme süreleri, 3 retten sonra 60 sn, sohbet token-bucket, jest ve şikayet sınırları |
@@ -40,8 +43,8 @@ kıyısına, 1800×1800 m, 3778 bina, 886 yol, OpenStreetMap'ten; gerçek kıyı
 | **Kamera** | **V** (telefonda **Kamera** düğmesi) ya da Menü: **Birinci şahıs → Arkadan (omuz üstü) → Uzaktan**. Üçüncü şahısta kendi karakterini görürsün; fare tekerleği uzaklığı ayarlar, kamera duvara girmez (yay kolu). Seçim hatırlanır |
 | Görsel boy ≠ oyun boyu | 150–205 cm görsel; çarpışma kapsülü 155–195 cm'ye ve dar bir yarıçapa sabitlenir |
 | Kalıcılık | Hesap (ilk kullanımda güven), avatar, son konum, engellemeler, şikayetler, denetim logu |
-| Protokol sürümü | `PROTOCOL_VERSION` (şu an 6) ve zone sürümü eşleşmezse bağlantı reddedilir |
-| Botlar ve yük testi | `tools/bots.py smoke` / `commute` / `load` |
+| Protokol sürümü | `PROTOCOL_VERSION` (şu an 7) ve zone sürümü eşleşmezse bağlantı reddedilir |
+| Botlar ve yük testi | `tools/bots.py smoke` / `games` / `hide` / `seksek` / `commute` / `load` |
 | Atıf | "© OpenStreetMap contributors" oyunda ve menüde her zaman görünür |
 | Telefon | Web export + WebSocket transport + dokunmatik kontroller; `tools/serve_web.py` |
 
@@ -199,6 +202,8 @@ Masaüstü istemci de bir WebSocket sunucusuna bağlanabilir: sunucu alanına
 | G, H | El salla, selam ver |
 | P, I | Grup paneli, en yakın kişiyi gruba davet et |
 | T, K | Bakılan kişiye taş-kâğıt-makas / el kızartmaca isteği; maçta **1 / 2 / 3** seçim, **E** vur ya da çekil, **Q** vazgeç |
+| C | Sekerek yürüme aç/kapa (tek ayak, yavaş) |
+| E (saklambaçta / tebeşir ızgarada) | Saklanansan base'e yakınken **kurtul**; seksek şeridinde **seksek başlat**; kişi menüsü → **Saklambaç** turu başlatır, **Q** turdan / seksekten çık |
 | M, B (iki kez), R + 1–5 | Sustur, engelle, şikayet et |
 | Tab | Büyük harita (dokun/tıkla: rota) |
 | F | Tramvaya bin / durak iste / in |
@@ -210,10 +215,12 @@ Masaüstü istemci de bir WebSocket sunucusuna bağlanabilir: sunucu alanına
 
 ```bash
 "$GODOT" --headless --path game --import      # ilk seferde sınıf önbelleği için
-"$GODOT" --headless --path game -- --test     # 270 kontrol
+"$GODOT" --headless --path game -- --test     # 9460 kontrol
 python -m unittest discover -s world-pipeline/tests   # 26 test
 python tools/bots.py smoke                    # 2 bot: tanış, konuş, yaz, el salla, engelle, engeli kaldır, kalıcılık
 python tools/bots.py smoke --transport ws     # aynısı WebSocket üzerinden
+python tools/bots.py hide                     # 2 bot: saklambaç, biri bulunur, biri base'e koşup kurtulur
+python tools/bots.py seksek                   # 1 bot: tebeşir ızgarada altı sırayı sırayla sekerek geçer
 python tools/bots.py commute                  # 2 yolcu bot: durağa koş, tramvaya bin, durak iste, in
 python tools/bots.py load --bots 20           # sunucu tick/bant genişliği istatistikleri
 ```
@@ -283,7 +290,7 @@ game/                      Godot 4.7 projesi (istemci + headless sunucu)
   shared/                  protokol, PlayerMotor (basamak, tramvay çarpışması), codec, avatar kuralları,
                            zone ve dünya kurucu, street_layout (sokak eşyası yerleşimi), prop_layout,
                            crowd (NPC yayalar), transit (zaman tablosu), road_graph, route_planner
-  server/                  zone sunucusu, sosyal kurallar, kalıcılık, spawn seçici,
+  server/                  zone sunucusu, sosyal kurallar, saklambaç (hide_rules) ve seksek (seksek_rules) kuralları, kalıcılık, spawn seçici,
                            prop_world (rijit cisimler), weather_service (Open-Meteo)
   client/                  oyun istemcisi, HUD, menü, avatar, uzak oyuncu, bot, dokunmatik kontroller,
                            tram_fleet, city_map (radar + harita), navigator, city_visuals, city_materials,
@@ -344,6 +351,7 @@ Plandaki mesajların karşılıkları (`game/net/net.gd`):
 | PLAYER_SNAPSHOT | `s_snapshot` (ikili, 34 + 21 bayt/varlık + 16 bayt/hareketli nesne, 15 Hz) | güvenilmez |
 | AVATAR_STATE | `c_avatar`, `s_avatar`, `s_entity_enter` | güvenilir |
 | INTERACTION_* | `c_interaction_request/response`, `s_interaction_incoming/result` | güvenilir |
+| Saklambaç / seksek | `c_party_action` ("free" / "seksek" / "leave") → `s_party` (hide_start, hide_hunt, hide_found, hide_free, hide_left, hide_end, seksek_start, seksek_hop, seksek_end); saklambaç isteği mevcut `c_interaction_request` ile `kind="hide"` | güvenilir |
 | CHAT_MESSAGE, EMOTE | `c_chat`, `s_chat`, `c_emote`, `s_emote` | güvenilir |
 | BLOCK_PLAYER | `c_block`, `c_blocked_list` → `s_blocked_list`, `c_unblock` (+ `c_report`) | güvenilir |
 | Tramvay | `c_board`, `c_alight`, `s_ride`, `s_rider` | güvenilir |

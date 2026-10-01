@@ -144,6 +144,11 @@ static func step(body: CharacterBody3D, input: Dictionary, transit: TransitNetwo
 		mx = 0.0
 		my = 0.0
 		buttons = 0
+	# Frozen (the seeker counting in hide-and-seek): eyes covered, feet still.
+	if bool(body.get_meta("frozen", false)):
+		mx = 0.0
+		my = 0.0
+		buttons = 0
 	var limp := bool(body.get_meta("limp", false))
 	var winded := bool(body.get_meta("winded", false))
 	if limp:

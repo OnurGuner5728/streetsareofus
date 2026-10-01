@@ -328,6 +328,14 @@ func c_game_quit(match_id: int) -> void:
 		server.on_game_quit(_sender(), match_id)
 
 
+## Party games on foot: "free" (tap the base in saklambaç), "seksek" (start a
+## hopscotch turn), "leave" (drop out of the saklambaç round or the turn).
+@rpc("any_peer", "call_remote", "reliable", 1)
+func c_party_action(action: String) -> void:
+	if server:
+		server.on_party_action(_sender(), action)
+
+
 # --- server -> client --------------------------------------------------------
 
 @rpc("authority", "call_remote", "reliable", 1)
@@ -492,3 +500,11 @@ func s_group_chat(from_id: int, text: String) -> void:
 func s_game(event: Dictionary) -> void:
 	if client:
 		client.on_game(event)
+
+
+## One event of a saklambaç round or a seksek turn you are in (HideRules,
+## SeksekRules): {"ev": ...}.
+@rpc("authority", "call_remote", "reliable", 1)
+func s_party(event: Dictionary) -> void:
+	if client:
+		client.on_party(event)

@@ -68,6 +68,8 @@ var store: ServerStore
 var social: SocialRules
 var groups: GroupRules
 var games: GameRules
+var hide: HideRules
+var seksek: SeksekRules
 var spawner: SpawnPicker
 var transit: TransitNetwork
 var traffic: Traffic
@@ -106,6 +108,8 @@ func setup(opts: Dictionary) -> Error:
 	social = SocialRules.new(_blocked_either, _players_near.bind(Protocol.EMOTE_RANGE))
 	groups = GroupRules.new(_name_of, func() -> Array: return players.keys())
 	games = GameRules.new(_players_near.bind(Protocol.EMOTE_RANGE), _blocked_either, _name_of, Net.rtt)
+	hide = HideRules.new(_name_of, _blocked_either)
+	seksek = SeksekRules.new(Hopscotch.for_zone(zone))
 	spawner = SpawnPicker.new(zone)
 	transit = zone.transit
 	traffic = Traffic.for_zone(zone)
@@ -168,6 +172,9 @@ func _on_peer_disconnected(peer: int) -> void:
 	players.erase(peer)
 	_dispatch(social.on_disconnect(peer))
 	_dispatch(games.cancel(peer, "left"))
+	_dispatch(hide.cancel(peer, "left"))
+	seksek.cancel(peer)
+	seksek.best.erase(peer)
 	for other in players.values():
 		if other.known.erase(peer) and Net.is_open(other.id):
 			Net.s_entity_leave.rpc_id(other.id, peer)
@@ -250,8 +257,13 @@ func _choose_spawn(pl: Player, mode: String) -> Dictionary:
 	if options.get("cluster", false):
 		# Test mode: everyone appears next to each other on the best spawn
 		# point, or on --spawn-at=e,n.
+		if str(options.get("spawn_at", "")) == "seksek" and not seksek.hop.grids.is_empty():
+			# Test mode: the first chalk grid's start strip (for the seksek bot).
+			var g: Dictionary = seksek.hop.grids[0]
+			var w := Hopscotch.to_world(g, Vector2(0.0, -Hopscotch.START_DEPTH / 2.0))
+			return {"pos": Vector3(w.x, zone.terrain.height(w.x, w.y) + 0.05, w.y), "yaw": float(g.yaw), "how": "seksek"}
 		var p: Dictionary = zone.spawn_points[0] if not zone.spawn_points.is_empty() else {"e": 0.0, "n": 0.0}
-		if str(options.get("spawn_at", "")) != "":
+		if str(options.get("spawn_at", "")) != "" and str(options.get("spawn_at", "")) != "seksek":
 			var at := str(options.spawn_at).split(",")
 			p = {"e": float(at[0]), "n": float(at[1])}
 		var offset := Vector3((players.size() % 4) * 1.5, 0, (players.size() / 4) * 1.5)
@@ -355,6 +367,10 @@ func _physics_process(_delta: float) -> void:
 	_stats.sim_us += t_sim - t0
 	if games.active():
 		_dispatch(games.update(now(), _distance_between))
+	if hide.active():
+		_dispatch(hide.update(now(), _position_of, _clear_line))
+	if seksek.active():
+		_update_seksek()
 	if tick % 10 == 0:
 		_dispatch(social.update(now(), _distance_between))
 	if tick % Protocol.SNAPSHOT_EVERY_TICKS == 0:
@@ -393,6 +409,9 @@ func _simulate(pl: Player) -> void:
 	# saved-up credit lets a backlog after a hitch drain instead of turning
 	# into permanent extra latency.
 	pl.input_credit = minf(pl.input_credit + 1.0, MAX_INPUT_CREDIT)
+	# The seeker counting in saklambaç stands still (PlayerMotor reads this).
+	if hide.active() or pl.body.has_meta("frozen"):
+		pl.body.set_meta("frozen", hide.frozen(pl.id))
 	var processed := 0
 	var limit := MAX_INPUTS_PER_TICK if pl.queue.size() > 2 else 1
 	while not pl.queue.is_empty() and pl.input_credit >= 1.0 and processed < limit:
@@ -783,6 +802,12 @@ func on_interaction_request(peer: int, target: int, kind: String) -> void:
 		problem = groups.invite_problem(peer, target)
 	elif Protocol.GAME_KINDS.has(kind):
 		problem = games.start_problem(peer, target)
+		if problem == "" and (hide.in_round(peer) or hide.in_round(target)):
+			problem = "game_busy"
+	elif kind == "hide":
+		problem = hide.start_problem(peer, target)
+		if problem == "" and (games.in_match(peer) or games.in_match(target)):
+			problem = "game_busy"
 	if problem != "":
 		_dispatch([SocialRules._notice(peer, problem)])
 		return
@@ -801,6 +826,10 @@ func on_interaction_response(peer: int, request_id: int, accept: bool) -> void:
 		if acc.kind == "group":
 			_dispatch(groups.accept_invite(acc.from, acc.to))
 			log_line("group: %s invited %s (%d groups)" % [_name_of(acc.from), _name_of(acc.to), groups.groups.size()])
+		elif acc.kind == "hide":
+			_start_hide(acc.from, acc.to)
+		elif hide.in_round(acc.from) or hide.in_round(acc.to):
+			_dispatch([SocialRules._notice(acc.from, "game_busy"), SocialRules._notice(acc.to, "game_busy")])
 		else:
 			_dispatch(games.start(acc.kind, acc.from, acc.to, now()))
 			log_line("game %s: %s vs %s" % [acc.kind, _name_of(acc.from), _name_of(acc.to)])
@@ -846,6 +875,71 @@ func on_game_quit(peer: int, match_id: int) -> void:
 		_dispatch(games.cancel(peer, "quit"))
 
 
+## Saklambaç: the one who asked is the seeker; the one who accepted and the
+## seeker's group mates nearby hide.
+func _start_hide(seeker: int, target: int) -> void:
+	var s: Player = players.get(seeker)
+	if s == null or games.in_match(seeker) or games.in_match(target) or hide.start_problem(seeker, target) != "":
+		_dispatch([SocialRules._notice(seeker, "game_busy"), SocialRules._notice(target, "game_busy")])
+		return
+	var hiders := hide.invitees(seeker, target, groups.members_of(seeker), _distance_between)
+	for p: int in [seeker] + hiders:
+		_dispatch(seksek.cancel(p))
+	var base := s.body.global_position
+	var landmark := _landmark(base)
+	var face: Vector3 = landmark.get("pos", base + Vector3(-sin(s.yaw), 0.0, -cos(s.yaw)) * 20.0)
+	_dispatch(hide.start(seeker, hiders, base, face, str(landmark.get("name", "")), now()))
+	log_line("hide: %s seeks %d hiders (%s)" % [_name_of(seeker), hiders.size(), str(landmark.get("name", "-"))])
+
+
+## The nearest named place around `base` (the seeker counts facing it).
+func _landmark(base: Vector3) -> Dictionary:
+	var best := {}
+	var best_d := Protocol.HIDE_LANDMARK_RANGE
+	for poi in zone.pois:
+		var label := str(poi.get("name", ""))
+		if label == "":
+			continue
+		var p := ZoneData.to_godot(float(poi.e), float(poi.n), base.y)
+		var d := Vector2(p.x - base.x, p.z - base.z).length()
+		if d < best_d and d > 8.0:
+			best_d = d
+			best = {"pos": p, "name": label}
+	return best
+
+
+## "free" taps the saklambaç base, "seksek" starts a hopscotch turn, "leave"
+## drops out of whichever is running.
+func on_party_action(peer: int, action: String) -> void:
+	var pl: Player = players.get(peer)
+	if pl == null:
+		return
+	match action:
+		"free":
+			_dispatch(hide.tap_base(peer, pl.body.global_position))
+		"seksek":
+			if hide.in_round(peer) or games.in_match(peer) or not pl.riding.is_empty() or pl.seat >= 0:
+				_dispatch([SocialRules._notice(peer, "game_busy")])
+				return
+			var hopping: bool = pl.buttons & PlayerMotor.BUTTON_HOP != 0
+			_dispatch(seksek.start(peer, pl.body.global_position, hopping, now()))
+			if seksek.in_turn(peer):
+				log_line("seksek: %s started a turn" % _name_of(peer))
+		"leave":
+			_dispatch(hide.cancel(peer, "quit"))
+			_dispatch(seksek.cancel(peer))
+
+
+func _update_seksek() -> void:
+	for peer: int in seksek.turns.keys():
+		var pl: Player = players.get(peer)
+		if pl == null or not pl.riding.is_empty() or pl.seat >= 0:
+			_dispatch(seksek.cancel(peer))
+			continue
+		var hopping: bool = pl.buttons & PlayerMotor.BUTTON_HOP != 0
+		_dispatch(seksek.update(peer, pl.body.global_position, pl.body.is_on_floor(), hopping, now()))
+
+
 func on_chat(peer: int, text: String) -> void:
 	if players.has(peer):
 		_dispatch(social.chat(peer, text, now()))
@@ -866,6 +960,7 @@ func on_block(peer: int, target: int) -> void:
 	store.audit("block", {"blocker": a.account_id, "blocked": b.account_id})
 	_dispatch(social.on_block(peer, target))
 	_dispatch(games.on_block(peer, target))
+	_dispatch(hide.on_block(peer, target))
 	# Blocked pairs stop seeing each other entirely.
 	for pair in [[a, b], [b, a]]:
 		if pair[0].known.erase(pair[1].id):
@@ -1007,6 +1102,18 @@ func _players_near(peer: int, radius: float) -> Array:
 		if other.id != peer and other.body.global_position.distance_to(pl.body.global_position) <= radius:
 			out.append(other.id)
 	return out
+
+
+## Where a player stands (Vector3.INF once gone), for the saklambaç referee.
+func _position_of(peer: int) -> Vector3:
+	var pl: Player = players.get(peer)
+	return pl.body.global_position if pl != null else Vector3.INF
+
+
+## True when nothing solid of the world lies between the two points.
+func _clear_line(from: Vector3, to: Vector3) -> bool:
+	var query := PhysicsRayQueryParameters3D.create(from, to, Protocol.LAYER_WORLD)
+	return get_world_3d().direct_space_state.intersect_ray(query).is_empty()
 
 
 func _distance_between(a: int, b: int) -> float:
