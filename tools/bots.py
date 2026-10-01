@@ -3,6 +3,8 @@
 
   python tools/bots.py smoke            # 2 social bots must meet, talk, chat and wave
   python tools/bots.py games            # 2 bots form a group, chat in it, play RPS and a hand slap
+  python tools/bots.py hide             # 2 bots play two saklambaç rounds (found, then freed at the base)
+  python tools/bots.py seksek           # 1 bot hops through a chalk seksek grid
   python tools/bots.py load --bots 16   # wander bots, prints server tick/bandwidth stats
 
 Set GODOT to the Godot 4 console binary if it is not on PATH.
@@ -213,6 +215,88 @@ def cmd_games(args) -> int:
     return 0
 
 
+def cmd_hide(args) -> int:
+    """Two social bots play two saklambaç rounds: one found by the seeker, one freed at the base."""
+    data_dir = tempfile.mkdtemp(prefix="soa_hide_")
+    server = start_server(args.port, data_dir, args.seconds + 90, ["--cluster", f"--transport={args.transport}"])
+    names = ("BotA", "BotB")  # BotA sorts first and is the seeker
+    bots = [Proc(n, godot("--bot=social", "--hide-test", f"--connect={address(args.port, args.transport)}",
+                          f"--name={n}", f"--quit-after={args.seconds}")) for n in names]
+    end = time.time() + args.seconds + 15
+    while time.time() < end and not all(b.has("hide test complete") for b in bots):
+        time.sleep(1)
+    for b in bots:
+        b.proc.terminate()
+        b.finish(10)
+    server.proc.terminate()
+    server.finish(10)
+
+    seeker, hider = bots
+    checks = [
+        (seeker, "party hide_start"), (hider, "party hide_start"),
+        (seeker, "party hide_hunt"), (hider, "party hide_hunt"),
+        (seeker, "hide found: BotB"), (hider, "hide found: BotB"),
+        (seeker, "hide end reason=all found=1 freed=0"), (hider, "hide end reason=all found=1 freed=0"),
+        (hider, "hide free: BotB"), (seeker, "hide free: BotB"),
+        (seeker, "hide end reason=all found=0 freed=1"), (hider, "hide end reason=all found=0 freed=1"),
+        (hider, "notice hide_counting"), (hider, "notice hide_base_far"),  # the early and the far tap are refused
+        (seeker, "hide test complete"), (hider, "hide test complete"),
+        (server, "hide: BotA seeks 1 hiders"),
+    ]
+    failed = [f"{p.name}: missing '{needle}'" for p, needle in checks if not p.has(needle)]
+    for p in [server, *bots]:
+        failed += [f"{p.name}: {e}" for e in p.errors()]
+    if args.verbose or failed:
+        for p in [server, *bots]:
+            print(f"--- {p.name} ---")
+            print("\n".join(p.lines[-60:]))
+    shutil.rmtree(data_dir, ignore_errors=True)
+    if failed:
+        print("HIDE TEST FAILED")
+        for f in failed:
+            print("  " + f)
+        return 1
+    print(f"HIDE TEST PASSED over {args.transport} ({len(checks)} checks: consent, blindfold count, found by line of sight, freed at base)")
+    return 0
+
+
+def cmd_seksek(args) -> int:
+    """One bot spawns on a chalk grid and hops through every row of it."""
+    data_dir = tempfile.mkdtemp(prefix="soa_seksek_")
+    server = start_server(args.port, data_dir, args.seconds + 90,
+                          ["--cluster", "--spawn-at=seksek", f"--transport={args.transport}"])
+    bot = Proc("BotA", godot("--bot=social", "--seksek-test", f"--connect={address(args.port, args.transport)}",
+                             "--name=BotA", f"--quit-after={args.seconds}"))
+    end = time.time() + args.seconds + 15
+    while time.time() < end and not bot.has("seksek test complete"):
+        time.sleep(1)
+    bot.proc.terminate()
+    bot.finish(10)
+    server.proc.terminate()
+    server.finish(10)
+
+    checks = [
+        (bot, "seksek start grid="), (bot, "seksek hop 1/6"), (bot, "seksek hop 6/6"),
+        (bot, "seksek end reason=done score=6/6"), (bot, "seksek test complete score=6/6 reason=done"),
+        (server, "seksek: BotA started a turn"),
+    ]
+    failed = [f"{p.name}: missing '{needle}'" for p, needle in checks if not p.has(needle)]
+    for p in [server, bot]:
+        failed += [f"{p.name}: {e}" for e in p.errors()]
+    if args.verbose or failed:
+        for p in [server, bot]:
+            print(f"--- {p.name} ---")
+            print("\n".join(p.lines[-60:]))
+    shutil.rmtree(data_dir, ignore_errors=True)
+    if failed:
+        print("SEKSEK TEST FAILED")
+        for f in failed:
+            print("  " + f)
+        return 1
+    print(f"SEKSEK TEST PASSED over {args.transport} ({len(checks)} checks: hop-walk, turn start, six landings in order, done)")
+    return 0
+
+
 def cmd_commute(args) -> int:
     """Commuter bots run to a stop, board the next tram, request a stop and get off."""
     data_dir = tempfile.mkdtemp(prefix="soa_commute_")
@@ -300,6 +384,18 @@ def main() -> int:
     p.add_argument("--transport", choices=["enet", "ws"], default="enet")
     p.add_argument("-v", "--verbose", action="store_true")
     p.set_defaults(func=cmd_games)
+    p = sub.add_parser("hide")
+    p.add_argument("--port", type=int, default=7411)
+    p.add_argument("--seconds", type=int, default=150)
+    p.add_argument("--transport", choices=["enet", "ws"], default="enet")
+    p.add_argument("-v", "--verbose", action="store_true")
+    p.set_defaults(func=cmd_hide)
+    p = sub.add_parser("seksek")
+    p.add_argument("--port", type=int, default=7412)
+    p.add_argument("--seconds", type=int, default=60)
+    p.add_argument("--transport", choices=["enet", "ws"], default="enet")
+    p.add_argument("-v", "--verbose", action="store_true")
+    p.set_defaults(func=cmd_seksek)
     p = sub.add_parser("commute")
     p.add_argument("--port", type=int, default=7013)
     p.add_argument("--seconds", type=int, default=240)

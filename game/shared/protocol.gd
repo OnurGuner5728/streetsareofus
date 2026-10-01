@@ -3,7 +3,7 @@ extends RefCounted
 ## Constants shared by client and server. Bump PROTOCOL_VERSION on any
 ## change to RPC signatures or the binary snapshot/input layout.
 
-const PROTOCOL_VERSION := 6
+const PROTOCOL_VERSION := 7
 const CLIENT_BUILD := "0.3.0-alpha"
 const DEFAULT_PORT := 7000
 const DEFAULT_ZONE := "tr_istanbul_kadikoy_001"
@@ -49,8 +49,9 @@ const SIT_RANGE := 2.2
 const BENCH_SEATS := [-0.45, 0.45]
 ## Every request kind goes through the same consent flow: "talk" opens a
 ## conversation, "group" invites into your group, "rps" and "slap" challenge
-## to a minigame (the server starts it only after an accept).
-const REQUEST_KINDS := ["talk", "group", "rps", "slap"]
+## to a minigame, "hide" asks to play hide-and-seek (the server starts it only
+## after an accept).
+const REQUEST_KINDS := ["talk", "group", "rps", "slap", "hide"]
 ## Groups: at most ten live at once, one colour each (no two share one).
 const GROUP_MAX_MEMBERS := 8
 const GROUP_NAME_MAX := 16
@@ -80,6 +81,22 @@ const SLAP_WINDOW := 1.2  # seconds after the cue in which a press counts
 const SLAP_MIN_REACTION := 0.08  # faster than this (latency removed) is a guess
 const SLAP_TIE := 0.03
 const SLAP_MAX_RTT := 0.5  # latency credit is capped, so lag cannot be faked
+## Saklambaç (hide-and-seek): the seeker, who asked for the game, counts with
+## eyes covered while the hiders run off; then the hunt starts. The server
+## decides "found" by distance AND an unobstructed line (a raycast against the
+## world), and a hider that taps E at the base before that is "kurtuldu".
+const HIDE_COUNT := 15.0
+const HIDE_HUNT_TIME := 120.0
+const HIDE_FIND_RADIUS := 4.0
+const HIDE_FIND_HEIGHT := 3.0  # vertical slack: no finding someone on a roof
+const HIDE_BASE_RADIUS := 3.0  # how close to the base a hider must be to tap in
+const HIDE_JOIN_RANGE := 30.0  # group mates this close are drawn into the round
+const HIDE_AREA := 150.0  # leave this far from the base and you are out of the round
+const HIDE_LANDMARK_RANGE := 150.0  # the seeker counts facing the nearest named place within this
+## Seksek (hopscotch): chalk grids at fixed spots (Hopscotch); a turn hops
+## square to square, the server judges every landing.
+const SEKSEK_IDLE_TIMEOUT := 8.0
+const SEKSEK_MAX_TIME := 60.0
 ## Server-sent poses for the minigames (players cannot trigger these).
 const GAME_EMOTES := ["shake", "rock", "paper", "scissors", "slap", "dodge"]
 const REPORT_REASONS := ["harassment", "hate", "spam", "impersonation", "other"]
@@ -90,6 +107,9 @@ const REPORT_REASONS := ["harassment", "hate", "spam", "impersonation", "other"]
 const WALK_SPEED := 2.4
 const SPRINT_SPEED := 5.2
 const JUMP_VELOCITY := 4.6
+## Hop-walk ("sekerek yürüme"): one-legged hopping, slow and no sprint. Part
+## of the shared motor so prediction matches the server.
+const HOP_SPEED := 1.5
 const GRAVITY := 15.0
 const GROUND_ACCEL := 40.0
 const AIR_ACCEL := 8.0

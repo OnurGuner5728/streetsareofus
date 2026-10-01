@@ -56,6 +56,9 @@ const SLING_COLOR := Color(0.34, 0.48, 0.72)
 const FACE_SCALE := {"oval": Vector3(0.97, 1.02, 1.0), "round": Vector3(1.04, 0.97, 1.0),
 	"square": Vector3(1.04, 1.0, 1.0), "long": Vector3(0.95, 1.06, 1.0)}
 
+## How far the body rises at the top of a hop (metres).
+const HOP_HEIGHT := 0.1
+
 static var _skeleton_rest := {}  # body type -> {bone name: global rest}
 static var _hair_cache := {}  # name -> [Mesh, Transform3D]
 
@@ -69,6 +72,7 @@ var sitting := false
 var knocked := false  # lying on the ground
 var winded := false
 var limp := false
+var hop := false  # hop-walking on one leg
 var injury := ""  # "bruise", "arm", "leg" or "": what the body shows
 ## Off for pedestrians: no head turns or gestures, and the skeleton is only
 ## recomputed when the animation moves on.
@@ -89,6 +93,9 @@ var _transition := 0.0  # sitting down / standing up in progress
 var _lm := {}
 var _mat: ShaderMaterial
 var _getup_left := 0.0
+var _hop_time := 0.0
+var _hop_lift := 0.0  # metres the body is raised at this moment of the hop
+var _model_y := 0.0  # resting height of the model node (leg length)
 var _injury_nodes: Array = []
 
 
@@ -330,7 +337,8 @@ func _shape_bones() -> void:
 	var legs := lerpf(0.94, 1.06, float(b.legs))
 	for side in ["l", "r"]:
 		_skel.set_bone_pose_scale(_skel.find_bone("thigh_" + side), Vector3(1.0, legs, 1.0))
-	_model.position.y = (legs - 1.0) * float(_lm.hip.y) * _model.scale.y
+	_model_y = (legs - 1.0) * float(_lm.hip.y) * _model.scale.y
+	_model.position.y = _model_y
 	var head := lerpf(0.93, 1.07, float(b.head))
 	var face: Vector3 = FACE_SCALE.get(str(avatar.appearance.face), Vector3.ONE)
 	_skel.set_bone_pose_scale(_skel.find_bone("Head"), face * head)
@@ -610,6 +618,21 @@ func animate(speed: float, delta: float, pitch := 0.0, air := false) -> void:
 	var upright := not knocked and _clip != "getup"
 	_poser.bend = move_toward(_poser.bend, 1.0 if winded and upright and not sitting and speed < 1.6 else 0.0, delta * 2.0)
 	_poser.limp = move_toward(_poser.limp, 1.0 if limp and upright and _clip == "walk" else 0.0, delta * 4.0)
+	# One-legged hopping: the pose holds on the ground and in the air.
+	var hopping := hop and upright and not sitting
+	_poser.hop = move_toward(_poser.hop, 1.0 if hopping else 0.0, delta * 6.0)
+	if hopping and speed > 0.2:
+		_hop_time += delta
+		# About two hops a second at hop speed, scaled with how fast we go.
+		_poser.hop_phase = fposmod(_hop_time * clampf(speed / Protocol.HOP_SPEED, 0.5, 1.6) * 2.0, 1.0)
+	else:
+		_poser.hop_phase = move_toward(_poser.hop_phase, 0.0, delta * 3.0)
+	var lift_target := 0.0
+	if hopping and speed > 0.2 and not air:
+		lift_target = HOP_HEIGHT * sin(_poser.hop_phase * PI)
+	_hop_lift = lerpf(_hop_lift, lift_target, minf(1.0, delta * 20.0))
+	if _model:
+		_model.position.y = _model_y + _hop_lift
 	if _clip == "walk" and _anim.current_animation_length > 0.0:
 		_poser.limp_phase = _anim.current_animation_position / _anim.current_animation_length
 	_poser.hold_arm = move_toward(_poser.hold_arm, 1.0 if injury == "arm" and upright else 0.0, delta * 3.0)

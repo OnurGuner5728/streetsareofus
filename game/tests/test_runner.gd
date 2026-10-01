@@ -15,7 +15,7 @@ func _ready() -> void:
 		test_store, test_spawn_picker, test_zone_load,
 		test_world_collision, test_motor_walks_and_is_blocked, test_replay_matches_realtime,
 		test_client_and_server_worlds_agree, test_step_up, test_tram_shoves_and_blocks, test_props, test_crowd,
-		test_crowd_view_pool, test_terrain, test_bench_sitting, test_knockdown, test_stamina, test_limp, test_ball_kick, test_poser_arm, test_game_emotes, test_group_notices_turkish, test_cooldown_per_kind,
+		test_crowd_view_pool, test_terrain, test_bench_sitting, test_knockdown, test_stamina, test_limp, test_hop_walk, test_hide_rules, test_hopscotch_grid, test_seksek_rules, test_frozen_motor, test_ball_kick, test_poser_arm, test_game_emotes, test_group_notices_turkish, test_cooldown_per_kind,
 		test_coastline, test_coast_sea_blocking, test_weather_wave_mapping, test_tree_road_grid,
 		test_transit_network, test_transit_timetable, test_walking_routes, test_route_prefers_tram,
 		test_building_style, test_roof_geometry, test_nostalgic_tram_model,
@@ -1620,6 +1620,53 @@ func test_limp() -> void:
 	holder.queue_free()
 
 
+## Hop-walk: slower than walking, no sprint, jumping still works, and the
+## mode travels in the input buttons and the snapshot flags.
+func test_hop_walk() -> void:
+	var made: Array = await _grid_world()
+	var zone: ZoneData = made[0]
+	var holder: Node3D = made[1]
+	var body := PlayerMotor.make_body(AvatarSpec.defaults())
+	holder.add_child(body)
+	body.global_position = ZoneData.to_godot(float(zone.roads[0].points[0][0]), -60.0, 0.05)
+	await get_tree().physics_frame
+	for i in 40:
+		PlayerMotor.step(body, SnapshotCodec.quantize_input(i + 1, 0, 1, 0.0, 0, PlayerMotor.BUTTON_HOP | PlayerMotor.BUTTON_SPRINT))
+	near(_flat_speed(body), Protocol.HOP_SPEED, 0.01, "hopping caps the speed")
+	check(int(body.get_meta("stamina")) == PlayerMotor.STAMINA_MAX, "and takes no sprint stamina")
+	check(Protocol.HOP_SPEED < Protocol.WALK_SPEED, "hop-walk is slower than walking")
+	var top := 0.0
+	for i in 20:
+		PlayerMotor.step(body, SnapshotCodec.quantize_input(100 + i, 0, 0, 0.0, 0, PlayerMotor.BUTTON_HOP | PlayerMotor.BUTTON_JUMP))
+		top = maxf(top, body.velocity.y)
+	check(top > 3.0, "a hop-walker can still jump (%.2f)" % top)
+	var back := SnapshotCodec.decode_inputs(SnapshotCodec.encode_inputs([SnapshotCodec.quantize_input(1, 0, 1, 0.0, 0, PlayerMotor.BUTTON_HOP)]))
+	check(back.size() == 1 and int(back[0].buttons) & PlayerMotor.BUTTON_HOP != 0, "the hop bit survives the input codec")
+	var snap := SnapshotCodec.decode_snapshot(SnapshotCodec.encode_snapshot(1, 0, Vector3.ZERO, Vector3.ZERO, {},
+		[{"id": 3, "pos": Vector3.ZERO, "yaw": 0.0, "pitch": 0.0, "speed": 1.0, "flags": SnapshotCodec.FLAG_HOP | SnapshotCodec.FLAG_GROUNDED}]))
+	check(snap.entities.size() == 1 and int(snap.entities[0].flags) & SnapshotCodec.FLAG_HOP != 0, "the hop flag survives the snapshot codec")
+	holder.queue_free()
+	# The pose: the right foot comes up off the ground line of the left one.
+	var view := AvatarView.new()
+	add_child(view)
+	view.build(AvatarSpec.defaults())
+	var sk: Skeleton3D = view.find_children("*", "Skeleton3D", true, false)[0]
+	var poser: AvatarPoser = sk.find_children("*", "AvatarPoser", false, false)[0]
+	var foot_r := sk.find_bone("foot_r")
+	var foot_l := sk.find_bone("foot_l")
+	for k in 30:
+		view.animate(0.0, 1.0 / 30.0)
+	await poser.modification_processed
+	var gap := sk.get_bone_global_pose(foot_l).origin.y - sk.get_bone_global_pose(foot_r).origin.y
+	view.hop = true
+	for k in 30:
+		view.animate(0.0, 1.0 / 30.0)
+	await poser.modification_processed
+	var lifted := sk.get_bone_global_pose(foot_l).origin.y - sk.get_bone_global_pose(foot_r).origin.y
+	check(lifted < gap - 0.08, "hopping lifts the right foot (%.3f -> %.3f)" % [gap, lifted])
+	view.queue_free()
+
+
 ## The shared kick: a shot when running, a dribble when walking, a nudge
 ## standing still.
 func test_ball_kick() -> void:
@@ -1659,6 +1706,214 @@ func test_poser_arm() -> void:
 	check((results[0] as Vector3).y > 0.9 and (results[1] as Vector3).y > 0.9, "the forearm points up when waving (%s, %s)" % results)
 	check((results[0] as Vector3).distance_to(results[1]) < 0.05, "same wave standing and sitting")
 	view.queue_free()
+
+
+# --- saklambaç and seksek -----------------------------------------------------------
+
+## The s_party events of one kind sent to `to`.
+static func _party_events(effects: Array, to: int, ev := "") -> Array:
+	var out := []
+	for e in effects:
+		if e.to == to and e.rpc == "s_party" and (ev == "" or str(e.args[0].ev) == ev):
+			out.append(e.args[0])
+	return out
+
+
+func test_hide_rules() -> void:
+	# The deciding functions: a wall hides you, distance and floors matter.
+	check(HideRules.can_find(3.0, 0.5, true), "close and in sight is found")
+	check(not HideRules.can_find(3.0, 0.5, false), "a wall in the way hides you")
+	check(not HideRules.can_find(Protocol.HIDE_FIND_RADIUS + 0.5, 0.0, true), "too far to be found")
+	check(not HideRules.can_find(2.0, Protocol.HIDE_FIND_HEIGHT + 1.0, true), "another floor hides you")
+	check(HideRules.can_free(Protocol.HIDE_BASE_RADIUS - 0.2, 0.0), "at the base you are safe")
+	check(not HideRules.can_free(Protocol.HIDE_BASE_RADIUS + 0.5, 0.0), "away from the base you are not")
+	check(Protocol.REQUEST_KINDS.has("hide"), "hide is a consent request kind")
+
+	var h := HideRules.new(func(p): return "P%d" % p, func(a, b): return b == 4 or a == 4)
+	check(h.start_problem(1, 1) == "game_busy", "cannot hide from yourself")
+	var base := Vector3(10, 0, 10)
+	var fx := h.start(1, [2, 3], base, Vector3(60, 0, 10), "Moda", 0.0)
+	check(h.active() and h.in_round(1) and h.in_round(2) and h.in_round(3), "roster registered")
+	check(h.is_seeker(1) and not h.is_seeker(2), "the asker is the seeker")
+	check(_party_events(fx, 1, "hide_start")[0].role == "seeker" and _party_events(fx, 2, "hide_start")[0].role == "hider", "roles in hide_start")
+	check(_party_events(fx, 2, "hide_start")[0].hiders.size() == 2 and str(_party_events(fx, 3, "hide_start")[0].place) == "Moda", "roster and landmark are sent")
+	check(h.frozen(1) and not h.frozen(2), "only the seeker is frozen while counting")
+	check(h.start_problem(5, 2) == "game_busy" and h.start_problem(2, 5) == "game_busy", "players in a round cannot start another")
+
+	var pos := {1: base, 2: base + Vector3(20, 0, 0), 3: base + Vector3(-20, 0, 0)}
+	var scene := {"clear": true}
+	var pos_fn := func(p): return pos.get(p, Vector3.INF)
+	var los_fn := func(_a, _b): return scene.clear
+	check(h.update(1.0, pos_fn, los_fn).is_empty() and h.frozen(1), "nothing happens while counting")
+	check(rpcs(h.tap_base(2, pos[2]), 2) == ["notice:hide_counting"], "tapping the base during the count is refused")
+	check(h.tap_base(1, base).is_empty(), "the seeker cannot tap the base")
+	var hunt := h.update(Protocol.HIDE_COUNT + 0.1, pos_fn, los_fn)
+	check(_party_events(hunt, 1, "hide_hunt").size() == 1 and _party_events(hunt, 2, "hide_hunt").size() == 1, "the hunt begins for everyone")
+	check(not h.frozen(1), "the seeker moves again")
+	check(rpcs(h.tap_base(2, pos[2]), 2) == ["notice:hide_base_far"], "tapping from far away is refused")
+	pos[2] = base + Vector3(2.0, 0, 0)
+	var freed := h.tap_base(2, pos[2])
+	var free_ev: Dictionary = _party_events(freed, 1, "hide_free")[0]
+	check(int(free_ev.hider) == 2 and int(free_ev.left) == 1, "a hider at the base is freed")
+	check(_party_events(freed, 3, "hide_free").size() == 1, "everyone hears it")
+	check(h.tap_base(2, pos[2]).is_empty(), "freed twice does nothing")
+	# The seeker near a hider behind a wall does not find them.
+	pos[1] = base + Vector3(-18, 0, 0)
+	scene.clear = false
+	check(_party_events(h.update(Protocol.HIDE_COUNT + 1.0, pos_fn, los_fn), 1, "hide_found").is_empty(), "no line of sight, not found")
+	scene.clear = true
+	var found := h.update(Protocol.HIDE_COUNT + 1.1, pos_fn, los_fn)
+	check(_party_events(found, 1, "hide_found").size() == 1 and int(_party_events(found, 1, "hide_found")[0].hider) == 3, "line of sight and close, found")
+	var done: Dictionary = _party_events(found, 3, "hide_end")[0]
+	check(done.reason == "all" and int(done.found) == 1 and int(done.freed) == 1 and int(done.total) == 2, "everyone found or freed ends the round")
+	check(not h.active() and not h.in_round(1) and not h.in_round(3), "the round is cleaned up")
+
+	# Time limit, seeker gone, a hider leaving, blocks.
+	h.start(1, [2, 3], base, base, "", 100.0)
+	pos[1] = base
+	pos[2] = base + Vector3(30, 0, 0)
+	pos[3] = base + Vector3(-30, 0, 0)
+	h.update(100.0 + Protocol.HIDE_COUNT + 0.1, pos_fn, los_fn)
+	var late := h.update(100.0 + Protocol.HIDE_COUNT + Protocol.HIDE_HUNT_TIME + 1.0, pos_fn, los_fn)
+	check(_party_events(late, 2, "hide_end")[0].reason == "time", "time runs out")
+	h.start(1, [2, 3], base, base, "", 300.0)
+	pos.erase(1)
+	check(_party_events(h.update(301.0, pos_fn, los_fn), 2, "hide_end")[0].reason == "seeker_left", "the seeker disappearing ends the round")
+	pos[1] = base
+	h.start(1, [2, 3], base, base, "", 400.0)
+	var left := h.cancel(2, "left")
+	check(_party_events(left, 1, "hide_left").size() == 1 and h.in_round(1) and not h.in_round(2), "a hider leaving does not end the round")
+	check(_party_events(h.cancel(3, "left"), 1, "hide_end")[0].reason == "no_hiders", "the last hider leaving ends it")
+	h.start(1, [2, 3], base, base, "", 500.0)
+	check(_party_events(h.on_block(2, 3), 2, "hide_end").size() == 1 and not h.in_round(2) and h.in_round(3), "a block drops the blocker")
+	h.cancel(1, "quit")
+	check(not h.active(), "the seeker quitting clears everything")
+	# Invitees: the accepter plus nearby, unblocked, free group mates.
+	h.start(9, [5], base, base, "", 600.0)
+	var inv := h.invitees(1, 2, [2, 3, 4, 5, 6], func(_a, b): return 100.0 if b == 6 else 5.0)
+	check(inv == [2, 3], "blocked, busy and far group mates are left out (%s)" % [inv])
+
+
+func test_hopscotch_grid() -> void:
+	check(Hopscotch.square_count() == 8 and Hopscotch.ROWS.size() == 6, "eight squares in six rows")
+	for sq in range(1, 9):
+		check(Hopscotch.locate(Hopscotch.square_centre(sq)) == sq, "centre of square %d is square %d" % [sq, sq])
+	check(Hopscotch.locate(Hopscotch.square_centre(Hopscotch.START)) == Hopscotch.START, "the start strip centre")
+	check(Hopscotch.row_of(0) == -1 and Hopscotch.row_of(1) == 0 and Hopscotch.row_of(2) == 1, "rows of the first squares")
+	check(Hopscotch.row_of(3) == 2 and Hopscotch.row_of(4) == 2 and Hopscotch.row_of(5) == 3, "pair rows share a row")
+	check(Hopscotch.row_of(6) == 4 and Hopscotch.row_of(7) == 4 and Hopscotch.row_of(8) == 5, "and so do the later ones")
+	check(Hopscotch.locate(Vector2(0.0, 1.4)) == Hopscotch.LINE, "the line between squares")
+	check(Hopscotch.locate(Vector2(0.0, 3.5)) == Hopscotch.LINE, "the middle line of a pair")
+	check(Hopscotch.locate(Vector2(-0.7, 3.5)) == 3 and Hopscotch.locate(Vector2(0.7, 3.5)) == 4, "left and right of a pair")
+	check(Hopscotch.locate(Vector2(0.69, 0.7)) == Hopscotch.LINE, "the side of a single square")
+	check(Hopscotch.locate(Vector2(1.0, 0.7)) == Hopscotch.OUTSIDE, "beside a single square")
+	check(Hopscotch.locate(Vector2(0.0, -3.0)) == Hopscotch.OUTSIDE and Hopscotch.locate(Vector2(0.0, 12.0)) == Hopscotch.OUTSIDE, "outside the grid")
+	check(Hopscotch.locate(Vector2(0.0, 8.4)) == Hopscotch.LINE, "the far line")
+	check(Hopscotch.locate(Vector2(0.0, 0.0)) == Hopscotch.START, "toeing the first line is not a fault")
+	# Local and world coordinates round-trip for every orientation.
+	for turn in 4:
+		var g := {"origin": Vector2(30.0, -12.0), "yaw": turn * PI / 2.0}
+		var back := Hopscotch.to_local(g, Hopscotch.to_world(g, Vector2(0.4, 3.1)))
+		check(back.distance_to(Vector2(0.4, 3.1)) < 0.001, "round trip, turn %d" % turn)
+	# The real zone: grids exist, are deterministic and keep their distance.
+	var zone := ZoneData.load_zone("tr_istanbul_kadikoy_001")
+	var a := Hopscotch.new(zone)
+	var b := Hopscotch.new(zone)
+	check(a.grids.size() >= 1, "Kadikoy has at least one seksek grid (%d)" % a.grids.size())
+	check(a.grids.size() == b.grids.size(), "same number of grids every time")
+	for i in a.grids.size():
+		check((a.grids[i].origin as Vector2).is_equal_approx(b.grids[i].origin) and is_equal_approx(float(a.grids[i].yaw), float(b.grids[i].yaw)), "grid %d is deterministic" % i)
+		for j in i:
+			check((a.grids[i].origin as Vector2).distance_to(a.grids[j].origin) >= Hopscotch.MIN_SPACING, "grids %d and %d are apart" % [i, j])
+		var start: Vector2 = Hopscotch.to_world(a.grids[i], Vector2(0.0, -0.9))
+		check(a.grid_at(start) == i, "the start strip belongs to its grid")
+
+
+func test_seksek_rules() -> void:
+	var zone := ZoneData.load_zone("tr_istanbul_kadikoy_001")
+	var hop := Hopscotch.new(zone)
+	hop.grids = [{"id": 0, "origin": Vector2(0.0, 0.0), "yaw": 0.0, "y": 0.0}]  # forward is -Z
+	var s := SeksekRules.new(hop)
+	var at := func(u: float, v: float) -> Vector3: return Vector3(u, 0.0, -v)
+	check(s.start_problem(1, at.call(0.0, -1.0), true) == "", "a turn can start on the start strip")
+	check(s.start_problem(1, at.call(0.0, 5.0), true) == "seksek_none", "not inside the grid")
+	check(s.start_problem(1, at.call(30.0, 5.0), true) == "seksek_none", "not away from any grid")
+	check(s.start_problem(1, at.call(0.0, -1.0), false) == "seksek_hop", "hop-walk must be on")
+	var fx := s.start(1, at.call(0.0, -1.0), true, 0.0)
+	check(_party_events(fx, 1, "seksek_start").size() == 1 and s.in_turn(1) and s.active(), "the turn starts")
+	check(s.start_problem(1, at.call(0.0, -1.0), true) == "seksek_busy", "one turn at a time")
+
+	# A clean run: hop through the six rows in the left lane.
+	var t := 0.0
+	var score := 0
+	var finish := []
+	for r in 6:
+		t += 0.6
+		check(s.update(1, at.call(-0.45, r * 1.4 - 0.3), false, true, t).is_empty(), "airborne is not judged (row %d)" % r)
+		t += 0.4
+		var landed: Array = s.update(1, at.call(-0.45, (r + 0.5) * 1.4), true, true, t)
+		var hops := _party_events(landed, 1, "seksek_hop")
+		check(hops.size() == 1 and int(hops[0].score) == r + 1, "row %d landing scores %d" % [r, r + 1])
+		finish = landed
+		score = r + 1
+	check(_party_events(finish, 1, "seksek_end")[0].reason == "done" and int(_party_events(finish, 1, "seksek_end")[0].score) == 6, "the last row completes the grid")
+	check(not s.in_turn(1) and int(s.best[1]) == 6, "the turn is over and the best score kept")
+
+	# Faults.
+	var cases := {
+		"line": [0.0, 1.4, "hopping onto a chalk line"],
+		"wrong": [-0.45, 2.1, "skipping a row"],
+	}
+	for reason: String in cases:
+		s.start(2, at.call(0.0, -1.0), true, 0.0)
+		s.update(2, at.call(0.0, -0.5), false, true, 0.5)
+		var res: Array = s.update(2, at.call(float(cases[reason][0]), float(cases[reason][1])), true, true, 1.0)
+		check(_party_events(res, 2, "seksek_end")[0].reason == reason, str(cases[reason][2]))
+	s.start(2, at.call(0.0, -1.0), true, 0.0)
+	s.update(2, at.call(-0.45, 0.7), false, true, 0.5)
+	s.update(2, at.call(-0.45, 0.7), true, true, 1.0)  # square 1
+	s.update(2, at.call(-0.45, 0.5), false, true, 1.5)
+	var back: Array = s.update(2, at.call(-0.45, -0.5), true, true, 2.0)
+	check(_party_events(back, 2, "seksek_end")[0].reason == "wrong", "hopping back to the start is wrong")
+	s.start(2, at.call(0.0, -1.0), true, 0.0)
+	var walked: Array = s.update(2, at.call(-0.45, 0.7), true, true, 1.0)
+	check(_party_events(walked, 2, "seksek_end")[0].reason == "walked", "walking onto a square is not hopping")
+	s.start(2, at.call(0.0, -1.0), true, 0.0)
+	check(s.update(2, at.call(0.0, -1.0), true, true, 1.0).is_empty(), "standing on the start strip is fine")
+	check(_party_events(s.update(2, at.call(0.0, -1.0), true, false, 1.5), 2, "seksek_end")[0].reason == "no_hop", "dropping hop-walk ends the turn")
+	s.start(2, at.call(0.0, -1.0), true, 0.0)
+	check(_party_events(s.update(2, at.call(0.0, -1.0), true, true, Protocol.SEKSEK_IDLE_TIMEOUT + 1.0), 2, "seksek_end")[0].reason == "timeout", "standing around ends the turn")
+	s.start(2, at.call(0.0, -1.0), true, 0.0)
+	check(_party_events(s.cancel(2), 2, "seksek_end")[0].reason == "left" and s.cancel(2).is_empty(), "quitting ends it once")
+	# Hopping again on the same square earns nothing and is allowed.
+	s.start(2, at.call(0.0, -1.0), true, 0.0)
+	s.update(2, at.call(-0.45, 0.5), false, true, 0.5)
+	s.update(2, at.call(-0.45, 0.7), true, true, 1.0)
+	s.update(2, at.call(-0.45, 0.9), false, true, 1.5)
+	check(s.update(2, at.call(-0.45, 0.8), true, true, 2.0).is_empty() and s.in_turn(2), "a second hop on the same square is allowed")
+	s.cancel(2)
+	check(score == 6, "six rows were scored")
+
+
+func test_frozen_motor() -> void:
+	var made: Array = await _grid_world()
+	var zone: ZoneData = made[0]
+	var holder: Node3D = made[1]
+	var body := PlayerMotor.make_body(AvatarSpec.defaults())
+	holder.add_child(body)
+	body.global_position = ZoneData.to_godot(float(zone.roads[0].points[0][0]), -60.0, 0.05)
+	await get_tree().physics_frame
+	var start := body.global_position
+	body.set_meta("frozen", true)
+	for i in 30:
+		PlayerMotor.step(body, SnapshotCodec.quantize_input(i + 1, 0, 1, 0.0, 0, PlayerMotor.BUTTON_SPRINT | PlayerMotor.BUTTON_JUMP))
+	check(Vector2(body.global_position.x - start.x, body.global_position.z - start.z).length() < 0.05, "a frozen seeker does not walk")
+	check(absf(body.global_position.y - start.y) < 0.05, "and cannot jump")
+	body.set_meta("frozen", false)
+	for i in 30:
+		PlayerMotor.step(body, SnapshotCodec.quantize_input(100 + i, 0, 1, 0.0, 0, 0))
+	check(Vector2(body.global_position.x - start.x, body.global_position.z - start.z).length() > 1.0, "unfrozen, the same player walks")
+	holder.queue_free()
 
 
 # --- building looks ---------------------------------------------------------------

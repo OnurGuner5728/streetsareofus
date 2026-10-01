@@ -139,6 +139,7 @@ func push_sample(t: float, pos: Vector3, yaw: float, pitch: float, speed: float,
 	view.knocked = flags & SnapshotCodec.FLAG_KNOCKED != 0
 	view.winded = flags & SnapshotCodec.FLAG_WINDED != 0
 	view.limp = flags & SnapshotCodec.FLAG_LIMP != 0
+	view.hop = flags & SnapshotCodec.FLAG_HOP != 0
 	if not _samples.is_empty():
 		var last: Dictionary = _samples[-1]
 		if t <= float(last.t):

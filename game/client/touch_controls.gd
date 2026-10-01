@@ -15,6 +15,7 @@ const FONT_SIZE := 13
 var move := Vector2.ZERO  ## x = right, y = forward, length <= 1
 var jump_held := false
 var sprint := false
+var hop := false  ## hop-walk mode (toggle)
 var enabled := true:
 	set(value):
 		if enabled and not value:
@@ -43,7 +44,8 @@ func _ready() -> void:
 
 
 ## ctx: target (someone under the crosshair), talking_to_target, in_conversation, incoming,
-## cat, treat (injured at a pharmacy), bench, seated, tram_label, tram_tint
+## cat, treat (injured at a pharmacy), bench, seated, tram_label, tram_tint,
+## hide_free (saklambaç base in reach), seksek_start (on a chalk grid's start), party (in either)
 func set_context(ctx: Dictionary) -> void:
 	if _surface.visible != enabled:
 		_surface.visible = enabled
@@ -67,12 +69,17 @@ func _buttons() -> Array:
 	var list := [
 		{"id": "jump", "label": "Zıpla", "pos": Vector2(w - 62, h - 70), "r": 40.0},
 		{"id": "sprint", "label": "Koş", "pos": Vector2(w - 150, h - 44), "r": 30.0, "on": sprint},
+		{"id": "hop", "label": "Sek", "pos": Vector2(w - 300, h - 110), "r": 26.0, "on": hop},
 		{"id": "wave", "label": "El salla", "pos": Vector2(w - 150, h - 120), "r": 30.0},
 		{"id": "nod", "label": "Selam", "pos": Vector2(w - 228, h - 50), "r": 28.0},
 		{"id": "menu", "label": "Menü", "pos": Vector2(w - 40, 40), "r": 26.0},
 		{"id": "camera", "label": "Kamera", "pos": Vector2(w - 104, 40), "r": 26.0},
 	]
-	if _context.get("target", false):
+	if _context.get("hide_free", false):
+		list.append({"id": "hide_free", "label": "Kurtul", "pos": Vector2(w - 62, h - 170), "r": 38.0, "tint": Color("2f9e6f")})
+	elif _context.get("seksek_start", false):
+		list.append({"id": "seksek", "label": "Seksek", "pos": Vector2(w - 62, h - 170), "r": 38.0, "tint": Color("e67e22")})
+	elif _context.get("target", false):
 		if _context.get("talking_to_target", false):
 			list.append({"id": "leave", "label": "Ayrıl", "pos": Vector2(w - 62, h - 170), "r": 34.0})
 		else:
@@ -95,6 +102,8 @@ func _buttons() -> Array:
 	var game_kind: String = _context.get("game", "")
 	if game_kind != "":
 		list.append({"id": "game_quit", "label": "Bırak", "pos": Vector2(w - 232, 40), "r": 26.0, "tint": Color("c0392b")})
+	elif _context.get("party", false):
+		list.append({"id": "party_quit", "label": "Bırak", "pos": Vector2(w - 232, 40), "r": 26.0, "tint": Color("c0392b")})
 	if game_kind == "rps":
 		var picked: int = _context.get("game_pick", -1)
 		var names := ["Taş", "Kâğıt", "Makas"]

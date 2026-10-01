@@ -51,6 +51,11 @@ const NOTICES := {
 	"group_full": "Grup dolu (en fazla 8 kişi).",
 	"target_in_group": "Bu kişi başka bir grupta.",
 	"bad_target": "Geçersiz hedef.",
+	"hide_counting": "Ebe daha sayıyor; sayım bitince base'e dönüp kurtulabilirsin.",
+	"hide_base_far": "Kurtulmak için base'e yaklaş (3 m): ebenin saymaya başladığı yere.",
+	"seksek_busy": "Zaten bir seksek turundasın.",
+	"seksek_none": "Seksek için tebeşir ızgaranın başlangıç şeridinde dur.",
+	"seksek_hop": "Önce sekerek yürümeyi aç (C ya da Sek düğmesi).",
 }
 ## What a request asks for, in the prompt shown to the other person.
 const REQUEST_TEXT := {
@@ -58,10 +63,29 @@ const REQUEST_TEXT := {
 	"group": "seni gruba davet ediyor",
 	"rps": "seninle taş kâğıt makas oynamak istiyor",
 	"slap": "seninle el kızartmaca oynamak istiyor",
+	"hide": "seninle saklambaç oynamak istiyor (sen saklanırsın, o ebe)",
 }
 ## Game names as spoken in notices.
 const GAME_NAMES := {"rps": "Taş kâğıt makas", "slap": "El kızartmaca"}
 const RPS_NAMES := ["Taş", "Kâğıt", "Makas"]
+## Why a seksek turn ended, as told to the player.
+const SEKSEK_END_TEXT := {
+	"line": "Çizgiye bastın!", "wrong": "Yanlış kare!", "walked": "Zıplamadan yürüdün!",
+	"timeout": "Çok bekledin.", "no_hop": "Sekmeyi bıraktın.", "left": "Seksekten ayrıldın.",
+	"done": "Seksek tamam, tebrikler!",
+}
+## Why a saklambaç round ended.
+const HIDE_END_TEXT := {
+	"all": "Herkes bulundu ya da kurtuldu.", "time": "Süre doldu.", "seeker_left": "Ebe oyundan ayrıldı.",
+	"far": "Çok uzaklaşıldı, oyun bitti.", "no_hiders": "Saklanan kalmadı.", "ended": "Saklambaçtan ayrıldın.",
+	"quit": "Saklambaçtan ayrıldın.", "left": "Saklambaçtan ayrıldın.",
+}
+## Seconds a finished saklambaç round or seksek turn stays on screen.
+const PARTY_RESULT_SECONDS := 4.0
+## How fast the counting seeker turns to the landmark, and when the view locks.
+const COUNT_TURN_SECONDS := 0.7
+## Blindfold darkness while the seeker counts.
+const BLINDFOLD_ALPHA := 0.93
 ## Seconds a finished game's result stays on screen.
 const GAME_RESULT_SECONDS := 3.5
 ## How fast you turn to face your opponent (per second, exponential).
@@ -123,6 +147,18 @@ var group_marks := {}  # peer id -> palette index, everyone in a group
 ## The minigame you are in (see on_game): {match, kind, opp, opp_name, wins,
 ## rounds, round, score, phase, role, pick, opp_ready, face_until, ...}.
 var game := {}
+
+## Hop-walk mode (key C, the "Sek" touch button): slow one-legged hopping.
+var hop_on := false
+
+## The saklambaç round you are in (see on_party): {role, seeker, seeker_name,
+## base, face, place, phase, count_until, hunt_until, hiders, left, me, ...}.
+var party := {}
+## Your seksek turn: {grid, score, total, best, ended, end_at}.
+var seksek := {}
+var hopscotch: Hopscotch
+var hopscotch_view: HopscotchView
+var _party_shown := false
 
 var _eye_height := 1.6
 var _input_seq := 0
@@ -194,6 +230,8 @@ func start(opts: Dictionary) -> void:
 		bot = BotBrain.new(str(opts.bot), hash(display_name))
 		bot.block_test = opts.has("block_test")
 		bot.group_test = opts.has("group_test")
+		bot.hide_test = opts.has("hide_test")
+		bot.seksek_test = opts.has("seksek_test")
 	Net.client = self
 	multiplayer.connected_to_server.connect(_on_connected)
 	multiplayer.connection_failed.connect(_on_connection_failed)
@@ -293,6 +331,7 @@ func on_welcome(info: Dictionary) -> void:
 		loading = _loading_screen(zone.display_name)
 		await get_tree().process_frame
 		await get_tree().process_frame
+	hopscotch = Hopscotch.for_zone(zone)
 	var build_start := Time.get_ticks_msec()
 	var world := WorldBuilder.build(zone, self, not _headless)
 	if options.get("perf", false):
@@ -335,6 +374,10 @@ func on_welcome(info: Dictionary) -> void:
 		props_view.name = "Props"
 		add_child(props_view)
 		props_view.setup(zone)
+		hopscotch_view = HopscotchView.new()
+		hopscotch_view.name = "Seksek"
+		add_child(hopscotch_view)
+		hopscotch_view.setup(zone)
 		crowd_view = CrowdView.new()
 		crowd_view.name = "Crowd"
 		add_child(crowd_view)
@@ -821,6 +864,255 @@ func on_game(event: Dictionary) -> void:
 			_game_end(event)
 
 
+# --- saklambaç and seksek -------------------------------------------------------
+
+## Events of the saklambaç round and the seksek turn you are in (HideRules and
+## SeksekRules say what each one means).
+func on_party(event: Dictionary) -> void:
+	var ev := str(event.get("ev", ""))
+	log_line("party %s" % ev)
+	if ev.begins_with("hide_"):
+		_on_hide_event(ev, event)
+	elif ev.begins_with("seksek_"):
+		_on_seksek_event(ev, event)
+	if bot:
+		bot.on_party(self, event)
+
+
+func _on_hide_event(ev: String, event: Dictionary) -> void:
+	match ev:
+		"hide_start":
+			var role := str(event.role)
+			party = {"role": role, "seeker": int(event.seeker), "seeker_name": str(event.seeker_name),
+				"base": event.base, "face": event.face, "place": str(event.place), "phase": "count",
+				"count_until": now() + float(event.count), "count_total": float(event.count),
+				"started": now(), "hunt_total": float(event.total), "hunt_until": 0.0,
+				"hiders": event.hiders, "left": (event.hiders as Array).size(), "total": (event.hiders as Array).size(),
+				"me": "hidden", "found": 0, "freed": 0}
+			var where := " (%s tarafına dönük)" % party.place if str(party.place) != "" else ""
+			if role == "seeker":
+				_notice("Saklambaç, ebe sensin! Ebe sayıyor: %d sn gözün kapalı say%s." % [roundi(float(event.count)), where])
+			else:
+				_notice("Saklambaç, ebe %s. Ebe sayıyor, hemen saklan! Bulunmadan base'e dönüp E'ye basarsan kurtulursun." % party.seeker_name)
+		"hide_hunt":
+			if party.is_empty():
+				return
+			party.phase = "hunt"
+			party.hunt_until = now() + float(event.total)
+			if str(party.role) == "seeker":
+				_notice("Say bitti, ara! %d kişi saklanıyor." % int(party.left))
+			else:
+				_notice("Ebe aramaya başladı!")
+			if sounds:
+				sounds.chime()
+		"hide_found":
+			if party.is_empty():
+				return
+			party.left = int(event.left)
+			party.found = int(party.found) + 1
+			var hider := int(event.hider)
+			log_line("hide found: %s" % event.name)
+			var text := "%s bulundu." % event.name
+			if hider == my_id:
+				party.me = "found"
+				text = "Ebe seni buldu!"
+			elif str(party.role) == "seeker":
+				text = "Buldum! %s bulundu." % event.name
+			_notice(text)
+			if hud:
+				hud.add_system_line("Saklambaç: " + text)
+			if sounds:
+				sounds.chime()
+		"hide_free":
+			if party.is_empty():
+				return
+			party.left = int(event.left)
+			party.freed = int(party.freed) + 1
+			log_line("hide free: %s" % event.name)
+			var text := "%s kurtuldu!" % event.name
+			if int(event.hider) == my_id:
+				party.me = "free"
+				text = "Kurtuldun!"
+			_notice(text)
+			if hud:
+				hud.add_system_line("Saklambaç: " + text)
+		"hide_left":
+			if party.is_empty():
+				return
+			var text := "%s oyundan ayrıldı." % event.name
+			_notice(text)
+			if hud:
+				hud.add_system_line("Saklambaç: " + text)
+		"hide_end":
+			log_line("hide end reason=%s found=%d freed=%d" % [event.reason, int(event.found), int(event.freed)])
+			var why := str(HIDE_END_TEXT.get(str(event.reason), "Oyun sona erdi."))
+			var summary := "%s %d bulundu · %d kurtuldu · %d saklanan" % [why, int(event.found), int(event.freed), int(event.total)]
+			_notice("Saklambaç bitti. " + summary)
+			if hud:
+				hud.add_system_line("Saklambaç bitti: " + summary)
+			if party.is_empty():
+				party = {"role": "hider", "phase": "end", "me": "hidden"}
+			party.phase = "end"
+			party.end_text = why
+			party.end_sub = "%d bulundu · %d kurtuldu · %d saklanan" % [int(event.found), int(event.freed), int(event.total)]
+			party.end_at = now() + PARTY_RESULT_SECONDS
+
+
+func _on_seksek_event(ev: String, event: Dictionary) -> void:
+	match ev:
+		"seksek_start":
+			seksek = {"grid": int(event.grid), "score": 0, "total": int(event.total), "best": 0, "ended": false}
+			log_line("seksek start grid=%d" % int(event.grid))
+			_notice("Seksek başladı! Kareden kareye sek (Space), çizgiye basma. Bırakmak için Q.")
+		"seksek_hop":
+			if seksek.is_empty():
+				return
+			seksek.score = int(event.score)
+			log_line("seksek hop %d/%d" % [int(event.score), int(event.total)])
+			_notice("Seksek: %d/%d" % [int(event.score), int(event.total)])
+			if sounds:
+				sounds.chime()
+		"seksek_end":
+			var reason := str(event.reason)
+			var text := "%s Seksek: %d/%d (en iyi %d)" % [SEKSEK_END_TEXT.get(reason, "Seksek bitti."),
+				int(event.score), int(event.total), int(event.best)]
+			_notice(text)
+			if hud:
+				hud.add_system_line(text)
+			if seksek.is_empty():
+				seksek = {"grid": -1, "total": int(event.total)}
+			seksek.score = int(event.score)
+			seksek.best = int(event.best)
+			seksek.ended = true
+			log_line("seksek end reason=%s score=%d/%d" % [reason, int(event.score), int(event.total)])
+			seksek.reason = reason
+			seksek.end_at = now() + PARTY_RESULT_SECONDS
+
+
+## In a saklambaç round that has not ended yet.
+func party_active() -> bool:
+	return not party.is_empty() and str(party.get("phase", "")) != "end"
+
+
+## True while the counting seeker must stand still (mirrors the server rule).
+func _party_frozen() -> bool:
+	return not party.is_empty() and str(party.get("role", "")) == "seeker" and str(party.get("phase", "")) == "count"
+
+
+func _hide_free_ready() -> bool:
+	if party.is_empty() or str(party.role) != "hider" or str(party.phase) != "hunt" or str(party.me) != "hidden":
+		return false
+	var base: Vector3 = party.base
+	var p := body.global_position
+	return HideRules.can_free(Vector2(p.x - base.x, p.z - base.z).length() + 0.3, p.y - base.y)
+
+
+## On a chalk grid's start strip with nothing else going on.
+func _seksek_ready() -> bool:
+	if hopscotch == null or not riding.is_empty() or body.has_meta("seat") or game_active() or party_active():
+		return false
+	if not seksek.is_empty() and not bool(seksek.get("ended", false)):
+		return false
+	var xz := Vector2(body.global_position.x, body.global_position.z)
+	var gi := hopscotch.grid_at(xz)
+	return gi >= 0 and Hopscotch.locate(Hopscotch.to_local(hopscotch.grids[gi], xz)) == Hopscotch.START
+
+
+## Begins a seksek turn: hop-walk goes on, then the server is asked once it has
+## seen our hop button.
+func start_seksek() -> void:
+	if not _seksek_ready():
+		_notice(NOTICES.seksek_none)
+		return
+	if not _hop_active():
+		hop_on = true
+		if touch:
+			touch.hop = true
+	await get_tree().create_timer(0.3).timeout
+	Net.c_party_action.rpc_id(1, "seksek")
+
+
+func leave_party() -> void:
+	if not party.is_empty() or not seksek.is_empty():
+		Net.c_party_action.rpc_id(1, "leave")
+
+
+## While you are the counting seeker you face the landmark, then the view locks.
+func _face_landmark(delta: float) -> void:
+	if not _party_frozen() or not riding.is_empty():
+		return
+	var to: Vector3 = party.face - body.global_position
+	to.y = 0.0
+	if to.length() < 0.3:
+		return
+	var target := atan2(-to.x, -to.z)
+	if now() - float(party.started) > COUNT_TURN_SECONDS:
+		yaw = target
+	else:
+		yaw = wrapf(yaw + wrapf(target - yaw, -PI, PI) * (1.0 - exp(-FACE_TURN_RATE * delta)), -PI, PI)
+
+
+## The saklambaç / seksek panel and the seeker's blindfold (called with the HUD).
+func _party_overlay() -> void:
+	var t := now()
+	if not party.is_empty() and str(party.phase) == "end" and t > float(party.end_at):
+		party = {}
+	if not seksek.is_empty() and bool(seksek.get("ended", false)) and t > float(seksek.end_at):
+		seksek = {}
+	hud.set_blindfold(BLINDFOLD_ALPHA if _party_frozen() else 0.0)
+	if game_active():
+		return
+	var info := {}
+	if not party.is_empty():
+		info = _hide_panel(t)
+	elif not seksek.is_empty():
+		info = _seksek_panel()
+	if info.is_empty():
+		if _party_shown and game.is_empty():
+			hud.hide_game()
+		_party_shown = false
+		return
+	_party_shown = true
+	hud.set_game(info.title, info.score, info.big, info.sub, info.tint)
+
+
+func _hide_panel(t: float) -> Dictionary:
+	var seeker: bool = str(party.role) == "seeker"
+	var title := "Saklambaç · ebe sensin" if seeker else "Saklambaç · ebe %s" % party.seeker_name
+	var gold := Color("f1c40f")
+	match str(party.phase):
+		"end":
+			return {"title": "Saklambaç", "score": str(party.end_sub), "big": "Bitti", "sub": str(party.end_text), "tint": gold}
+		"count":
+			var left := maxi(0, ceili(float(party.count_until) - t))
+			return {"title": title, "score": "%d saklanan" % int(party.total), "big": "Ebe sayıyor: %d" % left,
+				"sub": ("Gözün kapalı, %s tarafına dönüksün." % party.place if str(party.place) != "" else "Gözün kapalı say.") if seeker 					else "Hemen saklan! Ebe sayarken uzağa koş.", "tint": gold}
+	var time_left := maxi(0, ceili(float(party.hunt_until) - t))
+	var score := "Saklanan: %d/%d · %d sn" % [int(party.left), int(party.total), time_left]
+	if seeker:
+		return {"title": title, "score": score, "big": "Ara!", "sub": "Saklananlara 4 m yaklaş ve aralarında duvar olmasın. Q: bırak.", "tint": Color("e74c3c")}
+	match str(party.me):
+		"found":
+			return {"title": title, "score": score, "big": "Bulundun", "sub": "Diğerlerinin kurtulmasını izle.", "tint": Color("e74c3c")}
+		"free":
+			return {"title": title, "score": score, "big": "Kurtuldun!", "sub": "", "tint": Color("2ecc71")}
+	var base: Vector3 = party.base
+	var d := Vector2(body.global_position.x - base.x, body.global_position.z - base.z).length()
+	var key := "Kurtul'a dokun" if touch else "E'ye bas"
+	var near := _hide_free_ready()
+	return {"title": title, "score": score, "big": "Kurtul!" if near else "Saklan", "sub": ("Base'tesin: %s." % key) if near 		else "Base'e %d m. Bulunmadan base'e koşup %s." % [roundi(d), key], "tint": Color("2ecc71") if near else Color("3498db")}
+
+
+func _seksek_panel() -> Dictionary:
+	var score := "%d/%d" % [int(seksek.get("score", 0)), int(seksek.get("total", 0))]
+	if bool(seksek.get("ended", false)):
+		var reason := str(seksek.get("reason", ""))
+		return {"title": "Seksek", "score": "En iyi %d/%d" % [int(seksek.best), int(seksek.total)], "big": score,
+			"sub": str(SEKSEK_END_TEXT.get(reason, "Seksek bitti.")), "tint": Color("2ecc71") if reason == "done" else Color("e67e22")}
+	return {"title": "Seksek", "score": "Sıra %d/%d" % [int(seksek.score) + 1, int(seksek.total)], "big": score,
+		"sub": "Karelere sırayla zıpla (Space), çizgiye basma. Q: bırak.", "tint": Color("e67e22")}
+
+
 func _game_rule_text() -> String:
 	if game.kind == "rps":
 		return "İlk %d turu kazanan kazanır" % game.wins
@@ -1215,7 +1507,7 @@ func request_interaction(target_id: int, kind: String) -> void:
 	if kind == "group" and group.has("members") and (group.members as Array).size() >= Protocol.GROUP_MAX_MEMBERS:
 		_notice(NOTICES.group_full)
 		return
-	if (kind == "rps" or kind == "slap") and game_active():
+	if (kind == "rps" or kind == "slap" or kind == "hide") and (game_active() or party_active()):
 		_notice(NOTICES.game_busy)
 		return
 	_outgoing_target = target_id
@@ -1310,6 +1602,8 @@ func _physics_process(_delta: float) -> void:
 			buttons |= PlayerMotor.BUTTON_JUMP
 		if touch.sprint:
 			buttons |= PlayerMotor.BUTTON_SPRINT
+		if touch.hop:
+			buttons |= PlayerMotor.BUTTON_HOP
 	elif _can_move():
 		mx = float(Input.is_physical_key_pressed(KEY_D)) - float(Input.is_physical_key_pressed(KEY_A))
 		my = float(Input.is_physical_key_pressed(KEY_W)) - float(Input.is_physical_key_pressed(KEY_S))
@@ -1317,7 +1611,10 @@ func _physics_process(_delta: float) -> void:
 			buttons |= PlayerMotor.BUTTON_JUMP
 		if Input.is_physical_key_pressed(KEY_SHIFT):
 			buttons |= PlayerMotor.BUTTON_SPRINT
+		if hop_on:
+			buttons |= PlayerMotor.BUTTON_HOP
 
+	body.set_meta("frozen", _party_frozen())
 	_input_seq += 1
 	# Stamped with the server tick we are looking at, so trams stand in the
 	# same place for this input here and on the server.
@@ -1440,6 +1737,8 @@ func _process(delta: float) -> void:
 		pitch = clampf(pitch - look.y, -1.45, 1.45)
 	if bot == null and game_active():
 		_face_opponent(delta)
+	elif bot == null and not party.is_empty():
+		_face_landmark(delta)
 	if camera:
 		_update_camera(render_pos, cam_pos, delta)
 	t0 = FrameProfiler.start()
@@ -1548,6 +1847,7 @@ func _update_camera(render_pos: Vector3, eye: Vector3, delta: float) -> void:
 			_self_view.knocked = PlayerMotor.is_down(body)
 			_self_view.winded = bool(body.get_meta("winded", false))
 			_self_view.limp = bool(body.get_meta("limp", false))
+			_self_view.hop = _hop_active()
 			_self_view.animate(speed, delta, pitch, riding.is_empty() and absf(body.velocity.y) > 1.2 and not knocked)
 	if not third:
 		_bob_phase = fmod(_bob_phase + delta * (1.5 + speed * 2.2), TAU)
@@ -1731,6 +2031,18 @@ func _refresh_boards() -> void:
 		label.text = "\n".join(rows)
 
 
+## Whether our own inputs carry the hop-walk bit (key toggle or touch button).
+func _hop_active() -> bool:
+	return hop_on or (touch != null and touch.hop)
+
+
+func toggle_hop() -> void:
+	hop_on = not hop_on
+	if touch:
+		touch.hop = hop_on
+	_notice("Sekerek yürüme açık (kapatmak için C)." if hop_on else "Sekerek yürüme kapalı.")
+
+
 func _can_move() -> bool:
 	if hud == null or hud.is_chat_open() or hud.is_modal_open() or _map_open():
 		return false
@@ -1910,6 +2222,8 @@ func _on_key(key: Key) -> void:
 			tram_action()
 		KEY_V:
 			cycle_camera()
+		KEY_C:
+			toggle_hop()
 		KEY_F1:
 			hud.toggle_help()
 		KEY_F3:
@@ -1933,11 +2247,17 @@ func _on_key(key: Key) -> void:
 			invite_nearest()
 		KEY_P:
 			toggle_group_panel()
+		KEY_Q:
+			leave_party()
 		KEY_E:
-			if target > 0:
+			if _hide_free_ready():
+				Net.c_party_action.rpc_id(1, "free")
+			elif target > 0:
 				request_talk(target)
 			elif _cat_in_reach() >= 0:
 				critters.pet(_cat_in_reach())
+			elif _seksek_ready():
+				start_seksek()
 			elif not _clinic_near().is_empty():
 				request_treatment()
 			elif _nearest_bench() >= 0:
@@ -2003,6 +2323,12 @@ func _on_touch_action(id: String) -> void:
 			game_press()
 		"game_quit":
 			game_quit()
+		"party_quit":
+			leave_party()
+		"hide_free":
+			Net.c_party_action.rpc_id(1, "free")
+		"seksek":
+			start_seksek()
 		"person":
 			if target > 0:
 				_person_target = target
@@ -2151,6 +2477,8 @@ func _update_hud(delta: float) -> void:
 			"in_conversation": not conversations.is_empty(), "incoming": latest >= 0,
 			"in_group": not group.is_empty(),
 			"group_tint": Protocol.GROUP_COLORS[int(group.color)] if not group.is_empty() else Color("2e86de"),
+			"hide_free": _hide_free_ready(), "seksek_start": target <= 0 and _seksek_ready(),
+			"party": not party.is_empty() or (not seksek.is_empty() and not bool(seksek.get("ended", false))),
 			"game": str(game.kind) if game_active() else "", "game_phase": str(game.get("phase", "")),
 			"game_pick": int(game.get("pick", -1)), "game_role": str(game.get("role", "")),
 			"tram_label": tram.get("label", ""), "tram_tint": tram.get("tint", Color("2e86de"))})
@@ -2191,6 +2519,7 @@ func _update_hud(delta: float) -> void:
 	if not game.is_empty() and str(game.phase) == "end" and now() > float(game.end_at):
 		game = {}
 		hud.hide_game()
+	_party_overlay()
 
 	_hud_refresh -= delta
 	if _hud_refresh > 0.0:

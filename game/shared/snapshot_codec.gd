@@ -28,6 +28,7 @@ const FLAG_SITTING := 8
 const FLAG_KNOCKED := 16  # lying on the ground (not while getting up)
 const FLAG_WINDED := 32
 const FLAG_LIMP := 64
+const FLAG_HOP := 128  # hop-walking on one leg
 const SELF_WINDED := 1
 
 

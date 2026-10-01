@@ -17,6 +17,7 @@ extends RefCounted
 
 const BUTTON_JUMP := 1
 const BUTTON_SPRINT := 2
+const BUTTON_HOP := 4  # held while the player is in hop-walk mode
 
 ## Ledges up to this height (kerbs, tram platforms, a step) are walked onto.
 const STEP_HEIGHT := 0.36
@@ -143,11 +144,19 @@ static func step(body: CharacterBody3D, input: Dictionary, transit: TransitNetwo
 		mx = 0.0
 		my = 0.0
 		buttons = 0
+	# Frozen (the seeker counting in hide-and-seek): eyes covered, feet still.
+	if bool(body.get_meta("frozen", false)):
+		mx = 0.0
+		my = 0.0
+		buttons = 0
 	var limp := bool(body.get_meta("limp", false))
 	var winded := bool(body.get_meta("winded", false))
 	if limp:
 		buttons &= ~(BUTTON_JUMP | BUTTON_SPRINT)
 	if winded:
+		buttons &= ~BUTTON_SPRINT
+	var hop := buttons & BUTTON_HOP != 0
+	if hop:
 		buttons &= ~BUTTON_SPRINT
 	var moving := mx != 0.0 or my != 0.0
 	# Stamina, in whole units so every machine counts exactly the same.
@@ -187,6 +196,8 @@ static func step(body: CharacterBody3D, input: Dictionary, transit: TransitNetwo
 		speed *= WINDED_WALK
 	if limp:
 		speed = minf(speed, LIMP_SPEED)
+	if hop:
+		speed = minf(speed, Protocol.HOP_SPEED)
 	var accel := Protocol.GROUND_ACCEL if grounded else Protocol.AIR_ACCEL
 	if knock > 0:
 		accel = KNOCK_FRICTION if grounded else KNOCK_AIR_ACCEL
