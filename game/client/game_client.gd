@@ -99,6 +99,8 @@ var fleet: TramFleet
 var traffic_view: TrafficView
 var ferries: Ferries
 var ferry_view: FerryView
+var gulls: Gulls
+var gull_view: GullView
 var navigator: Navigator
 var city_map: CityMap
 var sky: SkyController
@@ -339,6 +341,11 @@ func on_welcome(info: Dictionary) -> void:
 			ferry_view.name = "Ferries"
 			add_child(ferry_view)
 			ferry_view.setup(self, ferries, zone.coast.sea_level)
+			gulls = Gulls.for_ferries(ferries, zone.zone_id)
+			gull_view = GullView.new()
+			gull_view.name = "Gulls"
+			add_child(gull_view)
+			gull_view.setup(self, gulls, zone.coast.sea_level)
 		props_view = PropView.new()
 		props_view.name = "Props"
 		add_child(props_view)
@@ -441,6 +448,8 @@ func on_welcome(info: Dictionary) -> void:
 				traffic_view.sounds = sounds
 			if ferry_view:
 				ferry_view.sounds = sounds
+			if gull_view:
+				gull_view.sounds = sounds
 			if touch:
 				touch.exclude = [Rect2(get_viewport().get_visible_rect().size.x - 2 * CityMap.MINI_RADIUS - 16, 70,
 					2 * CityMap.MINI_RADIUS, 2 * CityMap.MINI_RADIUS)]
@@ -1440,6 +1449,8 @@ func _process(delta: float) -> void:
 	FrameProfiler.add("traffic", t0)
 	if ferry_view:
 		ferry_view.update(server_now(), render_pos)
+	if gull_view:
+		gull_view.update(server_now(), render_pos)
 	_step_visual = lerpf(_step_visual, 0.0, 1.0 - exp(-12.0 * delta))
 	_sit_blend = move_toward(_sit_blend, 1.0 if body.has_meta("seat") else 0.0, delta * 1.5)
 	var cam_pos := render_pos + Vector3(0, _eye_height * (1.0 - 0.3 * _sit_blend) + _step_visual, 0)
@@ -2121,7 +2132,7 @@ func _cat_in_reach() -> int:
 		return -1
 	var flat := -camera.global_transform.basis.z
 	flat.y = 0.0
-	return critters.cat_near(body.global_position + Vector3(0, 0.6, 0), flat.normalized(), 2.2)
+	return critters.cat_near(body.global_position + Vector3(0, 0.6, 0), flat.normalized(), Critters.PET_REACH)
 
 
 func _latest_incoming() -> int:

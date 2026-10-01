@@ -22,7 +22,7 @@ func _ready() -> void:
 
 
 		test_traffic_model, test_traffic_road_rules, test_traffic_headway_and_signals, test_traffic_density,
-		test_traffic_collision, test_ferries, test_ferry_horn_and_view,
+		test_traffic_collision, test_ferries, test_ferry_horn_and_view, test_gulls, test_critters,
 	]
 	var only := OS.get_environment("TEST_ONLY")  # e.g. TEST_ONLY=traffic runs the tests with that in their name
 	for t in tests:
@@ -2282,6 +2282,118 @@ func test_ferries() -> void:
 				close += 1
 			t += 5.0
 	check(close == 0, "ferries of a line pass without touching (%d close samples)" % close)
+
+
+func test_gulls() -> void:
+	_kadikoy_traffic()
+	var f := Ferries.for_zone(_traffic_zone)
+	var a := Gulls.for_ferries(f, "tz")
+	var f2 := Ferries.for_zone(_traffic_zone)
+	var b := Gulls.for_ferries(f2, "tz")
+	check(a.gulls.size() == Gulls.MAX and b.gulls.size() == Gulls.MAX, "the flock has %d gulls" % a.gulls.size())
+	var kinds := {}
+	for g: Gulls.Gull in a.gulls:
+		kinds[g.kind] = int(kinds.get(g.kind, 0)) + 1
+	check(kinds.has("ferry") and kinds.has("pier") and kinds.has("sea"), "gulls follow ferries, wheel over piers and soar over open water (%s)" % str(kinds))
+	var mismatches := 0
+	var too_high := 0
+	var jumps := 0
+	var step_max := 0.0
+	for i in a.gulls.size():
+		var ga: Gulls.Gull = a.gulls[i]
+		var gb: Gulls.Gull = b.gulls[i]
+		for tick in [0, 100, 5000, 77777]:
+			a.place(ga, tick * Protocol.DT)
+			b.place(gb, tick * Protocol.DT)
+			if ga.pos != gb.pos or ga.dir != gb.dir:
+				mismatches += 1
+			if ga.pos.y < 2.0 or ga.pos.y > 45.0:
+				too_high += 1
+		var t := 1000.0
+		a.place(ga, t)
+		var prev: Vector3 = ga.pos
+		for k in 40:
+			t += 0.5
+			a.place(ga, t)
+			if ga.visible:
+				var step: float = prev.distance_to(ga.pos)
+				step_max = maxf(step_max, step)
+				if step > 20.0:
+					jumps += 1
+			prev = ga.pos
+	check(mismatches == 0, "the same time gives the same gulls (%d differ)" % mismatches)
+	check(too_high == 0, "gulls stay between 2 and 45 m above the sea (%d outside)" % too_high)
+	check(jumps == 0, "gulls fly smoothly (fastest %.1f m per 0.5 s)" % step_max)
+	# A gull trailing a ship stays within a short distance of it.
+	var near_ship := true
+	for g: Gulls.Gull in a.gulls:
+		if g.kind != "ferry":
+			continue
+		a.place(g, 777.0)
+		if g.visible and Vector2(g.pos.x, g.pos.z).distance_to(g.ship.pos) > 60.0:
+			near_ship = false
+	check(near_ship, "ferry gulls stay with their ship")
+	# Calls: each gull calls on a fixed rhythm, the same on every client.
+	var calls_a := 0
+	var calls_b := 0
+	var t0 := 0.0
+	while t0 < 600.0:
+		for i in a.gulls.size():
+			if a.call_between(a.gulls[i], t0, t0 + 0.25):
+				calls_a += 1
+			if b.call_between(b.gulls[i], t0, t0 + 0.25):
+				calls_b += 1
+		t0 += 0.25
+	check(calls_a > 100 and calls_a == calls_b, "gulls call now and then, identically for everyone (%d calls in 10 min)" % calls_a)
+	var mesh := GullView.gull_mesh()
+	check(mesh.get_aabb().size.x > 1.0 and mesh.get_aabb().size.x < 1.5, "gull wingspan is about a metre (%.2f)" % mesh.get_aabb().size.x)
+	check(GraphicsQuality.gull_count() <= Gulls.MAX, "the quality tiers never ask for more gulls than exist")
+
+
+func test_critters() -> void:
+	var a := Vector2(10, 20)
+	var b := Vector2(18, 26)  # 10 m apart
+	var speed := 0.45
+	var leg := 10.0 / speed
+	var cycle := 2.0 * (leg + Critters.SIT_TIME)
+	# A cat's state depends only on the clock, and repeats every cycle.
+	var s1 := Critters.walk_state(a, b, speed, 13.0, 100.0)
+	var s2 := Critters.walk_state(a, b, speed, 13.0, 100.0)
+	var s3 := Critters.walk_state(a, b, speed, 13.0, 100.0 + cycle)
+	check(s1.pos == s2.pos and s1.heading == s2.heading, "the same time gives the same cat")
+	check((s1.pos as Vector2).distance_to(s3.pos) < 0.01, "a cat's stroll repeats every cycle")
+	# Walk out, sit, walk back, sit: starts at a, reaches b, sits, returns, never leaves the segment.
+	var start := Critters.walk_state(a, b, speed, 0.0, 0.0)
+	check((start.pos as Vector2).distance_to(a) < 0.001 and start.moving, "the cat sets off from the first end")
+	var at_b := Critters.walk_state(a, b, speed, 0.0, leg + 3.0)
+	check((at_b.pos as Vector2).distance_to(b) < 0.001 and not at_b.moving, "the cat sits at the far end")
+	var back := Critters.walk_state(a, b, speed, 0.0, leg + Critters.SIT_TIME + leg * 0.5)
+	check((back.pos as Vector2).distance_to(a.lerp(b, 0.5)) < 0.01 and back.moving, "the cat comes back past the middle")
+	check((back.heading as Vector2).dot(a - b) > 0.99, "a returning cat faces back towards the first end")
+	var worst := 0.0
+	var step_max := 0.0
+	var prev: Vector2 = a
+	var t := 0.0
+	while t < cycle * 2.0:
+		var st := Critters.walk_state(a, b, speed, 5.0, t)
+		var p: Vector2 = st.pos
+		var off := absf((p - a).cross(b - a)) / a.distance_to(b)
+		worst = maxf(worst, off)
+		if t > 0.0:
+			step_max = maxf(step_max, prev.distance_to(p))
+		prev = p
+		t += 0.25
+	check(worst < 0.001, "the cat stays on its pavement (off by %.4f)" % worst)
+	check(step_max <= speed * 0.25 + 0.001, "the cat never walks faster than its pace (%.3f m per step)" % step_max)
+	# Pigeons: a runner scares the flock from further away than a walker.
+	check(Critters.scare_radius(5.2) > Critters.scare_radius(2.4), "running scares pigeons from further away")
+	check(Critters.scare_radius(2.4) == Critters.SCARE and Critters.scare_radius(5.2) == Critters.SCARE_RUNNING, "walking and running scare radii")
+	check(Critters.PET_REACH < Protocol.INTERACTION_RANGE + 1.0, "a cat can be stroked only from close by")
+	# The models are cat and pigeon sized.
+	var cat := Critters._cat_mesh().get_aabb()
+	check(cat.size.z > 0.35 and cat.size.z < 0.7 and cat.size.y < 0.4, "the cat is about 45 cm long (%s)" % str(cat.size))
+	var pigeon := Critters._bird_mesh().get_aabb()
+	check(pigeon.size.x > 0.2 and pigeon.size.x < 0.5 and pigeon.size.y < 0.25, "the pigeon is about 30 cm (%s)" % str(pigeon.size))
 
 
 func test_ferry_horn_and_view() -> void:

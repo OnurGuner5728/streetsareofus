@@ -147,6 +147,11 @@ func ferry_horn(at: Vector3) -> void:
 	_one_shot("ferry_horn", cam + offset.normalized() * minf(d, 24.0), db, 1.0)
 
 
+## A call from a gull circling over the water, heard from where it flies.
+func gull_call(at: Vector3) -> void:
+	_one_shot("gull", at, -7.0, _rng.randf_range(0.85, 1.25))
+
+
 func purr(at: Vector3) -> void:
 	_one_shot("purr", at, -2.0, _rng.randf_range(0.9, 1.1))
 
