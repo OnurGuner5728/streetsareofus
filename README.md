@@ -71,8 +71,9 @@ kıyısına, 1800×1800 m, 3778 bina, 886 yol, OpenStreetMap'ten; gerçek kıyı
 | **Tabelalar** | OSM'deki 394 gerçek işletmenin adı (kafe, restoran, eczane "ECZANE", banka, dükkân) bulunduğu binanın sokağa bakan cephesinde; kavşaklarda mavi **İstanbul sokak levhaları** ("Bahariye Cd.", "Nail Bey Sk.") |
 | Sokak eşyası | **93 park etmiş araba** (bir kısmı sarı taksi, tramvay yollarında, kavşak ve geçitlerde park yok), bank, yaya bölgesi girişlerinde **babalar**, sokak lambaları, katener, raylar |
 | **Sesler** | Hepsi istemcide sentezlenir (indirilecek ses dosyası yok): şehir uğultusu (gece azalır), hızına göre tramvay gürültüsü, tramvay zili, ayak sesleri, martılar, serçeler, yağmur, gök gürültüsü, tekme ve konteyner çarpma sesleri, konuşma isteği sinyali, kedi mırlaması |
-| Dokular | Tamamı prosedürel shader: parke taşı, Arnavut kaldırımı, yamalı asfalt ve şerit çizgileri, kenar taşları, zebra, çim |
-| Mimari | Pencere tipleri binaya göre değişir, çerçeve, denizlik, kat bantları, dükkân camları, balkon, cumba, tente, çatı parapeti, su deposu, klima |
+| Dokular | Yollar prosedürel shader: parke taşı, Arnavut kaldırımı, yamalı asfalt ve şerit çizgileri, kenar taşları, zebra, çim. Binalar küçük **CC0 ambientCG** dokuları kullanır (sıva, tuğla, taş, kiremit, düz çatı; 256-512 px, toplam ~0,2 MB, bkz. `LICENSES/third-party.md`); Düşük kalitede normal haritasız hafif shader |
+| Mimari | OSM etiketleri (`building:material`, `building:colour`, `roof:shape`, `roof:colour`, `building:levels`, `start_date`) hattan geçer; yoksa bina kimliğinden türetilir. Sıva/tuğla/taş/beton cepheler, pencere çerçevesi ve denizlik, kat bantları, dükkân camları, balkon, cumba, tente; **kiremit kırma/kırma-kalem çatılar** (saçak ve yağmurluk), düz çatıda su deposu, klima, anten, çanak, baca ve merdiven kulesi; **camilerde kubbe ve minare, kiliselerde çan kulesi**; gece yanan pencereler |
+| T3 modeli | Krem-bordo gövde, yuvarlak uçlar, tepe aydınlığı, ahşap çerçeveli camlar ve içeride ahşap çıtalı banklar ile tutamaklar, ön "KADIKÖY – MODA" tabelası, geceleri yanan far, hat numarası lambası, tele değen trolley direği, boji ve tekerlekler, kavrama; parça başına tek mesh, 80 m ötesinde basit kutu; çarpışma kutusu sunucununkiyle aynı |
 | Tempo | Yürüme 2,4 m/s, koşu 5,2 m/s: şehir büyüklüğünü hissettirir, tramvay işe yarar |
 | Ses ayarı | Menü → **Ses: Açık / Kısık / Kapalı** (hatırlanır). Ayak sesleri yumuşak ve kısık; yürürken seyrek, koşarken sık |
 
@@ -312,13 +313,13 @@ Kadıköy zone'unun kendisi de aynı komutla, yalnızca merkez ve `--size` deği
 
 ```bash
 python world-pipeline/build_zone.py osm --zone-id tr_istanbul_kadikoy_001 \
-    --name "Kadıköy, İstanbul" --lat 40.9855 --lon 29.0245 --size 1800 --version 4 --refresh
+    --name "Kadıköy, İstanbul" --lat 40.9855 --lon 29.0245 --size 1800 --version 5 --refresh
 ```
 
 Yükseklik verisi OpenTopoData'dan (SRTM, olmazsa ASTER) ya da Open-Meteo'dan
 (Copernicus 90 m) çekilir ve `world-pipeline/cache/` altında saklanır; düz zemin
 için `--flat`. Zone içeriği değiştiğinde `--version` artırılmalı (Kadıköy şu an
-v4): sunucu ve istemci farklı sürümdeyse bağlantı açık bir mesajla reddedilir.
+v5): sunucu ve istemci farklı sürümdeyse bağlantı açık bir mesajla reddedilir.
 Merkez ya da boyut değiştiğinde de `--refresh` şart: önbellek zone-id'ye göre
 tutulur, eski bbox'ı sessizce geri verir.
 

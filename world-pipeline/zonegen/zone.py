@@ -94,6 +94,99 @@ def building_height(tags: Dict[str, str], key: str) -> Tuple[float, float, str]:
     return round(height, 2), round(min_height, 2), source
 
 
+# Appearance tags: only what changes a building's silhouette or material is
+# carried into the zone, and only when the mapper actually set it.
+CSS_COLOURS = {
+    "white": "#ffffff", "black": "#000000", "grey": "#808080", "gray": "#808080",
+    "lightgrey": "#d3d3d3", "lightgray": "#d3d3d3", "darkgrey": "#a9a9a9", "darkgray": "#a9a9a9",
+    "red": "#c03028", "darkred": "#8b1a1a", "maroon": "#800000", "brown": "#8b5a2b",
+    "orange": "#e08a2c", "yellow": "#e8d060", "beige": "#d8c8a0", "cream": "#f0e8c8",
+    "tan": "#c8a878", "pink": "#e8a8a8", "green": "#4a7a4a", "darkgreen": "#2a5a2a",
+    "olive": "#808040", "blue": "#3860a8", "lightblue": "#a0c0e0", "navy": "#203060",
+    "teal": "#307878", "purple": "#704080", "silver": "#c0c0c0", "gold": "#c8a838",
+    "terracotta": "#b5582f",
+}
+ROOF_SHAPES = {
+    "flat": "flat", "gabled": "gabled", "gable": "gabled", "hipped": "hipped", "hip": "hipped",
+    "half-hipped": "hipped", "pyramidal": "pyramidal", "skillion": "skillion",
+    "dome": "dome", "onion": "dome", "round": "dome", "gambrel": "gabled", "mansard": "hipped",
+    "saltbox": "gabled", "hipped_and_gabled": "hipped",
+}
+BUILDING_MATERIALS = {
+    "brick": "brick", "concrete": "concrete", "cement_block": "concrete", "reinforced_concrete": "concrete",
+    "plaster": "plaster", "stucco": "plaster", "render": "plaster", "stone": "stone",
+    "sandstone": "stone", "limestone": "stone", "granite": "stone", "marble": "stone",
+    "glass": "glass", "metal": "metal", "steel": "metal", "wood": "wood", "timber_framing": "wood",
+}
+ROOF_MATERIALS = {
+    "roof_tiles": "tiles", "tiles": "tiles", "tile": "tiles", "clay_tiles": "tiles",
+    "metal": "metal", "zinc": "metal", "copper": "metal", "steel": "metal", "metal_sheet": "metal",
+    "concrete": "concrete", "asphalt": "asphalt", "tar_paper": "asphalt", "roof_membrane": "asphalt",
+    "slate": "slate", "glass": "glass",
+}
+RELIGIONS = {"muslim": "muslim", "christian": "christian", "jewish": "jewish"}
+
+
+def parse_colour(value: Optional[str]) -> Optional[str]:
+    """OSM colour ('#a1b2c3', '#abc' or a CSS name) as lowercase '#rrggbb'."""
+    if not value:
+        return None
+    text = value.strip().lower().replace(" ", "")
+    if re.fullmatch(r"#[0-9a-f]{6}", text):
+        return text
+    if re.fullmatch(r"#[0-9a-f]{3}", text):
+        return "#" + "".join(ch * 2 for ch in text[1:])
+    return CSS_COLOURS.get(text)
+
+
+def building_style(tags: Dict[str, str]) -> Dict[str, object]:
+    """Optional appearance fields of a building, empty when OSM says nothing."""
+    out: Dict[str, object] = {}
+    building = tags.get("building", "yes")
+    religion = RELIGIONS.get(tags.get("religion", ""))
+    worship = tags.get("amenity") == "place_of_worship"
+    kind = building
+    if building in ("yes", "religious") and worship:
+        kind = {"muslim": "mosque", "christian": "church", "jewish": "synagogue"}.get(religion or "", "religious")
+    elif building == "yes" and tags.get("tourism") in ("hotel", "hostel"):
+        kind = "hotel"
+    if kind != "yes":
+        out["type"] = kind
+    if religion and (worship or kind in ("mosque", "church", "synagogue", "religious")):
+        out["religion"] = religion
+    levels = parse_length(tags.get("building:levels"))
+    if levels is not None and 0 < levels <= 60:
+        out["levels"] = int(round(levels))
+    shape = ROOF_SHAPES.get(tags.get("roof:shape", "").strip().lower())
+    if shape:
+        out["roof"] = shape
+    roof_height = parse_length(tags.get("roof:height"))
+    if roof_height is not None and 0 < roof_height <= 30:
+        out["roof_height"] = round(roof_height, 2)
+    roof_levels = parse_length(tags.get("roof:levels"))
+    if roof_levels is not None and roof_levels > 0:
+        out["roof_levels"] = int(round(roof_levels))
+    colour = parse_colour(tags.get("building:colour") or tags.get("colour"))
+    if colour:
+        out["colour"] = colour
+    roof_colour = parse_colour(tags.get("roof:colour"))
+    if roof_colour:
+        out["roof_colour"] = roof_colour
+    material = BUILDING_MATERIALS.get(tags.get("building:material", "").strip().lower())
+    if material:
+        out["material"] = material
+    roof_material = ROOF_MATERIALS.get(tags.get("roof:material", "").strip().lower())
+    if roof_material:
+        out["roof_material"] = roof_material
+    return out
+
+
+def building_kind(tags: Dict[str, str]) -> str:
+    """Coarse category used for facade colours; place-of-worship tags win over 'yes'."""
+    style = building_style(tags)
+    return KIND_BY_BUILDING.get(str(style.get("type", tags.get("building", "yes"))), "generic")
+
+
 def area_kind(tags: Dict[str, str]) -> Optional[str]:
     for (key, value), kind in AREA_KINDS:
         if tags.get(key) == value:
@@ -171,10 +264,11 @@ class ZoneBuilder:
                 ring = geo.ensure_ccw(ring)
                 key = f"{'r' if way.id < 0 else 'w'}{abs(way.id)}"
                 height, min_height, source = building_height(tags, key)
-                kind = KIND_BY_BUILDING.get(tags.get("building", "yes"), "generic")
+                kind = building_kind(tags)
                 entry = {"id": key, "kind": kind, "height": height,
                          "min_height": min_height, "height_source": source,
                          "footprint": _round_pts(ring)}
+                entry.update(building_style(tags))
                 if tags.get("name"):
                     entry["name"] = tags["name"]
                 buildings.append(entry)

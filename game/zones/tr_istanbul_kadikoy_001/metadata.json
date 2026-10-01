@@ -5,9 +5,9 @@
     "lon": 29.0245
   },
   "size_m": 1800.0,
-  "version": 4,
+  "version": 5,
   "format": 2,
-  "generated_at": "2026-09-28T13:47:42+00:00",
+  "generated_at": "2026-09-29T13:18:55+00:00",
   "generator": "world-pipeline/build_zone.py",
   "data_sources": [
     "openstreetmap",

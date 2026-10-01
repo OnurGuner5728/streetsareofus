@@ -10,7 +10,7 @@ from zonegen import geo  # noqa: E402
 from zonegen.osm import parse  # noqa: E402
 from zonegen.spawn import compute_spawn_points  # noqa: E402
 from zonegen.synthetic import build_synthetic_zone  # noqa: E402
-from zonegen.zone import ZoneBuilder, building_height, parse_length  # noqa: E402
+from zonegen.zone import ZoneBuilder, building_height, building_kind, building_style, parse_length  # noqa: E402
 
 ORIGIN = (40.9895, 29.02965)
 
@@ -95,6 +95,43 @@ class HeightTests(unittest.TestCase):
         h, min_h, _ = building_height({"building": "roof"}, "w4")
         self.assertGreater(min_h, 2.2)
         self.assertGreater(h, min_h)
+
+
+class BuildingStyleTests(unittest.TestCase):
+    def test_plain_building_has_no_extra_fields(self):
+        self.assertEqual(building_style({"building": "yes"}), {})
+
+    def test_appearance_tags(self):
+        style = building_style({
+            "building": "apartments", "building:levels": "5", "roof:shape": "hipped",
+            "roof:height": "2.5 m", "roof:colour": "red", "building:colour": "#ABC",
+            "building:material": "stucco", "roof:material": "roof_tiles",
+        })
+        self.assertEqual(style, {
+            "type": "apartments", "levels": 5, "roof": "hipped", "roof_height": 2.5,
+            "colour": "#aabbcc", "roof_colour": "#c03028", "material": "plaster",
+            "roof_material": "tiles"})
+
+    def test_unknown_values_are_dropped(self):
+        style = building_style({"building": "yes", "roof:shape": "spaceship", "building:colour": "sparkly",
+                                "building:material": "unobtainium", "building:levels": "many"})
+        self.assertEqual(style, {})
+
+    def test_place_of_worship_becomes_mosque_or_church(self):
+        mosque = {"building": "yes", "amenity": "place_of_worship", "religion": "muslim"}
+        self.assertEqual(building_style(mosque), {"type": "mosque", "religion": "muslim"})
+        self.assertEqual(building_kind(mosque), "religious")
+        church = {"building": "yes", "amenity": "place_of_worship", "religion": "christian"}
+        self.assertEqual(building_style(church)["type"], "church")
+        self.assertEqual(building_kind({"building": "apartments"}), "residential")
+        self.assertEqual(building_kind({"building": "yes"}), "generic")
+        self.assertEqual(building_kind({"building": "yes", "tourism": "hotel"}), "commercial")
+
+    def test_zone_carries_style_fields(self):
+        zone = ZoneBuilder("test", *ORIGIN, 512, 1, "Test").build(parse(_overpass_fixture()))
+        entry = zone["buildings"][0]
+        self.assertEqual(entry["type"], "apartments")
+        self.assertEqual(entry["levels"], 4)
 
 
 def _overpass_fixture():

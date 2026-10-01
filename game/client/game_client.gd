@@ -1782,13 +1782,21 @@ func _maybe_screenshot() -> void:
 	if options.has("tram_shot") and fleet:
 		# Debug framing: wait for a tram to come close, then look at it.
 		var best := {}
+		# --tram-shot=T3 frames only that line, and closer.
+		# A distance limit can follow: --tram-shot=T3:14.
+		var shot_spec := str(options.tram_shot).split(":")
+		var only_line := shot_spec[0] if shot_spec[0] != "true" else ""
+		var shot_range := float(shot_spec[1]) if shot_spec.size() > 1 else 24.0
 		for veh in fleet.vehicle_nodes():
-			var st := (transit.lines[veh.line] as TransitNetwork.TransitLine).state(veh.vehicle, server_now())
+			var shot_line := transit.lines[veh.line] as TransitNetwork.TransitLine
+			if only_line != "" and shot_line.id != only_line:
+				continue
+			var st := shot_line.state(veh.vehicle, server_now())
 			var p := zone.ground(st.pos.x, st.pos.y, 1.6)
 			var d := p.distance_to(camera.global_position)
 			var ray := PhysicsRayQueryParameters3D.create(camera.global_position, p, Protocol.LAYER_WORLD)
 			var seen := get_world_3d().direct_space_state.intersect_ray(ray).is_empty()
-			if seen and d < 45.0 and d > 9.0 and (best.is_empty() or d < float(best.d)):
+			if seen and d < (shot_range if only_line != "" else 45.0) and d > 9.0 and (best.is_empty() or d < float(best.d)):
 				best = {"d": d, "p": p}
 		if best.is_empty():
 			if now() - _joined_at < 150.0:
