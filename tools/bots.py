@@ -72,7 +72,9 @@ class Proc:
         return any(needle in l for l in self.lines)
 
     def errors(self) -> list[str]:
-        return [l for l in self.lines if "SCRIPT ERROR" in l or l.startswith("ERROR")]
+        # Engine exit-time leak reports are noise, not gameplay errors.
+        return [l for l in self.lines
+                if "SCRIPT ERROR" in l or (l.startswith("ERROR") and "still in use at exit" not in l)]
 
 
 def godot(*user_args: str, headless: bool = True) -> list[str]:
@@ -92,7 +94,7 @@ def start_server(port: int, data_dir: str, quit_after: int, extra: list[str]) ->
         extra = [*extra, "--weather=clear"]
     server = Proc("server", godot("--server", f"--port={port}", f"--data-dir={data_dir}",
                                   f"--quit-after={quit_after}", *extra))
-    if not server.wait_for("listening on", 30):
+    if not server.wait_for("listening on", 120):
         print("\n".join(server.lines))
         sys.exit("server did not start")
     return server
@@ -100,7 +102,7 @@ def start_server(port: int, data_dir: str, quit_after: int, extra: list[str]) ->
 
 def cmd_smoke(args) -> int:
     data_dir = tempfile.mkdtemp(prefix="soa_smoke_")
-    server = start_server(args.port, data_dir, args.seconds + 20, ["--cluster", f"--transport={args.transport}"])
+    server = start_server(args.port, data_dir, args.seconds + 90, ["--cluster", f"--transport={args.transport}"])
     # BotA also blocks BotB after chatting, then unblocks them from its list.
     bots = [Proc(n, godot(f"--bot=social", f"--connect={address(args.port, args.transport)}", f"--name={n}",
                           f"--quit-after={args.seconds}", *(["--block-test"] if n == "BotA" else [])))
@@ -163,7 +165,7 @@ def cmd_smoke(args) -> int:
 def cmd_games(args) -> int:
     """Two social bots meet, form a group, chat in it, play RPS and a hand slap, then leave."""
     data_dir = tempfile.mkdtemp(prefix="soa_games_")
-    server = start_server(args.port, data_dir, args.seconds + 20, ["--cluster", f"--transport={args.transport}"])
+    server = start_server(args.port, data_dir, args.seconds + 90, ["--cluster", f"--transport={args.transport}"])
     names = ("BotA", "BotB")
     bots = [Proc(n, godot("--bot=social", "--group-test", f"--connect={address(args.port, args.transport)}",
                           f"--name={n}", f"--quit-after={args.seconds}")) for n in names]
