@@ -220,7 +220,7 @@ Masaüstü istemci de bir WebSocket sunucusuna bağlanabilir: sunucu alanına
 
 ```bash
 "$GODOT" --headless --path game --import      # ilk seferde sınıf önbelleği için
-"$GODOT" --headless --path game -- --test     # 9500+ kontrol
+"$GODOT" --headless --path game -- --test     # 9525 kontrol
 python -m unittest discover -s world-pipeline/tests   # 26 test
 python tools/bots.py smoke                    # 2 bot: tanış, konuş, yaz, el salla, engelle, engeli kaldır, kalıcılık
 python tools/bots.py smoke --transport ws     # aynısı WebSocket üzerinden
