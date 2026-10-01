@@ -39,6 +39,9 @@ const NOTICES := {
 	"treat_dressed": "Eczacı pansuman yaptı. Daha çabuk iyileşeceksin.",
 	"treat_again": "Eczacı elinden geleni yaptı; gerisi zamana kalmış.",
 	"treat_doctor": "Doktor tedavi etti; iyileştin.",
+	"tea_far": "Çay söylemek için bir kafeye ya da lokantaya yaklaş (12 m).",
+	"tea_wait": "Çayın daha bitmedi; %s sn sonra yenisini söyleyebilirsin.",
+	"tea_served": "%s: ince belli bardakta çay geldi. Nefesin açıldı.",
 	"game_busy": "Bu kişi ya da sen zaten bir oyundasınız.",
 	"group_created": "%s grubu kuruldu.",
 	"group_joined": "%s gruba katıldı.",
@@ -74,6 +77,9 @@ const INJURY_NEWS := {"bruise": "Tramvay çarptı! Başın morardı; birkaç dak
 ## Places that treat injuries (as ZoneServer.HEAL_KINDS) and how close to be.
 const HEAL_KINDS := ["pharmacy", "clinic", "hospital", "doctors"]
 const HEAL_RANGE := 15.0
+## Places that serve tea (as ZoneServer.TEA_KINDS) and how close to be.
+const TEA_KINDS := ["cafe", "restaurant", "fast_food", "confectionery", "bakery"]
+const TEA_RANGE := 12.0
 const REJECTS := {
 	"protocol_mismatch": "Sürüm uyuşmuyor; istemciyi güncelle.",
 	"bad_name": "Geçersiz isim: 3-20 karakter; harf, rakam, boşluk, _ . - kullanılabilir.",
@@ -181,6 +187,7 @@ var _tram_warned_at := -INF
 var injury := ""  # "bruise", "arm", "leg" or ""
 var _injury_until := 0.0  # local clock
 var _clinic_cache := {"at": -INF, "poi": {}}
+var _tea_cache := {"at": -INF, "poi": {}}
 
 
 static func now() -> float:
@@ -646,6 +653,10 @@ func on_emote(from_id: int, kind: String) -> void:
 		remotes[from_id].view.play_emote(kind)
 	elif from_id == my_id and _self_view:
 		_self_view.play_emote(kind)
+	if kind == "tea" and sounds != null:
+		var who: Node3D = body if from_id == my_id else remotes.get(from_id)
+		if who != null:
+			sounds.tea_clink(who.global_position + Vector3(0, 1.2, 0))
 	if Protocol.GAME_EMOTES.has(kind):
 		return  # minigame poses speak for themselves (the overlay has the words)
 	if from_id != my_id:
@@ -1081,6 +1092,30 @@ func _clinic_near() -> Dictionary:
 
 func request_treatment() -> void:
 	Net.c_treat.rpc_id(1)
+
+
+## The cafe or restaurant you are standing at (a POI that serves tea), or {}.
+func _tea_near() -> Dictionary:
+	if body == null or zone == null:
+		return {}
+	var t := now()
+	if t - float(_tea_cache.at) < 0.5:
+		return _tea_cache.poi
+	var p := ZoneData.to_en(body.global_position)
+	var best := {}
+	var best_d := TEA_RANGE
+	for poi in zone.pois:
+		if str(poi.get("kind", "")) in TEA_KINDS:
+			var d := p.distance_to(Vector2(float(poi.e), float(poi.n)))
+			if d <= best_d:
+				best_d = d
+				best = poi
+	_tea_cache = {"at": t, "poi": best}
+	return best
+
+
+func request_tea() -> void:
+	Net.c_tea.rpc_id(1)
 
 
 func on_weather(info: Dictionary) -> void:
@@ -1991,6 +2026,11 @@ func _on_key(key: Key) -> void:
 				request_treatment()
 			elif _nearest_bench() >= 0:
 				Net.c_sit.rpc_id(1, _nearest_bench())
+		KEY_O:
+			if _tea_near().is_empty():
+				_notice(NOTICES.tea_far)
+			else:
+				request_tea()
 		KEY_J:
 			send_emote("dance")
 		KEY_G:
@@ -2072,6 +2112,8 @@ func _on_touch_action(id: String) -> void:
 			tram_action()
 		"treat":
 			request_treatment()
+		"tea":
+			request_tea()
 		"sit":
 			if _nearest_bench() >= 0:
 				Net.c_sit.rpc_id(1, _nearest_bench())
@@ -2196,6 +2238,7 @@ func _update_hud(delta: float) -> void:
 	if touch:
 		touch.set_context({"target": target > 0, "cat": target <= 0 and _cat_in_reach() >= 0, "talking_to_target": conversations.has(target),
 			"treat": target <= 0 and not clinic.is_empty(),
+			"tea": target <= 0 and not _tea_near().is_empty(),
 			"bench": target <= 0 and _nearest_bench() >= 0, "seated": body.has_meta("seat"),
 			"in_conversation": not conversations.is_empty(), "incoming": latest >= 0,
 			"in_group": not group.is_empty(),
@@ -2225,7 +2268,10 @@ func _update_hud(delta: float) -> void:
 		hud.set_target(line)
 	elif _cat_in_reach() >= 0:
 		hud.set_target("Sokak kedisi  ·  " + ("sevmek için Sev'e dokun" if touch else "sevmek için [E]"))
-	elif crowd_view and crowd_view.crowd and camera 			and crowd_view.look_target(camera.global_position, -camera.global_transform.basis.z, Protocol.INTERACTION_RANGE + _cam_dist) >= 0:
+	elif not _tea_near().is_empty():
+		var venue := str(_tea_near().get("name", ""))
+		hud.set_target("%s  ·  çay söylemek için %s" % [venue if venue != "" else "Kafe", "Çay'a dokun" if touch else "[O]"])
+	elif crowd_view and crowd_view.crowd and camera			and crowd_view.look_target(camera.global_position, -camera.global_transform.basis.z, Protocol.INTERACTION_RANGE + _cam_dist) >= 0:
 		hud.set_target("Yaya  [NPC]  ·  yapay bir figür; sohbet edilemez")
 	else:
 		hud.set_target("")

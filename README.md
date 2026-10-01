@@ -72,6 +72,7 @@ kıyısına, 1800×1800 m, 3778 bina, 886 yol, OpenStreetMap'ten; gerçek kıyı
 | **Vapur görüntüsü** | Şehir Hatları rengi tek mesh gövde: beyaz küpeşte, siyah şerit, kırmızı karina, iki ucunda köprüüstü, kırmızı-siyah baca, can sandalları, korkuluk; her gemi için tek MultiMesh örneği + köpük izi. Deniz shader'ıyla **aynı Gerstner dalgalarında** boy ve yalpa yapar (dalga yüksekliği sunucunun gerçek deniz verisinden). Yanaşmadan 20 sn önce ve kalkmadan 6 sn önce **düdük** (mesafeye göre kısılır, saat tabanlı, ağsız) |
 | **Martılar** | Vapurların arkasında dönen, iskele üzerinde daire çizen ve açık denizde süzülen 10/20/36 martı (kalite seviyesine göre; `game/shared/gulls.gd`). Yerleri sunucu saatinin saf fonksiyonu, ağsız; tek MultiMesh, kanat çırpışı tepe noktası shader'ında. Çağrıları saat tabanlı: yakındaki martının çığlığı herkese aynı anda gelir. Vapur uzaklaşınca (ufkun ötesinde) onu izleyen martılar da gizlenir |
 | **Sokak kedileri** | Park etmiş arabaların kaputunda ve banklarda uyuyan, kaldırımda gezinen kediler (herkes için aynı: uyku/yürüyüş zamanı saatin saf fonksiyonu, birim testli). Yanına git: **E** / **Sev** → mırlar |
+| **Çay ocağı** | Kafe, restoran, büfe, pastane ve fırın önünde (12 m) **O** / **Çay** → "Çay söyle": avatarın elinde ince belli bardak, dudağa kaldırılan yudum pozu (`avatar_poser`; çevredeki herkes görür, kaşık sesiyle). Karar sunucuda: mekâna yakınlık sunucuda doğrulanır, hesap başına 45 sn bekleme, soluk sayacına %35 destek (nefesin kesikse açılır), denetim kaydı. Yudum pozu sunucudan gelen `s_emote` ("tea"); oyuncular bunu tek başına tetikleyemez |
 | **Güvercinler** | Meydan, park ve durak önlerinde yem arayan sürüler; biri yaklaşınca (koşarak daha uzaktan) havalanır, başka yere konar (kaçış mesafesi hıza göre, birim testli) |
 | **Tabelalar** | OSM'deki 394 gerçek işletmenin adı (kafe, restoran, eczane "ECZANE", banka, dükkân) bulunduğu binanın sokağa bakan cephesinde; kavşaklarda mavi **İstanbul sokak levhaları** ("Bahariye Cd.", "Nail Bey Sk.") |
 | Sokak eşyası | **93 park etmiş araba** (bir kısmı sarı taksi, tramvay yollarında, kavşak ve geçitlerde park yok), bank, yaya bölgesi girişlerinde **babalar**, sokak lambaları, katener, raylar |
@@ -197,6 +198,7 @@ Masaüstü istemci de bir WebSocket sunucusuna bağlanabilir: sunucu alanına
 |---|---|
 | WASD, Shift, Space, fare | Yürü, koş, zıpla, bak (koşarak topa girersen top havalanır) |
 | E | Bakılan kişiye konuşma isteği (4 m); kedinin yanındaysan sev |
+| O | Kafe, restoran, pastane önündeyken çay söyle (soluk desteği, 45 sn bekleme) |
 | Y / N | Gelen isteği kabul et / reddet (ya da hiçbir şey yapma) |
 | Enter, X | Sohbette yaz / sohbetten ayrıl |
 | G, H | El salla, selam ver |
@@ -213,7 +215,7 @@ Masaüstü istemci de bir WebSocket sunucusuna bağlanabilir: sunucu alanına
 
 ```bash
 "$GODOT" --headless --path game --import      # ilk seferde sınıf önbelleği için
-"$GODOT" --headless --path game -- --test     # 9357 kontrol
+"$GODOT" --headless --path game -- --test     # 9396 kontrol
 python -m unittest discover -s world-pipeline/tests   # 26 test
 python tools/bots.py smoke                    # 2 bot: tanış, konuş, yaz, el salla, engelle, engeli kaldır, kalıcılık
 python tools/bots.py smoke --transport ws     # aynısı WebSocket üzerinden

@@ -81,7 +81,9 @@ const SLAP_MIN_REACTION := 0.08  # faster than this (latency removed) is a guess
 const SLAP_TIE := 0.03
 const SLAP_MAX_RTT := 0.5  # latency credit is capped, so lag cannot be faked
 ## Server-sent poses for the minigames (players cannot trigger these).
-const GAME_EMOTES := ["shake", "rock", "paper", "scissors", "slap", "dodge"]
+## "tea" is the sip after ordering tea at a cafe (the server sends it to the
+## drinker and everyone around).
+const GAME_EMOTES := ["shake", "rock", "paper", "scissors", "slap", "dodge", "tea"]
 const REPORT_REASONS := ["harassment", "hate", "spam", "impersonation", "other"]
 
 # Movement. Identical on both sides so client prediction matches the server.

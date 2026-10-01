@@ -288,6 +288,13 @@ func c_treat() -> void:
 		server.on_treat(_sender())
 
 
+## Order a glass of tea at a cafe or restaurant nearby.
+@rpc("any_peer", "call_remote", "reliable", 1)
+func c_tea() -> void:
+	if server:
+		server.on_tea(_sender())
+
+
 ## Step off now if the tram is at a stop, otherwise toggle the stop request.
 @rpc("any_peer", "call_remote", "reliable", 1)
 func c_alight() -> void:

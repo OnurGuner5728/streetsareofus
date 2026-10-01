@@ -22,7 +22,7 @@ func _ready() -> void:
 
 
 		test_traffic_model, test_traffic_road_rules, test_traffic_headway_and_signals, test_traffic_density,
-		test_traffic_collision, test_ferries, test_ferry_horn_and_view, test_gulls, test_critters,
+		test_traffic_collision, test_ferries, test_ferry_horn_and_view, test_gulls, test_critters, test_tea,
 	]
 	var only := OS.get_environment("TEST_ONLY")  # e.g. TEST_ONLY=traffic runs the tests with that in their name
 	for t in tests:
@@ -2428,3 +2428,49 @@ func test_ferry_horn_and_view() -> void:
 	var box := hull.get_aabb()
 	check(box.size.z > 36.0 and box.size.x > 8.0 and box.position.y < -1.0 and box.end.y > 10.0, "hull proportions look like a ferry (%s)" % str(box.size))
 	check(FerryView.wake_mesh().get_aabb().size.z > 60.0, "the wake trails behind the ship")
+
+
+## "Çay söyle": the server decides whether a glass of tea is served (near a
+## cafe, off the ground, on cooldown), lifts stamina and clears breathlessness;
+## the sip is a server-sent pose and every notice has a Turkish line.
+func test_tea() -> void:
+	_kadikoy_traffic()
+	var cafe := {}
+	for poi in _traffic_zone.pois:
+		if str(poi.get("kind", "")) in ZoneServer.TEA_KINDS:
+			cafe = poi
+			break
+	check(not cafe.is_empty(), "the zone has a place that serves tea")
+	var body := PlayerMotor.make_body(AvatarSpec.defaults())
+	add_child(body)
+	body.set_meta("stamina", 500)
+	body.set_meta("winded", true)
+	check(PlayerMotor.drink_tea(body) == 500 + PlayerMotor.TEA_STAMINA, "tea lifts stamina")
+	check(not body.get_meta("winded"), "and ends being out of breath")
+	body.set_meta("stamina", PlayerMotor.STAMINA_MAX - 100)
+	check(PlayerMotor.drink_tea(body) == PlayerMotor.STAMINA_MAX, "a full bar stays full")
+	body.set_meta("stamina", 500)
+	var server := ZoneServer.new()
+	server.zone = _traffic_zone
+	var pl := ZoneServer.Player.new()
+	pl.account_id = "tea-test"
+	pl.body = body
+	# Far from any cafe in the middle of nowhere (the rim of the map).
+	body.global_position = Vector3(1.0e5, 0.0, 1.0e5)
+	check(server.tea_order(pl, 100.0).code == "tea_far", "too far from a cafe: no tea")
+	check(int(body.get_meta("stamina")) == 500, "and no stamina")
+	var at := Vector3(float(cafe.e), 0.0, -float(cafe.n))
+	body.global_position = at
+	var first := server.tea_order(pl, 200.0)
+	check(first.code == "tea_served" and first.detail != "", "next to the cafe the tea comes (%s)" % str(first.get("code")))
+	check(int(body.get_meta("stamina")) >= 500 + PlayerMotor.TEA_STAMINA, "and lifts stamina on the server")
+	var again := server.tea_order(pl, 200.0 + ZoneServer.TEA_COOLDOWN - 5.0)
+	check(again.code == "tea_wait" and again.detail == "5", "a second glass has to wait (%s)" % str(again.get("detail")))
+	check(server.tea_order(pl, 200.0 + ZoneServer.TEA_COOLDOWN + 0.1).code == "tea_served", "after the cooldown another one comes")
+	body.set_meta("knock", 50)
+	check(server.tea_order(pl, 1.0e6).is_empty(), "nobody is served lying on the ground")
+	for code in ["tea_far", "tea_wait", "tea_served"]:
+		check(GameClient.NOTICES.has(code), "notice %s is translated" % code)
+	check(Protocol.GAME_EMOTES.has("tea") and not Protocol.EMOTES.has("tea"), "the sip is sent by the server only")
+	body.queue_free()
+	server.free()

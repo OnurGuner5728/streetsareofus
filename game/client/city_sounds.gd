@@ -152,6 +152,10 @@ func gull_call(at: Vector3) -> void:
 	_one_shot("gull", at, -7.0, _rng.randf_range(0.85, 1.25))
 
 
+func tea_clink(at: Vector3) -> void:
+	_one_shot("spoon", at, -8.0, _rng.randf_range(0.95, 1.05))
+
+
 func purr(at: Vector3) -> void:
 	_one_shot("purr", at, -2.0, _rng.randf_range(0.9, 1.1))
 
@@ -305,7 +309,7 @@ func _one_shot(sample: String, at: Vector3, db: float, pitch: float) -> void:
 
 func _generate() -> void:
 	var specs := [["step", 0.12], ["thump", 0.25], ["clang", 0.7], ["chime", 0.7], ["bell", 1.4], ["sparrow", 0.5], ["gull", 1.1],
-		["rumble", 2.0], ["engine", 2.0], ["horn", 0.5], ["ambient", 6.0], ["rain", 3.0], ["thunder", 3.5], ["purr", 1.8], ["breath", 1.9], ["wave", 7.0], ["ferry_horn", 2.6]]
+		["rumble", 2.0], ["engine", 2.0], ["horn", 0.5], ["ambient", 6.0], ["rain", 3.0], ["thunder", 3.5], ["purr", 1.8], ["breath", 1.9], ["wave", 7.0], ["ferry_horn", 2.6], ["spoon", 0.9]]
 	for spec in specs:
 		var data := PackedFloat32Array()
 		data.resize(int(float(spec[1]) * RATE))
@@ -369,6 +373,13 @@ func _fill(sound: String, out: PackedFloat32Array) -> void:
 					s += sin(TAU * f0 * (k + 1) * t + k * 0.9) * float(ENGINE_AMP[k])
 				lp += (_rng.randf_range(-1.0, 1.0) - lp) * 0.05
 				s = s * lump * 0.3 + lp * 0.5
+			"spoon":
+				# A teaspoon stirred in a thin glass: three bright clinks, a little apart.
+				for k in 3:
+					var u := t - 0.05 - k * 0.19
+					if u >= 0.0:
+						var f := 2600.0 + 380.0 * k
+						s += (sin(TAU * f * u) + 0.5 * sin(TAU * f * 2.41 * u)) * exp(-u * 38.0) * (0.3 - 0.06 * k)
 			"horn":
 				var env := minf(1.0, t / 0.02) * minf(1.0, (0.5 - t) / 0.06)
 				s = (tanh(2.5 * sin(TAU * 415.0 * t)) + tanh(2.5 * sin(TAU * 523.0 * t))) * 0.16 * env

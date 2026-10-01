@@ -28,6 +28,12 @@ const INJURY_RANK := {"": 0, "bruise": 1, "arm": 2, "leg": 3}
 const HEAL_KINDS := ["pharmacy", "clinic", "hospital", "doctors"]
 const HEAL_RANGE := 15.0
 const HEAL_RANGE_TOLERANCE := 2.0
+## Tea: ordered at these places within TEA_RANGE (+ tolerance for latency),
+## once per TEA_COOLDOWN seconds per account.
+const TEA_KINDS := ["cafe", "restaurant", "fast_food", "confectionery", "bakery"]
+const TEA_RANGE := 12.0
+const TEA_RANGE_TOLERANCE := 2.0
+const TEA_COOLDOWN := 45.0
 
 
 class Player:
@@ -81,6 +87,7 @@ var tick := 0
 var _grid := {}  # Vector2i -> Array[int]
 var _last_save := 0.0
 var _seats := {}  # seat id -> peer
+var _tea_at := {}  # account id -> time of the last glass of tea
 var _stats := {"ticks": 0, "tick_us": 0, "tick_us_max": 0, "sim_us": 0, "sim_steps": 0, "idle_steps": 0, "dropped": 0, "gap_filled": 0, "snap_us": 0, "snap_bytes": 0, "snap_entities": 0, "snaps": 0, "trams_us": 0, "motor_us": 0, "props_us": 0, "at": 0.0}
 var _started_at := 0.0
 
@@ -529,6 +536,60 @@ func on_treat(peer: int) -> void:
 		_dispatch([SocialRules._notice(peer, "treat_dressed", where)])
 	store.audit("treat", {"account": pl.account_id, "kind": kind, "at": str(place.get("id", ""))})
 	log_line("%s treated (%s) at %s" % [pl.display_name, kind, where])
+
+
+## The nearest cafe-like place within `radius` metres that serves tea, or {}.
+func _tea_place_near(pos: Vector3, radius: float) -> Dictionary:
+	var p := ZoneData.to_en(pos)
+	var best := {}
+	var best_d := radius
+	for poi in zone.pois:
+		if not str(poi.get("kind", "")) in TEA_KINDS:
+			continue
+		var d := p.distance_to(Vector2(float(poi.e), float(poi.n)))
+		if d <= best_d:
+			best_d = d
+			best = poi
+	return best
+
+
+## "Çay söyle" at a cafe: a glass of tea (everyone nearby sees the sip) and a
+## lift of stamina, decided here. Needs to be standing at the place and not to
+## have had one for TEA_COOLDOWN seconds.
+func on_tea(peer: int) -> void:
+	var pl: Player = players.get(peer)
+	if pl == null:
+		return
+	var order := tea_order(pl, now())
+	if order.is_empty():
+		return
+	var effects := [SocialRules._notice(peer, str(order.code), str(order.detail))]
+	if order.code == "tea_served":
+		effects.append(SocialRules._rpc(peer, "s_emote", [peer, "tea"]))
+		for p in _players_near(peer, Protocol.EMOTE_RANGE):
+			if not _blocked_either(peer, p):
+				effects.append(SocialRules._rpc(p, "s_emote", [peer, "tea"]))
+		store.audit("tea", {"account": pl.account_id, "at": str(order.place.get("id", ""))})
+		log_line("%s had tea at %s" % [pl.display_name, order.detail])
+	_dispatch(effects)
+
+
+## The decision behind on_tea at server time `t`: {} (cannot order: on the
+## ground or on a tram), or {code, detail, place}, "tea_served" when the glass
+## is brought (the stamina lift is applied here and the cooldown starts).
+func tea_order(pl: Player, t: float) -> Dictionary:
+	if PlayerMotor.knock_ticks(pl.body) > 0 or not pl.riding.is_empty():
+		return {}
+	var place := _tea_place_near(pl.body.global_position, TEA_RANGE + TEA_RANGE_TOLERANCE)
+	if place.is_empty():
+		return {"code": "tea_far", "detail": "", "place": {}}
+	var wait := TEA_COOLDOWN - (t - float(_tea_at.get(pl.account_id, -INF)))
+	if wait > 0.0:
+		return {"code": "tea_wait", "detail": str(ceili(wait)), "place": place}
+	_tea_at[pl.account_id] = t
+	PlayerMotor.drink_tea(pl.body)
+	var venue := str(place.get("name", ""))
+	return {"code": "tea_served", "detail": venue if venue != "" else "Kafe", "place": place}
 
 
 func _send_snapshots() -> void:
