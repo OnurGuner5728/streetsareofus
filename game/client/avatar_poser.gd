@@ -36,6 +36,12 @@ const SLAP_HIT_UPPER := Vector3(-0.25, -0.5, 0.83)
 const SLAP_HIT_FORE := Vector3(-0.05, -0.3, 0.95)
 const DODGE_UPPER := Vector3(-0.3, -0.8, 0.15)
 const DODGE_FORE := Vector3(-0.2, 0.7, 0.6)
+## Sipping tea (right hand, a glass in the fist): the forearm is held up in
+## front, then the glass is lifted to the mouth and the head tips back a little.
+const TEA_UPPER := Vector3(-0.3, -0.85, 0.3)
+const TEA_HELD := Vector3(-0.1, 0.55, 0.83)
+const TEA_SIP := Vector3(-0.05, 0.93, 0.36)
+const TEA_SECONDS := 3.2
 ## Finger flexion of a fist (radians for the 01, 02 and 03 joints).
 const FIST_CURL := [1.3, 1.6, 1.0]
 ## Fingers curled per hand shape: index, middle, ring, pinky.
@@ -164,6 +170,13 @@ func _pose_game(sk: Skeleton3D) -> void:
 			_pose_arm(sk, "l", Vector3(-upper.x, upper.y, upper.z), Vector3(-fore.x, fore.y, fore.z), 0.0, w, 1.2)
 			_hand_shape(sk, "r", "flat", w)
 			_hand_shape(sk, "l", "flat", w)
+		"tea":
+			# Up to the lips and held there for a moment, then down again.
+			var lift := smoothstep(0.0, 0.3, game_time / TEA_SECONDS) * (1.0 - smoothstep(0.7, 1.0, game_time / TEA_SECONDS))
+			_pose_arm(sk, "r", TEA_UPPER, TEA_HELD.lerp(TEA_SIP, lift), 0.0, w)
+			_hand_shape(sk, "r", "fist", w * 0.6)
+			for b in [_neck, _head]:
+				_rotate_global(sk, b, Basis(Vector3.RIGHT, -0.16 * lift * w))
 		"dodge":
 			# Hands snatched back to the chest, leaning away.
 			_pose_arm(sk, "r", DODGE_UPPER, DODGE_FORE, 0.0, w)

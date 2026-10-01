@@ -132,6 +132,30 @@ func traffic_audio(near: Array) -> void:
 			p.play(_rng.randf() * 1.5)
 
 
+## A ferry's whistle from `at`. It carries for kilometres, so the voice is
+## placed at most 24 m away along the same bearing and its level follows the
+## real distance instead of the player's inverse-distance falloff.
+func ferry_horn(at: Vector3) -> void:
+	if client == null or client.camera == null:
+		return
+	var cam := client.camera.global_position
+	var offset := at - cam
+	var d := offset.length()
+	if d > 1800.0:
+		return
+	var db := clampf(7.0 - 20.0 * log(maxf(d, 40.0) / 40.0) / log(10.0) * 0.8, -34.0, 7.0)
+	_one_shot("ferry_horn", cam + offset.normalized() * minf(d, 24.0), db, 1.0)
+
+
+## A call from a gull circling over the water, heard from where it flies.
+func gull_call(at: Vector3) -> void:
+	_one_shot("gull", at, -7.0, _rng.randf_range(0.85, 1.25))
+
+
+func tea_clink(at: Vector3) -> void:
+	_one_shot("spoon", at, -8.0, _rng.randf_range(0.95, 1.05))
+
+
 func purr(at: Vector3) -> void:
 	_one_shot("purr", at, -2.0, _rng.randf_range(0.9, 1.1))
 
@@ -285,7 +309,7 @@ func _one_shot(sample: String, at: Vector3, db: float, pitch: float) -> void:
 
 func _generate() -> void:
 	var specs := [["step", 0.12], ["thump", 0.25], ["clang", 0.7], ["chime", 0.7], ["bell", 1.4], ["sparrow", 0.5], ["gull", 1.1],
-		["rumble", 2.0], ["engine", 2.0], ["horn", 0.5], ["ambient", 6.0], ["rain", 3.0], ["thunder", 3.5], ["purr", 1.8], ["breath", 1.9], ["wave", 7.0]]
+		["rumble", 2.0], ["engine", 2.0], ["horn", 0.5], ["ambient", 6.0], ["rain", 3.0], ["thunder", 3.5], ["purr", 1.8], ["breath", 1.9], ["wave", 7.0], ["ferry_horn", 2.6], ["spoon", 0.9]]
 	for spec in specs:
 		var data := PackedFloat32Array()
 		data.resize(int(float(spec[1]) * RATE))
@@ -349,9 +373,24 @@ func _fill(sound: String, out: PackedFloat32Array) -> void:
 					s += sin(TAU * f0 * (k + 1) * t + k * 0.9) * float(ENGINE_AMP[k])
 				lp += (_rng.randf_range(-1.0, 1.0) - lp) * 0.05
 				s = s * lump * 0.3 + lp * 0.5
+			"spoon":
+				# A teaspoon stirred in a thin glass: three bright clinks, a little apart.
+				for k in 3:
+					var u := t - 0.05 - k * 0.19
+					if u >= 0.0:
+						var f := 2600.0 + 380.0 * k
+						s += (sin(TAU * f * u) + 0.5 * sin(TAU * f * 2.41 * u)) * exp(-u * 38.0) * (0.3 - 0.06 * k)
 			"horn":
 				var env := minf(1.0, t / 0.02) * minf(1.0, (0.5 - t) / 0.06)
 				s = (tanh(2.5 * sin(TAU * 415.0 * t)) + tanh(2.5 * sin(TAU * 523.0 * t))) * 0.16 * env
+			"ferry_horn":
+				# A ship's whistle: a deep fifth (110 and 165 Hz) with a slow swell,
+				# a touch of hull rumble and a long fade; two blasts one behind the other.
+				var blast := t - 1.25 if t > 1.25 else t
+				var dur := 1.25 if t > 1.25 else 1.2
+				var env := minf(1.0, blast / 0.09) * minf(1.0, maxf(0.0, (dur - blast)) / 0.4)
+				var wob := 1.0 + 0.004 * sin(TAU * 5.0 * t)
+				s = (tanh(1.8 * sin(TAU * 110.0 * wob * t)) * 0.55 + tanh(1.8 * sin(TAU * 165.0 * wob * t)) * 0.4 + sin(TAU * 220.0 * t) * 0.15) * 0.3 * env
 			"ambient":
 				lp += (_rng.randf_range(-1.0, 1.0) - lp) * 0.012
 				lp2 += (_rng.randf_range(-1.0, 1.0) - lp2) * 0.2

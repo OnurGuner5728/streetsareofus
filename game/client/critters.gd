@@ -11,6 +11,8 @@ const FLOCKS := 6
 const BIRDS_PER_FLOCK := 11
 const SCARE := 4.5
 const SCARE_RUNNING := 8.0
+const SIT_TIME := 12.0  # a strolling cat sits this long at each end (s)
+const PET_REACH := 2.2
 
 const CAT_SHADER := """
 shader_type spatial;
@@ -154,30 +156,42 @@ func _update_cats(t: float) -> void:
 		var spec: Dictionary = _cat_specs[i]
 		if spec.kind != "walk":
 			continue
-		var a: Vector2 = spec.a
-		var b: Vector2 = spec.b
-		var length := maxf(a.distance_to(b), 0.5)
-		# Walk, sit a while, walk back, sit again.
-		var cycle := 2.0 * (length / float(spec.speed) + 12.0)
-		var tau := fposmod(t + float(spec.phase), cycle)
-		var leg := length / float(spec.speed)
-		var f := 0.0
-		var moving := false
-		var heading := b - a
-		if tau < leg:
-			f = tau / leg
-			moving = true
-		elif tau < leg + 12.0:
-			f = 1.0
-		elif tau < 2.0 * leg + 12.0:
-			f = 1.0 - (tau - leg - 12.0) / leg
-			moving = true
-			heading = a - b
-		var p := a.lerp(b, f)
+		var st := walk_state(spec.a, spec.b, float(spec.speed), float(spec.phase), t)
+		var p: Vector2 = st.pos
 		spec.pos = Vector3(p.x, client.zone.terrain.height_en(p), -p.y)
-		var h := heading.normalized()
+		var h: Vector2 = st.heading
 		_cats.set_instance_transform(i, Transform3D(Basis(Vector3.UP, atan2(-h.x, h.y)), spec.pos))
-		_cats.set_instance_custom_data(i, Color(float(i) * 2.3, 2.0 if moving else 0.0, float(spec.coat), 0.0))
+		_cats.set_instance_custom_data(i, Color(float(i) * 2.3, 2.0 if st.moving else 0.0, float(spec.coat), 0.0))
+
+
+## A strolling cat's state at world time `t`: walk from a to b, sit a while,
+## walk back, sit again. A pure function of the time, so everyone sees the
+## same cat. Returns {pos: Vector2, heading: Vector2 (unit), moving: bool}.
+static func walk_state(a: Vector2, b: Vector2, speed: float, phase: float, t: float) -> Dictionary:
+	var length := maxf(a.distance_to(b), 0.5)
+	var leg := length / speed
+	var cycle := 2.0 * (leg + SIT_TIME)
+	var tau := fposmod(t + phase, cycle)
+	var f := 0.0
+	var moving := false
+	var heading := b - a
+	if tau < leg:
+		f = tau / leg
+		moving = true
+	elif tau < leg + SIT_TIME:
+		f = 1.0
+	elif tau < 2.0 * leg + SIT_TIME:
+		f = 1.0 - (tau - leg - SIT_TIME) / leg
+		moving = true
+		heading = a - b
+	else:
+		heading = a - b
+	return {"pos": a.lerp(b, f), "heading": heading.normalized(), "moving": moving}
+
+
+## How close a person may come to a feeding flock before it takes off.
+static func scare_radius(speed: float) -> float:
+	return SCARE_RUNNING if speed > 3.5 else SCARE
 
 
 ## The cat within reach in front of the camera, or -1.
@@ -229,7 +243,7 @@ func _update_birds(delta: float, people: Array) -> void:
 		if flock.state == "ground":
 			for p: Array in people:
 				var d := (p[0] as Vector3).distance_to(flock.at)
-				if d < (SCARE_RUNNING if float(p[1]) > 3.5 else SCARE):
+				if d < scare_radius(float(p[1])):
 					flock.state = "flying"
 					flock.t = 0.0
 					flock.from = flock.at

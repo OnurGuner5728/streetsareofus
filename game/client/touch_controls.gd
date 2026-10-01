@@ -44,7 +44,7 @@ func _ready() -> void:
 
 
 ## ctx: target (someone under the crosshair), talking_to_target, in_conversation, incoming,
-## cat, treat (injured at a pharmacy), bench, seated, tram_label, tram_tint,
+## cat, treat (injured at a pharmacy), tea (at a cafe), bench, seated, tram_label, tram_tint,
 ## hide_free (saklambaç base in reach), seksek_start (on a chalk grid's start), party (in either)
 func set_context(ctx: Dictionary) -> void:
 	if _surface.visible != enabled:
@@ -91,6 +91,8 @@ func _buttons() -> Array:
 		list.append({"id": "treat", "label": "Tedavi", "pos": Vector2(w - 62, h - 170), "r": 34.0, "tint": Color("c0392b")})
 	elif _context.get("bench", false):
 		list.append({"id": "sit", "label": "Otur", "pos": Vector2(w - 62, h - 170), "r": 34.0, "tint": Color("8a6d4b")})
+	if _context.get("tea", false):
+		list.append({"id": "tea", "label": "Çay", "pos": Vector2(w - 140, h - 200), "r": 28.0, "tint": Color("b5412b")})
 	if not _context.get("seated", false):
 		list.append({"id": "dance", "label": "Dans", "pos": Vector2(w - 300, h - 50), "r": 26.0})
 	if _context.get("in_conversation", false) or _context.get("in_group", false):

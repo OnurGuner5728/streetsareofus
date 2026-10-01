@@ -133,7 +133,7 @@ func _start_client_from_args(args: Dictionary) -> void:
 		"account_id": identity.account_id, "account_secret": identity.account_secret,
 		"quit_after": float(args.get("quit-after", 0.0)),
 	}
-	for key in ["screenshot", "screenshot-after", "yaw", "pitch", "time", "tram-shot", "open-map", "route-to", "perf", "quality", "block-test", "group-test", "hide-test", "seksek-test", "look-npc", "look-sign", "camera", "wardrobe", "sit"]:
+	for key in ["screenshot", "screenshot-after", "yaw", "pitch", "time", "tram-shot", "ferry-shot", "open-map", "route-to", "perf", "quality", "block-test", "group-test", "hide-test", "seksek-test", "look-npc", "look-sign", "camera", "wardrobe", "sit"]:
 		if args.has(key):
 			opts[key.replace("-", "_")] = args[key]
 	_start_game(opts)

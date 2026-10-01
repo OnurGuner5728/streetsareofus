@@ -98,7 +98,9 @@ const HIDE_LANDMARK_RANGE := 150.0  # the seeker counts facing the nearest named
 const SEKSEK_IDLE_TIMEOUT := 8.0
 const SEKSEK_MAX_TIME := 60.0
 ## Server-sent poses for the minigames (players cannot trigger these).
-const GAME_EMOTES := ["shake", "rock", "paper", "scissors", "slap", "dodge"]
+## "tea" is the sip after ordering tea at a cafe (the server sends it to the
+## drinker and everyone around).
+const GAME_EMOTES := ["shake", "rock", "paper", "scissors", "slap", "dodge", "tea"]
 const REPORT_REASONS := ["harassment", "hate", "spam", "impersonation", "other"]
 
 # Movement. Identical on both sides so client prediction matches the server.

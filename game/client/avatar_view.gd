@@ -50,7 +50,7 @@ const CLIP_SPEED := {"walk": 1.25, "jog": 3.4, "sprint": 6.0}
 const GETUP_SECONDS := 1.0
 ## How long each emote pose lasts (default 0.9 s); the minigame poses come
 ## from the server (shake: 3 pumps of the countdown, signs held at the reveal).
-const EMOTE_SECONDS := {"wave": 1.6, "shake": 2.4, "rock": 2.2, "paper": 2.2, "scissors": 2.2, "slap": 0.9, "dodge": 0.9}
+const EMOTE_SECONDS := {"wave": 1.6, "shake": 2.4, "rock": 2.2, "paper": 2.2, "scissors": 2.2, "slap": 0.9, "dodge": 0.9, "tea": AvatarPoser.TEA_SECONDS}
 const CAST_COLOR := Color(0.95, 0.95, 0.93)
 const SLING_COLOR := Color(0.34, 0.48, 0.72)
 const FACE_SCALE := {"oval": Vector3(0.97, 1.02, 1.0), "round": Vector3(1.04, 0.97, 1.0),
@@ -97,6 +97,7 @@ var _hop_time := 0.0
 var _hop_lift := 0.0  # metres the body is raised at this moment of the hop
 var _model_y := 0.0  # resting height of the model node (leg length)
 var _injury_nodes: Array = []
+var _tea_glass: Node3D  # the tea glass in the right hand while sipping
 
 
 func build(new_avatar: Dictionary, with_detail := true) -> void:
@@ -168,6 +169,7 @@ func build(new_avatar: Dictionary, with_detail := true) -> void:
 	_play("idle", 0.0)
 	_anim.advance(randf() * 2.0)  # people don't breathe in sync
 	_injury_nodes = []
+	_tea_glass = null
 	_build_injury()
 
 
@@ -216,6 +218,27 @@ func _build_injury() -> void:
 		var inner := _attach(bone)
 		m.emit(bone, inner, material)
 		_injury_nodes.append(inner.get_parent())
+
+
+## A small tulip glass of tea in the right fist: dark red tea, a light rim.
+## The glass stands along the thumb's direction (T-pose +Z), in the palm.
+func _build_tea_glass() -> void:
+	var wrist := _bone_rest("hand_r")
+	var along := (wrist - _bone_rest("lowerarm_r")).normalized()
+	var c := wrist + along * 0.065 + Vector3(0, -0.015, 0)
+	var m := MeshMerger.new()
+	var z := Vector3(0, 0, 0.06)
+	_limb(m, "hand_r", c - z * 0.9, c + z * 0.9, 0.02, 0.033, Color(0.62, 0.17, 0.05))
+	_limb(m, "hand_r", c + z * 0.85, c + z * 1.05, 0.034, 0.035, Color(0.93, 0.93, 0.9))
+	var inner := _attach("hand_r")
+	m.emit("hand_r", inner, MeshMerger.vertex_colour_material(0.35))
+	_tea_glass = inner
+
+
+func _drop_tea_glass() -> void:
+	if _tea_glass != null and is_instance_valid(_tea_glass) and _tea_glass.get_parent() != null:
+		_tea_glass.get_parent().queue_free()
+	_tea_glass = null
 
 
 ## The sling's strap around the neck: from both ends of the pouch (where
@@ -655,6 +678,7 @@ func animate(speed: float, delta: float, pitch := 0.0, air := false) -> void:
 		_poser.wave = 0.0
 		_poser.nod = 0.0
 		_poser.game_blend = 0.0
+		_drop_tea_glass()
 
 
 func _play(clip: String, blend: float) -> void:
@@ -668,6 +692,11 @@ func play_emote(kind: String) -> void:
 		return
 	_emote = kind
 	_emote_left = float(EMOTE_SECONDS.get(kind, 0.9))
+	if kind == "tea":
+		if _tea_glass == null and _skel != null:
+			_build_tea_glass()
+	else:
+		_drop_tea_glass()
 	if _poser:
 		_poser.wave_time = 0.0
 		_poser.nod_time = 0.0

@@ -39,6 +39,9 @@ const NOTICES := {
 	"treat_dressed": "Eczacı pansuman yaptı. Daha çabuk iyileşeceksin.",
 	"treat_again": "Eczacı elinden geleni yaptı; gerisi zamana kalmış.",
 	"treat_doctor": "Doktor tedavi etti; iyileştin.",
+	"tea_far": "Çay söylemek için bir kafeye ya da lokantaya yaklaş (12 m).",
+	"tea_wait": "Çayın daha bitmedi; %s sn sonra yenisini söyleyebilirsin.",
+	"tea_served": "%s: ince belli bardakta çay geldi. Nefesin açıldı.",
 	"game_busy": "Bu kişi ya da sen zaten bir oyundasınız.",
 	"group_created": "%s grubu kuruldu.",
 	"group_joined": "%s gruba katıldı.",
@@ -98,6 +101,9 @@ const INJURY_NEWS := {"bruise": "Tramvay çarptı! Başın morardı; birkaç dak
 ## Places that treat injuries (as ZoneServer.HEAL_KINDS) and how close to be.
 const HEAL_KINDS := ["pharmacy", "clinic", "hospital", "doctors"]
 const HEAL_RANGE := 15.0
+## Places that serve tea (as ZoneServer.TEA_KINDS) and how close to be.
+const TEA_KINDS := ["cafe", "restaurant", "fast_food", "confectionery", "bakery"]
+const TEA_RANGE := 12.0
 const REJECTS := {
 	"protocol_mismatch": "Sürüm uyuşmuyor; istemciyi güncelle.",
 	"bad_name": "Geçersiz isim: 3-20 karakter; harf, rakam, boşluk, _ . - kullanılabilir.",
@@ -121,6 +127,10 @@ var transit: TransitNetwork
 var traffic: Traffic
 var fleet: TramFleet
 var traffic_view: TrafficView
+var ferries: Ferries
+var ferry_view: FerryView
+var gulls: Gulls
+var gull_view: GullView
 var navigator: Navigator
 var city_map: CityMap
 var sky: SkyController
@@ -213,6 +223,7 @@ var _tram_warned_at := -INF
 var injury := ""  # "bruise", "arm", "leg" or ""
 var _injury_until := 0.0  # local clock
 var _clinic_cache := {"at": -INF, "poi": {}}
+var _tea_cache := {"at": -INF, "poi": {}}
 
 
 static func now() -> float:
@@ -370,6 +381,17 @@ func on_welcome(info: Dictionary) -> void:
 		traffic_view.name = "Traffic"
 		add_child(traffic_view)
 		traffic_view.setup(self, traffic)
+		if zone.coast != null:
+			ferries = Ferries.for_zone(zone)
+			ferry_view = FerryView.new()
+			ferry_view.name = "Ferries"
+			add_child(ferry_view)
+			ferry_view.setup(self, ferries, zone.coast.sea_level)
+			gulls = Gulls.for_ferries(ferries, zone.zone_id)
+			gull_view = GullView.new()
+			gull_view.name = "Gulls"
+			add_child(gull_view)
+			gull_view.setup(self, gulls, zone.coast.sea_level)
 		props_view = PropView.new()
 		props_view.name = "Props"
 		add_child(props_view)
@@ -474,6 +496,10 @@ func on_welcome(info: Dictionary) -> void:
 				props_view.sounds = sounds
 			if traffic_view:
 				traffic_view.sounds = sounds
+			if ferry_view:
+				ferry_view.sounds = sounds
+			if gull_view:
+				gull_view.sounds = sounds
 			if touch:
 				touch.exclude = [Rect2(get_viewport().get_visible_rect().size.x - 2 * CityMap.MINI_RADIUS - 16, 70,
 					2 * CityMap.MINI_RADIUS, 2 * CityMap.MINI_RADIUS)]
@@ -670,6 +696,10 @@ func on_emote(from_id: int, kind: String) -> void:
 		remotes[from_id].view.play_emote(kind)
 	elif from_id == my_id and _self_view:
 		_self_view.play_emote(kind)
+	if kind == "tea" and sounds != null:
+		var who: Node3D = body if from_id == my_id else remotes.get(from_id)
+		if who != null:
+			sounds.tea_clink(who.global_position + Vector3(0, 1.2, 0))
 	if Protocol.GAME_EMOTES.has(kind):
 		return  # minigame poses speak for themselves (the overlay has the words)
 	if from_id != my_id:
@@ -1356,6 +1386,30 @@ func request_treatment() -> void:
 	Net.c_treat.rpc_id(1)
 
 
+## The cafe or restaurant you are standing at (a POI that serves tea), or {}.
+func _tea_near() -> Dictionary:
+	if body == null or zone == null:
+		return {}
+	var t := now()
+	if t - float(_tea_cache.at) < 0.5:
+		return _tea_cache.poi
+	var p := ZoneData.to_en(body.global_position)
+	var best := {}
+	var best_d := TEA_RANGE
+	for poi in zone.pois:
+		if str(poi.get("kind", "")) in TEA_KINDS:
+			var d := p.distance_to(Vector2(float(poi.e), float(poi.n)))
+			if d <= best_d:
+				best_d = d
+				best = poi
+	_tea_cache = {"at": t, "poi": best}
+	return best
+
+
+func request_tea() -> void:
+	Net.c_tea.rpc_id(1)
+
+
 func on_weather(info: Dictionary) -> void:
 	if not joined:
 		_early_weather = info
@@ -1725,6 +1779,10 @@ func _process(delta: float) -> void:
 	if traffic_view:
 		traffic_view.update(server_now(), night, camera.global_position if camera else render_pos, render_pos, delta)
 	FrameProfiler.add("traffic", t0)
+	if ferry_view:
+		ferry_view.update(server_now(), render_pos)
+	if gull_view:
+		gull_view.update(server_now(), render_pos)
 	_step_visual = lerpf(_step_visual, 0.0, 1.0 - exp(-12.0 * delta))
 	_sit_blend = move_toward(_sit_blend, 1.0 if body.has_meta("seat") else 0.0, delta * 1.5)
 	var cam_pos := render_pos + Vector3(0, _eye_height * (1.0 - 0.3 * _sit_blend) + _step_visual, 0)
@@ -2145,6 +2203,32 @@ func _maybe_screenshot() -> void:
 			pitch = -0.05
 			_screenshot_busy = true
 			await get_tree().create_timer(0.3).timeout
+	if options.has("ferry_shot") and ferries:
+		# Debug framing: wait for a ferry in clear sight, then look at it.
+		# --ferry-shot=MAX_DISTANCE (default 700 m).
+		var shot_max := float(str(options.ferry_shot)) if str(options.ferry_shot) != "true" else 700.0
+		var best_ship: Ferries.Ship = null
+		var best_d := INF
+		for s: Ferries.Ship in ferries.ships:
+			ferries.place(s, server_now())
+			var p := Vector3(s.pos.x, zone.coast.sea_level + 6.0, s.pos.y)
+			var d := p.distance_to(camera.global_position)
+			var los := Vector2(p.x - camera.global_position.x, p.z - camera.global_position.z).normalized()
+			if s.away or d > shot_max or d < 30.0 or (now() - _joined_at < 300.0 and absf(los.dot(s.dir)) > 0.7):
+				continue
+			var ray := PhysicsRayQueryParameters3D.create(camera.global_position, p, Protocol.LAYER_WORLD)
+			if get_world_3d().direct_space_state.intersect_ray(ray).is_empty() and d < best_d:
+				best_d = d
+				best_ship = s
+		if best_ship == null:
+			if now() - _joined_at < 400.0:
+				return
+		else:
+			var to := Vector3(best_ship.pos.x, zone.coast.sea_level + 5.0, best_ship.pos.y) - camera.global_position
+			yaw = atan2(-to.x, -to.z)
+			pitch = asin(clampf(to.normalized().y, -1.0, 1.0))
+			_screenshot_busy = true
+			await get_tree().create_timer(0.3).timeout
 	_screenshot_done = true
 	if _self_view:
 		print("[client] self clip %s on_floor=%s vy=%.2f" % [_self_view._clip, body.is_on_floor(), body.velocity.y])
@@ -2262,6 +2346,11 @@ func _on_key(key: Key) -> void:
 				request_treatment()
 			elif _nearest_bench() >= 0:
 				Net.c_sit.rpc_id(1, _nearest_bench())
+		KEY_O:
+			if _tea_near().is_empty():
+				_notice(NOTICES.tea_far)
+			else:
+				request_tea()
 		KEY_J:
 			send_emote("dance")
 		KEY_G:
@@ -2349,6 +2438,8 @@ func _on_touch_action(id: String) -> void:
 			tram_action()
 		"treat":
 			request_treatment()
+		"tea":
+			request_tea()
 		"sit":
 			if _nearest_bench() >= 0:
 				Net.c_sit.rpc_id(1, _nearest_bench())
@@ -2409,7 +2500,7 @@ func _cat_in_reach() -> int:
 		return -1
 	var flat := -camera.global_transform.basis.z
 	flat.y = 0.0
-	return critters.cat_near(body.global_position + Vector3(0, 0.6, 0), flat.normalized(), 2.2)
+	return critters.cat_near(body.global_position + Vector3(0, 0.6, 0), flat.normalized(), Critters.PET_REACH)
 
 
 func _latest_incoming() -> int:
@@ -2473,6 +2564,7 @@ func _update_hud(delta: float) -> void:
 	if touch:
 		touch.set_context({"target": target > 0, "cat": target <= 0 and _cat_in_reach() >= 0, "talking_to_target": conversations.has(target),
 			"treat": target <= 0 and not clinic.is_empty(),
+			"tea": target <= 0 and not _tea_near().is_empty(),
 			"bench": target <= 0 and _nearest_bench() >= 0, "seated": body.has_meta("seat"),
 			"in_conversation": not conversations.is_empty(), "incoming": latest >= 0,
 			"in_group": not group.is_empty(),
@@ -2504,7 +2596,10 @@ func _update_hud(delta: float) -> void:
 		hud.set_target(line)
 	elif _cat_in_reach() >= 0:
 		hud.set_target("Sokak kedisi  ·  " + ("sevmek için Sev'e dokun" if touch else "sevmek için [E]"))
-	elif crowd_view and crowd_view.crowd and camera 			and crowd_view.look_target(camera.global_position, -camera.global_transform.basis.z, Protocol.INTERACTION_RANGE + _cam_dist) >= 0:
+	elif not _tea_near().is_empty():
+		var venue := str(_tea_near().get("name", ""))
+		hud.set_target("%s  ·  çay söylemek için %s" % [venue if venue != "" else "Kafe", "Çay'a dokun" if touch else "[O]"])
+	elif crowd_view and crowd_view.crowd and camera			and crowd_view.look_target(camera.global_position, -camera.global_transform.basis.z, Protocol.INTERACTION_RANGE + _cam_dist) >= 0:
 		hud.set_target("Yaya  [NPC]  ·  yapay bir figür; sohbet edilemez")
 	else:
 		hud.set_target("")

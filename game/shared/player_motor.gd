@@ -52,6 +52,7 @@ const RECOVER_MOVING := 20  # per tick (~17 s to full while walking)
 const RECOVER_IDLE := 45  # per tick (~7 s to full standing still)
 const WINDED_WALK := 0.85
 const DEFAULT_FITNESS := 0.35
+const TEA_STAMINA := 3500  # a glass of tea at a cafe: about a third of the bar
 ## A leg injury: no running, no jumping, a slow walk.
 const LIMP_SPEED := 1.3
 
@@ -121,6 +122,17 @@ static func knock_ticks(body: CharacterBody3D) -> int:
 ## Lying on the ground (knocked down and not yet getting up).
 static func is_down(body: CharacterBody3D) -> bool:
 	return knock_ticks(body) > KNOCK_GETUP_TICKS
+
+
+## A glass of tea: a lift of stamina (the server decides; the next snapshot
+## carries it to the client). Being winded ends if it gets back above the
+## recovery mark. Returns the new stamina.
+static func drink_tea(body: CharacterBody3D) -> int:
+	var stamina := mini(STAMINA_MAX, int(body.get_meta("stamina", STAMINA_MAX)) + TEA_STAMINA)
+	body.set_meta("stamina", stamina)
+	if bool(body.get_meta("winded", false)) and stamina >= WINDED_RECOVER:
+		body.set_meta("winded", false)
+	return stamina
 
 
 ## Stamina spent per sprinting tick: all of it in `endurance` seconds.

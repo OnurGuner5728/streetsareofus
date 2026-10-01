@@ -85,3 +85,12 @@ static func fog_density() -> float:
 ## built from MEDIUM up; see CityVisuals.
 static func detail_props() -> bool:
 	return level >= MEDIUM
+
+
+## Ferry wake foam is skipped on LOW; the gull flock shrinks with the level.
+static func ferry_wake() -> bool:
+	return level >= MEDIUM
+
+
+static func gull_count() -> int:
+	return [10, 20, 36][level]
