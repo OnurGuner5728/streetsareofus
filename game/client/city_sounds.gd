@@ -11,8 +11,11 @@ extends Node3D
 
 const RATE := 22050
 const MAX_TRAM_VOICES := 6
+const MAX_CAR_VOICES := 5
+const CAR_HEAR := 55.0
 const TRAM_HEAR := 70.0
 # Tram bell: inharmonic partials of a struck bell (Hz, level, decay per second).
+const ENGINE_AMP := [1.0, 0.45, 0.3, 0.22, 0.17, 0.14]
 const BELL_F := [1150.0, 2440.0, 3960.0, 5400.0]
 const BELL_A := [0.5, 0.25, 0.13, 0.07]
 const BELL_D := [3.0, 5.0, 8.0, 11.0]
@@ -28,6 +31,7 @@ var _ui: AudioStreamPlayer
 var _breath: AudioStreamPlayer
 var _one_shots: Array = []  # AudioStreamPlayer3D pool
 var _tram_voices := {}  # veh root -> AudioStreamPlayer3D
+var _car_voices: Array = []  # {player, id} for the nearest road vehicles
 var _next_critter := 0.0
 var _step_phase := 0.0
 var rain := 0.0  # 0..1, set by the weather
@@ -51,6 +55,13 @@ func setup(game: GameClient) -> void:
 		p.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
 		add_child(p)
 		_one_shots.append(p)
+	for i in MAX_CAR_VOICES:
+		var p := AudioStreamPlayer3D.new()
+		p.unit_size = 7.0
+		p.max_distance = CAR_HEAR
+		p.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+		add_child(p)
+		_car_voices.append({"player": p, "id": -1})
 	_generate()
 
 
@@ -71,6 +82,54 @@ func tram_bell(at: Vector3) -> void:
 func knock(at: Vector3, kind: String, strength: float) -> void:
 	var sample := "clang" if kind == "bin" else "thump"
 	_one_shot(sample, at, linear_to_db(strength) - 2.0, _rng.randf_range(0.9, 1.15) * (1.5 if kind == "ball" else 1.0))
+
+
+## A car horn from a driver at `at`; buses sound lower.
+func horn(at: Vector3, pitch: float, heavy: bool) -> void:
+	_one_shot("horn", at, -1.0 if heavy else -3.0, pitch * (0.72 if heavy else 1.0))
+
+
+## Engine hum for the nearest road vehicles. `near` holds
+## [distance, position, speed, kind, id] per vehicle within CAR_HEAR; the engine
+## note follows the speed and the sound fades with distance (and is lower, and
+## louder, for buses and minibuses).
+func traffic_audio(near: Array) -> void:
+	if not ready_to_play:
+		return
+	near.sort_custom(func(a, b): return a[0] < b[0])
+	var wanted := {}
+	for i in mini(near.size(), MAX_CAR_VOICES):
+		wanted[int(near[i][4])] = near[i]
+	# Keep voices on the vehicles they already follow, hand the rest out.
+	for slot in _car_voices:
+		if not wanted.has(int(slot.id)):
+			slot.id = -1
+	for id in wanted:
+		var has := false
+		for slot in _car_voices:
+			if int(slot.id) == id:
+				has = true
+		if not has:
+			for slot in _car_voices:
+				if int(slot.id) == -1:
+					slot.id = id
+					break
+	for slot in _car_voices:
+		var p: AudioStreamPlayer3D = slot.player
+		if int(slot.id) == -1:
+			if p.playing:
+				p.stop()
+			continue
+		var e: Array = wanted[int(slot.id)]
+		var speed := float(e[2])
+		var kind := int(e[3])
+		var big := kind == Traffic.BUS or kind == Traffic.MINIBUS
+		p.global_position = e[1]
+		p.volume_db = lerpf(-24.0, -9.0, clampf(speed / 9.0, 0.0, 1.0)) + (4.0 if kind == Traffic.BUS else 0.0)
+		p.pitch_scale = (0.62 if kind == Traffic.BUS else (0.8 if big else 1.0)) * (0.8 + speed * 0.05)
+		if not p.playing:
+			p.stream = _samples.engine
+			p.play(_rng.randf() * 1.5)
 
 
 func purr(at: Vector3) -> void:
@@ -226,12 +285,12 @@ func _one_shot(sample: String, at: Vector3, db: float, pitch: float) -> void:
 
 func _generate() -> void:
 	var specs := [["step", 0.12], ["thump", 0.25], ["clang", 0.7], ["chime", 0.7], ["bell", 1.4], ["sparrow", 0.5], ["gull", 1.1],
-		["rumble", 2.0], ["ambient", 6.0], ["rain", 3.0], ["thunder", 3.5], ["purr", 1.8], ["breath", 1.9], ["wave", 7.0]]
+		["rumble", 2.0], ["engine", 2.0], ["horn", 0.5], ["ambient", 6.0], ["rain", 3.0], ["thunder", 3.5], ["purr", 1.8], ["breath", 1.9], ["wave", 7.0]]
 	for spec in specs:
 		var data := PackedFloat32Array()
 		data.resize(int(float(spec[1]) * RATE))
 		await _fill(str(spec[0]), data)
-		var loop: bool = spec[0] in ["rumble", "ambient", "rain", "breath", "wave"]
+		var loop: bool = spec[0] in ["rumble", "engine", "ambient", "rain", "breath", "wave"]
 		_samples[spec[0]] = _to_wav(data, loop)
 	ready_to_play = true
 
@@ -281,6 +340,18 @@ func _fill(sound: String, out: PackedFloat32Array) -> void:
 				lp2 += (lp - lp2) * 0.1
 				var clack := exp(-fmod(t, 0.5) * 60.0) * 0.5
 				s = lp2 * 2.6 + sin(TAU * 48.0 * t) * 0.18 + clack * lp * 3.0
+			"engine":
+				# A low firing note (38 Hz, whole cycles per loop) with its
+				# harmonics, a lumpy idle and a breath of intake noise.
+				var f0 := 38.0
+				var lump := 0.8 + 0.2 * sin(TAU * f0 * 0.5 * t)
+				for k in 6:
+					s += sin(TAU * f0 * (k + 1) * t + k * 0.9) * float(ENGINE_AMP[k])
+				lp += (_rng.randf_range(-1.0, 1.0) - lp) * 0.05
+				s = s * lump * 0.3 + lp * 0.5
+			"horn":
+				var env := minf(1.0, t / 0.02) * minf(1.0, (0.5 - t) / 0.06)
+				s = (tanh(2.5 * sin(TAU * 415.0 * t)) + tanh(2.5 * sin(TAU * 523.0 * t))) * 0.16 * env
 			"ambient":
 				lp += (_rng.randf_range(-1.0, 1.0) - lp) * 0.012
 				lp2 += (_rng.randf_range(-1.0, 1.0) - lp2) * 0.2
@@ -326,7 +397,7 @@ func _fill(sound: String, out: PackedFloat32Array) -> void:
 		out[i] = s
 		if i % 12000 == 11999:
 			await get_tree().process_frame
-	if sound in ["rumble", "ambient", "rain", "breath", "wave"]:
+	if sound in ["rumble", "engine", "ambient", "rain", "breath", "wave"]:
 		_crossfade_loop(out)
 
 
