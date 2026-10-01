@@ -269,7 +269,9 @@ func _draw_mini_overlay_inner(o: Control) -> void:
 	for id in client.remotes:
 		var rp: RemotePlayer = client.remotes[id]
 		var col := PERSON
-		if client.conversations.has(id):
+		if client.group_marks.has(id):
+			col = Protocol.GROUP_COLORS[int(client.group_marks[id])]
+		elif client.conversations.has(id):
 			col = FRIEND
 		elif client.muted.has(id):
 			col = Color(0.6, 0.6, 0.6)
@@ -451,7 +453,11 @@ func _draw_big(c: Control) -> void:
 	for id in client.remotes:
 		var rp: RemotePlayer = client.remotes[id]
 		var p := _to_screen(ZoneData.to_en(rp.global_position))
-		c.draw_circle(p, 6, FRIEND if client.conversations.has(id) else PERSON)
+		var dot := FRIEND if client.conversations.has(id) else PERSON
+		if client.group_marks.has(id):
+			dot = Protocol.GROUP_COLORS[int(client.group_marks[id])]
+		c.draw_circle(p, 6, dot)
+		c.draw_arc(p, 6, 0, TAU, 14, Color(0, 0, 0, 0.6), 1.0)
 		c.draw_string_outline(font, p + Vector2(8, -6), rp.display_name, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, 4, Color.BLACK)
 		c.draw_string(font, p + Vector2(8, -6), rp.display_name, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color.WHITE)
 	var me := _to_screen(ZoneData.to_en(client.body.global_position))

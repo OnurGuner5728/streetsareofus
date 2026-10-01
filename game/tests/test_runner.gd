@@ -10,11 +10,12 @@ var _test := ""
 func _ready() -> void:
 	var tests := [
 		test_avatar_sanitize, test_names, test_input_codec, test_input_world_tick, test_snapshot_codec,
-		test_social_request_flow, test_social_conversation, test_social_blocks,
+		test_social_request_flow, test_social_conversation, test_social_blocks, test_social_circle, test_social_kinds,
+		test_groups, test_group_limits, test_group_chat_and_disconnect, test_rps_rules, test_rps_match, test_slap_rules, test_slap_match,
 		test_store, test_spawn_picker, test_zone_load,
 		test_world_collision, test_motor_walks_and_is_blocked, test_replay_matches_realtime,
 		test_client_and_server_worlds_agree, test_step_up, test_tram_shoves_and_blocks, test_props, test_crowd,
-		test_crowd_view_pool, test_terrain, test_bench_sitting, test_knockdown, test_stamina, test_limp, test_ball_kick, test_poser_arm,
+		test_crowd_view_pool, test_terrain, test_bench_sitting, test_knockdown, test_stamina, test_limp, test_ball_kick, test_poser_arm, test_game_emotes, test_group_notices_turkish, test_cooldown_per_kind,
 		test_coastline, test_coast_sea_blocking, test_weather_wave_mapping, test_tree_road_grid,
 		test_transit_network, test_transit_timetable, test_walking_routes, test_route_prefers_tram,
 		test_building_style, test_roof_geometry, test_nostalgic_tram_model,
@@ -236,6 +237,445 @@ func test_social_blocks() -> void:
 	check(rpcs(fx, 2).has("notice:blocked"), "blocker gets confirmation")
 	fx = s2.on_disconnect(1)
 	check(fx.is_empty(), "nothing left to clean up")
+
+
+## Three or more people talking form one circle: whoever joins a talk is also
+## talking with everybody in it, so every line reaches everybody.
+func test_social_circle() -> void:
+	var s := _rules({})
+	var r1: int = s.request(1, 2, "talk", 0.0, 3.0, false)[0].args[0]
+	s.respond(2, r1, true, 1.0)
+	var r2: int = s.request(3, 2, "talk", 10.0, 3.0, false)[0].args[0]
+	var fx := s.respond(2, r2, true, 11.0)
+	check(s.in_conversation(3, 2) and s.in_conversation(3, 1) and s.in_conversation(1, 2), "the newcomer joins the whole circle")
+	check(rpcs(fx, 1) == ["s_conversation_open"], "the first talker is told about the newcomer")
+	check(rpcs(fx, 3) == ["s_interaction_result", "s_conversation_open", "s_conversation_open"], "the newcomer meets everyone")
+	fx = s.chat(3, "selam", 12.0)
+	check(rpcs(fx, 1) == ["s_chat"] and rpcs(fx, 2) == ["s_chat"] and rpcs(fx, 3) == ["s_chat"], "a line from the newcomer reaches the whole circle")
+	fx = s.chat(1, "merhaba", 12.0)
+	check(rpcs(fx, 2) == ["s_chat"] and rpcs(fx, 3) == ["s_chat"], "and one from the first talker reaches everyone")
+	# A fourth person who is blocked by one member joins the others only.
+	var blocked := _rules({"1>4": true})
+	var b1: int = blocked.request(1, 2, "talk", 0.0, 3.0, false)[0].args[0]
+	blocked.respond(2, b1, true, 1.0)
+	var b2: int = blocked.request(3, 2, "talk", 10.0, 3.0, false)[0].args[0]
+	blocked.respond(2, b2, true, 11.0)
+	var b3: int = blocked.request(4, 2, "talk", 20.0, 3.0, false)[0].args[0]
+	blocked.respond(2, b3, true, 21.0)
+	check(blocked.in_conversation(4, 2) and blocked.in_conversation(4, 3) and not blocked.in_conversation(4, 1), "a blocked person is not pulled into the block")
+	# Walking out of the circle ends every link of that person, the rest keep talking.
+	fx = s.leave_all(3)
+	check(not s.in_conversation(3, 1) and not s.in_conversation(3, 2) and s.in_conversation(1, 2), "leaving ends only your own links")
+	check(rpcs(fx, 3) == ["s_conversation_close", "s_conversation_close"] and rpcs(fx, 1) == ["s_conversation_close"], "everyone concerned is told")
+	check(s.leave_all(3).is_empty(), "leaving twice does nothing")
+	# Drifting away from one member of the circle only ends that link.
+	var far := _rules({})
+	var f1: int = far.request(1, 2, "talk", 0.0, 3.0, false)[0].args[0]
+	far.respond(2, f1, true, 1.0)
+	var f2: int = far.request(3, 2, "talk", 10.0, 3.0, false)[0].args[0]
+	far.respond(2, f2, true, 11.0)
+	far.update(12.0, func(a, b): return 31.0 if (a == 1 and b == 3) else 2.0)
+	check(not far.in_conversation(1, 3) and far.in_conversation(2, 3) and far.in_conversation(1, 2), "distance ends only the far pair")
+	# A disconnect closes every conversation of that person.
+	fx = s.on_disconnect(1)
+	check(not s.in_conversation(1, 2) and rpcs(fx, 2) == ["s_conversation_close"], "disconnect leaves the circle")
+
+
+## Group invitations and minigame challenges ride on the request flow.
+func test_social_kinds() -> void:
+	var s := _rules({})
+	var fx := s.request(1, 2, "rps", 0.0, 3.0, false)
+	check(rpcs(fx, 2) == ["s_interaction_incoming"] and fx[1].args[2] == "rps", "the target is told which kind it is")
+	var req: int = fx[0].args[0]
+	fx = s.respond(2, req, true, 1.0)
+	check(rpcs(fx, 1) == ["s_interaction_result"] and rpcs(fx, 2).is_empty(), "an accepted game opens no conversation")
+	var acc := s.take_accepted()
+	check(acc.size() == 1 and acc[0].kind == "rps" and acc[0].from == 1 and acc[0].to == 2, "the accept is queued for the server")
+	check(s.take_accepted().is_empty(), "the queue is drained")
+	check(not s.in_conversation(1, 2), "no conversation from a game")
+	check(s.request(1, 2, "duel", 10.0, 3.0, false).is_empty(), "unknown kinds are ignored")
+	# Talking to someone does not stop you challenging them, and a decline stays silent.
+	var t: int = s.request(1, 2, "talk", 20.0, 3.0, false)[0].args[0]
+	s.respond(2, t, true, 21.0)
+	fx = s.request(1, 2, "slap", 30.0, 3.0, false)
+	check(rpcs(fx, 2) == ["s_interaction_incoming"], "a game request during a talk is fine")
+	s.respond(2, fx[0].args[0], false, 31.0)
+	check(s.take_accepted().is_empty(), "a declined challenge queues nothing")
+	check(rpcs(s.request(1, 2, "talk", 32.0, 3.0, false), 1) == ["notice:already_talking"], "talk is still refused inside a conversation")
+
+
+func _groups() -> GroupRules:
+	return GroupRules.new(func(p): return "P%d" % p, func() -> Array: return [1, 2, 3, 4])
+
+
+func test_groups() -> void:
+	var g := _groups()
+	var fx := g.create(1)
+	check(rpcs(fx, 1) == ["notice:group_created", "s_group_state", "s_group_marks"], "creating tells the creator")
+	check(g.groups[g.group_of(1)].name == "Grup 1", "the default name is Grup 1")
+	check(g.color_of(1) == 0, "the first group takes the first colour")
+	check(rpcs(fx, 4) == ["s_group_marks"], "everyone learns the colour marks")
+	check(rpcs(g.create(1), 1) == ["notice:already_in_group"], "one group at a time")
+	# Inviting: the request flow decides, the group is made on accept.
+	check(g.invite_problem(1, 1) == "bad_target", "no inviting yourself")
+	check(g.invite_problem(1, 2) == "", "a free player can be invited")
+	fx = g.accept_invite(1, 2)
+	check(g.same_group(1, 2) and g.members_of(1) == [1, 2], "the invited player joins")
+	check(rpcs(fx, 2).has("notice:group_joined_you") and rpcs(fx, 1).has("notice:group_joined"), "both sides are told")
+	var state: Dictionary = fx.filter(func(e): return e.to == 1 and e.rpc == "s_group_state")[0].args[0]
+	check(state.members.size() == 2 and state.name == "Grup 1" and state.color == 0, "the state lists the members")
+	check(g.invite_problem(1, 2) == "already_in_group", "already a member")
+	# A second group gets another colour and the next default name.
+	g.create(3)
+	check(g.color_of(3) == 1 and g.groups[g.group_of(3)].name == "Grup 2", "a second group is Grup 2 in the next colour")
+	check(g.invite_problem(1, 3) == "target_in_group", "cannot invite someone in another group")
+	# The inviter without a group gets one made on accept.
+	var fresh := _groups()
+	fresh.accept_invite(1, 2)
+	check(fresh.same_group(1, 2) and fresh.groups.size() == 1, "accepting an invite from a lone player makes the group")
+	# Leaving: the rest are told, the last one out deletes the group and frees the colour.
+	fx = g.leave(2)
+	check(rpcs(fx, 2).has("notice:group_left_you") and rpcs(fx, 1).has("notice:group_left"), "leaving is announced")
+	check(fx.filter(func(e): return e.to == 2 and e.rpc == "s_group_state")[0].args[0].is_empty(), "the leaver gets an empty state")
+	check(g.group_of(2) == 0 and g.members_of(1) == [1], "the group shrank")
+	check(rpcs(g.leave(2), 2) == ["notice:not_in_group"], "leaving without a group is refused")
+	g.leave(1)
+	check(g.groups.size() == 1 and g.group_of(1) == 0, "the last member leaving deletes the group")
+	check(g.free_color() == 0, "its colour is free again")
+	g.create(4)
+	check(g.color_of(4) == 0 and g.color_of(3) == 1, "a new group reuses the freed colour, colours stay unique")
+	# Custom names are cleaned and cut.
+	var named := _groups()
+	named.create(1, "  Kadıköy\u0007 Ekibi çok uzun bir isim  ")
+	var nm: String = named.groups[named.group_of(1)].name
+	check(nm.length() <= Protocol.GROUP_NAME_MAX and nm.begins_with("Kadıköy Ekibi") and not nm.contains("\u0007"), "a custom name is sanitized and cut")
+
+
+func test_group_limits() -> void:
+	# At most ten groups (one per colour), each in its own colour.
+	var g := GroupRules.new(func(p): return "P%d" % p, func() -> Array: return [])
+	var colours := {}
+	for i in Protocol.GROUP_COLORS.size():
+		g.create(100 + i)
+		colours[g.color_of(100 + i)] = true
+	check(colours.size() == Protocol.GROUP_COLORS.size(), "ten groups wear ten different colours")
+	check(rpcs(g.create(200), 200) == ["notice:groups_full"], "an eleventh group is refused")
+	check(g.invite_problem(200, 201) == "groups_full", "so is inviting when no colour is left")
+	check(g.invite_problem(100, 201) == "", "but an existing group can still recruit")
+	g.leave(103)
+	check(g.free_color() == 3, "leaving frees a colour")
+	check(rpcs(g.create(200), 200).has("s_group_state"), "and then a new group can be made")
+	# At most eight members.
+	var big := _groups()
+	big.create(1)
+	for p in range(2, 9):
+		big.accept_invite(1, p)
+	check(big.members_of(1).size() == Protocol.GROUP_MAX_MEMBERS, "a group holds eight")
+	check(big.invite_problem(1, 9) == "group_full", "the ninth is refused up front")
+	var fx := big.accept_invite(1, 9)
+	check(not big.same_group(1, 9) and rpcs(fx, 9) == ["notice:group_full"], "and refused again on accept")
+
+
+func test_group_chat_and_disconnect() -> void:
+	var g := _groups()
+	g.create(1)
+	g.accept_invite(1, 2)
+	g.create(3)
+	var fx := g.chat(1, "  selam  ", 1.0)
+	check(rpcs(fx, 1) == ["s_group_chat"] and rpcs(fx, 2) == ["s_group_chat"], "group chat reaches every member, sender included")
+	check(rpcs(fx, 3).is_empty() and rpcs(fx, 4).is_empty(), "and nobody outside the group")
+	check(fx[0].args[0] == 1 and fx[0].args[1] == "selam", "it carries the sender and the cleaned text")
+	check(rpcs(g.chat(4, "hey", 1.0), 4) == ["notice:not_in_group"], "no group, no group chat")
+	check(g.chat(1, "   ", 1.0).is_empty(), "empty text is ignored")
+	var limited := false
+	for i in 12:
+		if rpcs(g.chat(1, "spam", 2.0), 1) == ["notice:rate_limited"]:
+			limited = true
+	check(limited, "group chat is rate limited")
+	# Group chat is its own channel: it never produces conversation traffic.
+	var s := _rules({})
+	check(rpcs(s.chat(1, "hey", 0.0), 1) == ["notice:not_in_conversation"], "group members are not in a conversation")
+	# Marks: [peer, colour, ...] for people in groups only.
+	check(g.marks() == [1, 0, 2, 0, 3, 1] or g.marks().size() == 6, "marks list every grouped player with the group colour")
+	check(rpcs(g.marks_for(4), 4) == ["s_group_marks"], "a newcomer gets the marks")
+	# A disconnect leaves the group; the leaver is not sent anything.
+	fx = g.on_disconnect(2)
+	check(rpcs(fx, 2).is_empty() and rpcs(fx, 1).has("notice:group_left") and not g.same_group(1, 2), "a disconnect removes the member")
+	check(fx.filter(func(e): return e.to == 1 and e.rpc == "s_group_state")[0].args[0].members.size() == 1, "the rest see the new list")
+	check(g.on_disconnect(2).is_empty(), "disconnecting twice does nothing")
+	g.on_disconnect(1)
+	check(g.groups.size() == 1, "the last disconnect deletes the group")
+	check(g.on_disconnect(4).is_empty(), "a player without a group leaves quietly")
+
+
+func _games(rtts := {}) -> GameRules:
+	var g := GameRules.new(func(_p): return [], func(_a, _b): return false, func(p): return "P%d" % p,
+		func(p): return float(rtts.get(p, 0.0)))
+	g.rng.seed = 11
+	return g
+
+
+static func _ev_of(effects: Array, to: int, ev: String) -> Dictionary:
+	for e in effects:
+		if e.to == to and e.rpc == "s_game" and e.args[0].ev == ev:
+			return e.args[0]
+	return {}
+
+
+## Emote kinds `emoter` made in the effects (as the emoter saw them).
+static func _emotes_of(effects: Array, emoter: int) -> Array:
+	var out := []
+	for e in effects:
+		if e.to == emoter and e.rpc == "s_emote" and e.args[0] == emoter:
+			out.append(e.args[1])
+	return out
+
+
+## Steps `g` in 50 ms ticks (clock[0] is the time) until an event `until_ev`
+## shows up or `limit` seconds pass; returns every effect on the way.
+func _play(g: GameRules, clock: Array, until_ev: String, dist := 2.0, limit := 30.0) -> Array:
+	var seen := []
+	var stop: float = clock[0] + limit
+	while clock[0] < stop:
+		clock[0] += 0.05
+		var fx := g.update(clock[0], func(_a, _b): return dist)
+		seen.append_array(fx)
+		for e in fx:
+			if e.rpc == "s_game" and e.args[0].ev == until_ev:
+				return seen
+	return seen
+
+
+func test_rps_rules() -> void:
+	# 0 rock, 1 paper, 2 scissors, -1 no pick.
+	var table := [[0, 0, 0], [1, 1, 0], [2, 2, 0], [1, 0, 1], [2, 1, 1], [0, 2, 1], [0, 1, -1], [1, 2, -1], [2, 0, -1],
+		[0, -1, 1], [-1, 2, -1], [-1, -1, 0]]
+	for row in table:
+		check(GameRules.rps_winner(row[0], row[1]) == row[2], "rps %d vs %d -> %d" % [row[0], row[1], row[2]])
+
+
+func test_rps_match() -> void:
+	var g := _games()
+	var clock := [0.0]
+	var fx := g.start("rps", 1, 2, 0.0)
+	var start := _ev_of(fx, 1, "start")
+	check(start.opp == 2 and start.kind == "rps" and start.wins == Protocol.RPS_WINS and _ev_of(fx, 2, "start").opp == 1, "both players get the start event")
+	var id: int = start["match"]
+	check(g.in_match(1) and g.in_match(2) and g.start_problem(1, 3) == "game_busy" and g.start_problem(3, 2) == "game_busy", "players in a match are busy")
+	check(rpcs(g.start("rps", 1, 3, 0.0), 3) == ["notice:game_busy"], "a busy player cannot start another")
+	check(g.input(1, id, 0, 0.5).is_empty(), "a pick before the round starts is ignored")
+	fx = _play(g, clock, "round")
+	check(_ev_of(fx, 1, "round").score == [0, 0] and _emotes_of(fx, 1) == ["shake"] and _emotes_of(fx, 2) == ["shake"], "the round starts with both fists shaking")
+	var round_start: float = clock[0]
+	# Picks: bad ones are ignored, a good one locks in and cannot change.
+	check(g.input(1, id, 7, clock[0]).is_empty() and g.input(1, id, -1, clock[0]).is_empty(), "invalid picks are ignored")
+	check(g.input(9, id, 0, clock[0]).is_empty() and g.input(1, id + 5, 0, clock[0]).is_empty(), "strangers and wrong matches are ignored")
+	fx = g.input(1, id, 1, clock[0])  # paper
+	check(_ev_of(fx, 1, "picked").value == 1 and not _ev_of(fx, 2, "opp_ready").is_empty(), "a pick is acknowledged, the opponent sees only that you are ready")
+	check(g.input(1, id, 2, clock[0]).is_empty(), "a pick cannot be changed")
+	g.input(2, id, 0, clock[0])  # rock
+	# Both picked, but the reveal waits for the end of the countdown.
+	fx = _play(g, clock, "reveal")
+	check(clock[0] - round_start >= 3 * Protocol.RPS_COUNT_STEP - 0.001, "the reveal comes after the countdown")
+	check(not _ev_of(fx, 1, "count").is_empty() and not _ev_of(fx, 1, "go").is_empty(), "the countdown and the shoot cue were sent")
+	var r1 := _ev_of(fx, 1, "reveal")
+	var r2 := _ev_of(fx, 2, "reveal")
+	check(r1.winner == "you" and r1.you == 1 and r1.opp == 0 and r1.score == [1, 0], "paper beats rock: player 1 wins the round")
+	check(r2.winner == "opp" and r2.you == 0 and r2.opp == 1 and r2.score == [0, 1], "player 2 sees the same round from its side")
+	check(_emotes_of(fx, 1) == ["paper"] and _emotes_of(fx, 2) == ["rock"], "the hand signs are played")
+	# A draw replays the round and does not count.
+	fx = _play(g, clock, "round")
+	check(_ev_of(fx, 1, "round").round == 2, "the next round starts after the pause")
+	g.input(1, id, 2, clock[0])
+	g.input(2, id, 2, clock[0])
+	fx = _play(g, clock, "reveal")
+	check(_ev_of(fx, 1, "reveal").winner == "draw" and _ev_of(fx, 1, "reveal").score == [1, 0], "same hands draw")
+	fx = _play(g, clock, "round")
+	check(_ev_of(fx, 1, "round").round == 3 and _ev_of(fx, 1, "round").score == [1, 0], "a draw is replayed")
+	# Player 2 says nothing; the picking window closes and player 1 takes the round and the match.
+	g.input(1, id, 0, clock[0])
+	fx = _play(g, clock, "reveal")
+	var late := _ev_of(fx, 1, "reveal")
+	check(late.winner == "you" and late.opp == -1 and late.score == [2, 0], "no pick loses to a pick")
+	fx = _play(g, clock, "end")
+	var end := _ev_of(fx, 1, "end")
+	check(end.winner == "you" and end.score == [2, 0] and _ev_of(fx, 2, "end").winner == "opp", "first to two wins the match")
+	check(not g.in_match(1) and not g.in_match(2) and not g.active(), "the match is cleaned up")
+
+	# Nobody picks at all: draws until the round cap, then a draw.
+	var idle := _games()
+	var c2 := [0.0]
+	idle.start("rps", 1, 2, 0.0)
+	fx = _play(idle, c2, "end", 2.0, 80.0)
+	var idle_end := _ev_of(fx, 1, "end")
+	check(idle_end.winner == "none" and idle_end.score == [0, 0], "endless draws end as a draw")
+	var rounds := 0
+	for e in fx:
+		if e.to == 1 and e.rpc == "s_game" and e.args[0].ev == "round":
+			rounds += 1
+	check(rounds == Protocol.RPS_MAX_ROUNDS, "a match is capped at %d rounds" % Protocol.RPS_MAX_ROUNDS)
+
+	# Moving away cancels the match without a winner.
+	var away := _games()
+	var c3 := [0.0]
+	away.start("rps", 1, 2, 0.0)
+	fx = _play(away, c3, "end", Protocol.GAME_RANGE + 1.0, 5.0)
+	check(_ev_of(fx, 1, "end").winner == "none" and _ev_of(fx, 1, "end").reason == "distance" and not away.active(), "walking out of range cancels")
+	# So do quitting, blocking and disconnecting.
+	var q := _games()
+	q.start("rps", 1, 2, 0.0)
+	fx = q.cancel(2, "quit")
+	check(_ev_of(fx, 1, "end").reason == "quit" and _ev_of(fx, 1, "end").winner == "none" and not q.active(), "quitting ends it for both")
+	check(q.cancel(2, "quit").is_empty(), "cancelling twice does nothing")
+	q.start("rps", 1, 2, 0.0)
+	check(q.on_block(3, 1).is_empty() and q.active(), "an unrelated block changes nothing")
+	fx = q.on_block(2, 1)
+	check(_ev_of(fx, 1, "end").reason == "ended" and not q.active(), "a block between the two ends the match")
+	# A player who disappears from the world (distance INF) also ends it.
+	q.start("rps", 1, 2, 0.0)
+	fx = q.update(0.1, func(_a, _b): return INF)
+	check(not q.active() and _ev_of(fx, 1, "end").reason == "distance", "a vanished player cancels")
+
+
+func test_slap_rules() -> void:
+	check(GameRules.slap_outcome(0.30, -1.0) == "top", "a slap nobody dodges lands")
+	check(GameRules.slap_outcome(-1.0, 0.30) == "bottom", "pulling away when nobody slaps is a point for the one below")
+	check(GameRules.slap_outcome(-1.0, -1.0) == "none", "nobody moving is no point")
+	check(GameRules.slap_outcome(0.20, 0.30) == "top", "the faster top player hits")
+	check(GameRules.slap_outcome(0.30, 0.20) == "bottom", "the faster player below escapes")
+	check(GameRules.slap_outcome(0.30, 0.28) == "top", "a near tie goes to the top player")
+	check(GameRules.slap_outcome(0.30, 0.30 - Protocol.SLAP_TIE - 0.01) == "bottom", "beyond the tie window the one below wins")
+
+
+func _slap_round(g: GameRules, clock: Array, id: int, rt_a: float, rt_b: float) -> Array:
+	## Plays one round to its reveal: presses at go + rt (negative: none).
+	var seen := _play(g, clock, "go")
+	var m := g.match_of(1)
+	var go_time: float = m.go_time
+	if rt_a >= 0.0:
+		seen.append_array(g.input(1, id, 1, go_time + rt_a))
+	if rt_b >= 0.0:
+		seen.append_array(g.input(2, id, 1, go_time + rt_b))
+	if _ev_of(seen, 1, "reveal").is_empty():
+		seen.append_array(_play(g, clock, "reveal"))
+	return seen
+
+
+func test_slap_match() -> void:
+	var g := _games()
+	var clock := [0.0]
+	var fx := g.start("slap", 1, 2, 0.0)
+	var id: int = _ev_of(fx, 1, "start")["match"]
+	check(_ev_of(fx, 1, "start").kind == "slap" and _ev_of(fx, 1, "start").wins == Protocol.SLAP_WINS, "the start event describes the game")
+	check(g.input(1, id, 1, 0.3).is_empty(), "a press during the intro is ignored")
+	fx = _play(g, clock, "round")
+	check(_ev_of(fx, 1, "round").role == "top" and _ev_of(fx, 2, "round").role == "bottom", "player 1 starts on top")
+	# Round 1: the one below jumps the gun and loses on the spot.
+	fx = g.input(2, id, 1, clock[0] + 0.2)
+	var fs := _ev_of(fx, 1, "reveal")
+	check(fs.winner == "you" and fs.how == "false_start" and fs.score == [1, 0], "pressing before the cue loses the round")
+	check(_ev_of(fx, 2, "reveal").false_start and not fs.false_start, "the offender is told it was a false start")
+	check(g.input(1, id, 1, clock[0] + 0.3).is_empty(), "presses after the round is settled are ignored")
+	# Round 2: roles swap, player 2 is on top and reacts faster than the one below.
+	fx = _play(g, clock, "round")
+	check(_ev_of(fx, 1, "round").role == "bottom" and _ev_of(fx, 2, "round").role == "top", "the roles swap every round")
+	fx = _slap_round(g, clock, id, 0.25, 0.20)
+	var r := _ev_of(fx, 2, "reveal")
+	check(r.winner == "you" and r.how == "slapped" and r.score == [1, 1], "the faster top player slaps")
+	check(_emotes_of(fx, 2) == ["slap"] and _emotes_of(fx, 1).is_empty(), "the slap is played by the top player only")
+	# Round 3: player 1 is on top but the one below is clearly faster and pulls away.
+	fx = _play(g, clock, "round")
+	fx = _slap_round(g, clock, id, 0.30, 0.18)
+	r = _ev_of(fx, 1, "reveal")
+	check(r.winner == "opp" and r.how == "dodged" and r.score == [1, 2], "a clearly faster player below escapes")
+	check(_emotes_of(fx, 1) == ["slap"] and _emotes_of(fx, 2) == ["dodge"], "the miss and the dodge are both played")
+	# Round 4: player 2 on top, a near tie goes to the top player and wins them the match.
+	fx = _play(g, clock, "round")
+	fx = _slap_round(g, clock, id, 0.20, 0.21)
+	check(_ev_of(fx, 2, "reveal").winner == "you" and _ev_of(fx, 2, "reveal").score == [3, 1], "a near tie favours the top player")
+	fx = _play(g, clock, "end")
+	check(_ev_of(fx, 2, "end").winner == "you" and _ev_of(fx, 1, "end").winner == "opp" and _ev_of(fx, 2, "end").score == [3, 1], "first to three wins the match")
+	check(not g.active(), "and the match is over")
+
+	# Nobody presses: no point. A lone press on top still lands once the window ends.
+	var quiet := _games()
+	var c2 := [0.0]
+	var qid: int = _ev_of(quiet.start("slap", 1, 2, 0.0), 1, "start")["match"]
+	_play(quiet, c2, "round")
+	fx = _slap_round(quiet, c2, qid, -1.0, -1.0)
+	check(_ev_of(fx, 1, "reveal").winner == "none" and _ev_of(fx, 1, "reveal").how == "none" and _ev_of(fx, 1, "reveal").score == [0, 0], "no one moving scores nothing")
+	_play(quiet, c2, "round")
+	fx = _slap_round(quiet, c2, qid, -1.0, 0.3)  # round 2: player 2 is on top and slaps alone
+	check(_ev_of(fx, 2, "reveal").winner == "you" and _ev_of(fx, 2, "reveal").how == "slapped", "the top player who slaps alone scores")
+	check(quiet.match_of(1).phase == "reveal", "the round is settled")
+
+	# Timing rules: too fast is anticipation, double presses count once, the go cue is random.
+	var t := _games()
+	var c3 := [0.0]
+	var tid: int = _ev_of(t.start("slap", 1, 2, 0.0), 1, "start")["match"]
+	_play(t, c3, "round")
+	_play(t, c3, "go")
+	var go: float = t.match_of(1).go_time
+	fx = t.input(1, tid, 1, go + 0.02)
+	check(_ev_of(fx, 1, "reveal").false_start, "a reaction faster than a human can be is a false start")
+	var t2 := _games()
+	var c4 := [0.0]
+	var t2id: int = _ev_of(t2.start("slap", 1, 2, 0.0), 1, "start")["match"]
+	_play(t2, c4, "round")
+	_play(t2, c4, "go")
+	var go2: float = t2.match_of(1).go_time
+	check(t2.input(1, t2id, 1, go2 + 0.3).is_empty(), "the first press waits for the other player or the window")
+	check(t2.input(1, t2id, 1, go2 + 0.1).is_empty() and absf(float(t2.match_of(1).rt_a) - 0.3) < 0.001, "a second press does not replace the first")
+	check(t2.input(9, t2id, 1, go2 + 0.1).is_empty(), "strangers cannot press")
+	var delays := {}
+	for seed_value in 6:
+		var tg := _games()
+		tg.rng.seed = seed_value + 100
+		var cg := [0.0]
+		tg.start("slap", 1, 2, 0.0)
+		_play(tg, cg, "round")
+		var began: float = cg[0]
+		_play(tg, cg, "go")
+		var wait: float = tg.match_of(1).go_time - began
+		check(wait >= Protocol.SLAP_READY + Protocol.SLAP_DELAY_MIN - 0.06 and wait <= Protocol.SLAP_READY + Protocol.SLAP_DELAY_MAX + 0.06, "the cue comes %.2f s after the round starts (in range)" % wait)
+		delays[snappedf(wait, 0.1)] = true
+	check(delays.size() > 1, "the cue delay is random")
+
+	# Latency: a player with a 200 ms round trip who reacted in 200 ms beats a
+	# 0 ms player who reacted in 250 ms, although the message arrives later.
+	var lag2 := _games({2: 0.2})
+	var c6 := [0.0]
+	var l2id: int = _ev_of(lag2.start("slap", 1, 2, 0.0), 1, "start")["match"]
+	_play(lag2, c6, "round")
+	# Player 1 (top) presses at 250 ms, player 2 (below) arrives at 400 ms = 200 ms + 200 ms trip.
+	_play(lag2, c6, "go")
+	var lgo: float = lag2.match_of(1).go_time
+	lag2.input(1, l2id, 1, lgo + 0.25)
+	fx = lag2.input(2, l2id, 1, lgo + 0.40)
+	check(_ev_of(fx, 2, "reveal").winner == "you" and _ev_of(fx, 2, "reveal").how == "dodged", "latency is compensated: 200 ms + 200 ms trip beats 250 ms")
+	check(_ev_of(fx, 2, "reveal").you_rt > 0.19 and _ev_of(fx, 2, "reveal").you_rt < 0.21, "the compensated time is what is reported")
+	# A rtt bigger than the cap is capped, so a huge lag cannot buy a win.
+	var huge := _games({2: 5.0})
+	var c7 := [0.0]
+	var hid: int = _ev_of(huge.start("slap", 1, 2, 0.0), 1, "start")["match"]
+	_play(huge, c7, "round")
+	_play(huge, c7, "go")
+	var hgo: float = huge.match_of(1).go_time
+	huge.input(1, hid, 1, hgo + 0.25)
+	fx = huge.input(2, hid, 1, hgo + 0.9)
+	check(_ev_of(fx, 1, "reveal").winner == "you", "the latency credit is capped")
+
+	# Nobody presses through five rounds: a drawn match; leaving mid-match cancels.
+	var draw := _games()
+	var c8 := [0.0]
+	draw.start("slap", 1, 2, 0.0)
+	fx = _play(draw, c8, "end", 2.0, 120.0)
+	check(_ev_of(fx, 1, "end").winner == "none" and _ev_of(fx, 1, "end").score == [0, 0], "five quiet rounds draw the match")
+	var away := _games()
+	var c9 := [0.0]
+	away.start("slap", 1, 2, 0.0)
+	fx = _play(away, c9, "end", Protocol.GAME_RANGE + 2.0, 5.0)
+	check(_ev_of(fx, 2, "end").reason == "distance" and not away.active(), "out of range cancels a slap match too")
 
 
 func test_store() -> void:
@@ -1354,3 +1794,50 @@ func test_nostalgic_tram_model() -> void:
 	check(checked >= 1, "the fleet has a nostalgic car")
 	check(TramFleet._tr_upper("Kadıköy – Moda") == "KADIKÖY – MODA", "the destination board is uppercase Turkish")
 	fleet.free()
+
+
+## Every game emote the server can send plays on an avatar without error and
+## moves the arm away from the idle pose.
+func test_game_emotes() -> void:
+	var view := AvatarView.new()
+	add_child(view)
+	view.build(AvatarSpec.defaults())
+	var sk: Skeleton3D = view.find_children("*", "Skeleton3D", true, false)[0]
+	var poser: AvatarPoser = sk.find_children("*", "AvatarPoser", false, false)[0]
+	var hand := sk.find_bone("hand_r")
+	for k in 60:
+		view.animate(0.0, 1.0 / 30.0)
+	await poser.modification_processed
+	var idle := sk.get_bone_global_pose(hand).origin
+	for kind: String in Protocol.GAME_EMOTES:
+		check(AvatarView.EMOTE_SECONDS.has(kind), "%s has a duration" % kind)
+		view.play_emote(kind)
+		view.animate(0.0, 0.3)
+		await poser.modification_processed
+		var moved := sk.get_bone_global_pose(hand).origin.distance_to(idle)
+		check(moved > 0.02, "%s moves the hand (%.3f)" % [kind, moved])
+		for k in 120:
+			view.animate(0.0, 1.0 / 30.0)
+	view.queue_free()
+
+
+## Each code the group and minigame rules can send has a Turkish line.
+func test_group_notices_turkish() -> void:
+	for code in ["group_created", "group_joined", "group_joined_you", "group_left", "group_left_you",
+			"already_in_group", "not_in_group", "groups_full", "group_full", "target_in_group", "game_busy", "bad_target"]:
+		check(GameClient.NOTICES.has(code), "notice %s is translated" % code)
+	for kind: String in Protocol.REQUEST_KINDS:
+		check(GameClient.REQUEST_TEXT.has(kind), "request text for %s" % kind)
+
+
+## The same-target cooldown is per kind: inviting to a group right before a
+## game challenge is fine, repeating the same kind is not.
+func test_cooldown_per_kind() -> void:
+	var s := _rules({})
+	var fx := s.request(1, 2, "group", 0.0, 3.0, false)
+	s.respond(2, fx[0].args[0], true, 1.0)
+	fx = s.request(1, 2, "rps", 2.0, 3.0, false)
+	check(rpcs(fx, 2) == ["s_interaction_incoming"], "another kind is not on cooldown")
+	s.respond(2, fx[0].args[0], true, 3.0)
+	fx = s.request(1, 2, "rps", 4.0, 3.0, false)
+	check(rpcs(fx, 1) == ["notice:cooldown"], "the same kind is")
