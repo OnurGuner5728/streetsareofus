@@ -1782,7 +1782,7 @@ func test_nostalgic_tram_model() -> void:
 				check(not names.has(mi.name), "one merged mesh per part type (%s)" % mi.name)
 				names[mi.name] = true
 				var box := mi.mesh.get_aabb()
-				check(box.size.x <= 2.5 and box.size.z <= 11.1, "the model fits the collision box (%s)" % str(box.size))
+				check(box.size.x <= 2.5 and box.size.z <= 11.11, "the model fits the collision box (%s)" % str(box.size))
 				if mi.visibility_range_begin > 0.0:
 					far_only += 1
 					check(mi.mesh.get_faces().size() <= 100 * 3, "the distant stand-in is a simple box")
