@@ -15,7 +15,7 @@ func _ready() -> void:
 		test_store, test_spawn_picker, test_zone_load,
 		test_world_collision, test_motor_walks_and_is_blocked, test_replay_matches_realtime,
 		test_client_and_server_worlds_agree, test_step_up, test_tram_shoves_and_blocks, test_props, test_crowd,
-		test_crowd_view_pool, test_terrain, test_bench_sitting, test_knockdown, test_stamina, test_limp, test_ball_kick, test_poser_arm, test_game_emotes, test_group_notices_turkish, test_cooldown_per_kind,
+		test_crowd_view_pool, test_terrain, test_bench_sitting, test_knockdown, test_stamina, test_limp, test_hop_walk, test_ball_kick, test_poser_arm, test_game_emotes, test_group_notices_turkish, test_cooldown_per_kind,
 		test_coastline, test_coast_sea_blocking, test_weather_wave_mapping, test_tree_road_grid,
 		test_transit_network, test_transit_timetable, test_walking_routes, test_route_prefers_tram,
 		test_building_style, test_roof_geometry, test_nostalgic_tram_model,
@@ -1618,6 +1618,53 @@ func test_limp() -> void:
 	check(top <= 0.0, "no jumping on a broken leg")
 	check(int(body.get_meta("stamina")) == PlayerMotor.STAMINA_MAX, "and no sprinting")
 	holder.queue_free()
+
+
+## Hop-walk: slower than walking, no sprint, jumping still works, and the
+## mode travels in the input buttons and the snapshot flags.
+func test_hop_walk() -> void:
+	var made: Array = await _grid_world()
+	var zone: ZoneData = made[0]
+	var holder: Node3D = made[1]
+	var body := PlayerMotor.make_body(AvatarSpec.defaults())
+	holder.add_child(body)
+	body.global_position = ZoneData.to_godot(float(zone.roads[0].points[0][0]), -60.0, 0.05)
+	await get_tree().physics_frame
+	for i in 40:
+		PlayerMotor.step(body, SnapshotCodec.quantize_input(i + 1, 0, 1, 0.0, 0, PlayerMotor.BUTTON_HOP | PlayerMotor.BUTTON_SPRINT))
+	near(_flat_speed(body), Protocol.HOP_SPEED, 0.01, "hopping caps the speed")
+	check(int(body.get_meta("stamina")) == PlayerMotor.STAMINA_MAX, "and takes no sprint stamina")
+	check(Protocol.HOP_SPEED < Protocol.WALK_SPEED, "hop-walk is slower than walking")
+	var top := 0.0
+	for i in 20:
+		PlayerMotor.step(body, SnapshotCodec.quantize_input(100 + i, 0, 0, 0.0, 0, PlayerMotor.BUTTON_HOP | PlayerMotor.BUTTON_JUMP))
+		top = maxf(top, body.velocity.y)
+	check(top > 3.0, "a hop-walker can still jump (%.2f)" % top)
+	var back := SnapshotCodec.decode_inputs(SnapshotCodec.encode_inputs([SnapshotCodec.quantize_input(1, 0, 1, 0.0, 0, PlayerMotor.BUTTON_HOP)]))
+	check(back.size() == 1 and int(back[0].buttons) & PlayerMotor.BUTTON_HOP != 0, "the hop bit survives the input codec")
+	var snap := SnapshotCodec.decode_snapshot(SnapshotCodec.encode_snapshot(1, 0, Vector3.ZERO, Vector3.ZERO, {},
+		[{"id": 3, "pos": Vector3.ZERO, "yaw": 0.0, "pitch": 0.0, "speed": 1.0, "flags": SnapshotCodec.FLAG_HOP | SnapshotCodec.FLAG_GROUNDED}]))
+	check(snap.entities.size() == 1 and int(snap.entities[0].flags) & SnapshotCodec.FLAG_HOP != 0, "the hop flag survives the snapshot codec")
+	holder.queue_free()
+	# The pose: the right foot comes up off the ground line of the left one.
+	var view := AvatarView.new()
+	add_child(view)
+	view.build(AvatarSpec.defaults())
+	var sk: Skeleton3D = view.find_children("*", "Skeleton3D", true, false)[0]
+	var poser: AvatarPoser = sk.find_children("*", "AvatarPoser", false, false)[0]
+	var foot_r := sk.find_bone("foot_r")
+	var foot_l := sk.find_bone("foot_l")
+	for k in 30:
+		view.animate(0.0, 1.0 / 30.0)
+	await poser.modification_processed
+	var gap := sk.get_bone_global_pose(foot_l).origin.y - sk.get_bone_global_pose(foot_r).origin.y
+	view.hop = true
+	for k in 30:
+		view.animate(0.0, 1.0 / 30.0)
+	await poser.modification_processed
+	var lifted := sk.get_bone_global_pose(foot_l).origin.y - sk.get_bone_global_pose(foot_r).origin.y
+	check(lifted < gap - 0.08, "hopping lifts the right foot (%.3f -> %.3f)" % [gap, lifted])
+	view.queue_free()
 
 
 ## The shared kick: a shot when running, a dribble when walking, a nudge

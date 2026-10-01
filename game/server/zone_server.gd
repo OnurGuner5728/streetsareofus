@@ -575,6 +575,8 @@ func _send_snapshots() -> void:
 					flags |= SnapshotCodec.FLAG_WINDED
 				if other.body.get_meta("limp", false):
 					flags |= SnapshotCodec.FLAG_LIMP
+				if other.buttons & PlayerMotor.BUTTON_HOP and other.riding.is_empty() and other.seat < 0:
+					flags |= SnapshotCodec.FLAG_HOP
 				entities.append({"id": other_id, "pos": other_pos, "yaw": other.seat_yaw if other.seat >= 0 else other.yaw, "pitch": other.pitch,
 					"speed": Vector2(other.body.velocity.x, other.body.velocity.z).length(), "flags": flags})
 		for known_id in pl.known.keys():

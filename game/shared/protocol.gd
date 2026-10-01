@@ -3,7 +3,7 @@ extends RefCounted
 ## Constants shared by client and server. Bump PROTOCOL_VERSION on any
 ## change to RPC signatures or the binary snapshot/input layout.
 
-const PROTOCOL_VERSION := 6
+const PROTOCOL_VERSION := 7
 const CLIENT_BUILD := "0.3.0-alpha"
 const DEFAULT_PORT := 7000
 const DEFAULT_ZONE := "tr_istanbul_kadikoy_001"
@@ -90,6 +90,9 @@ const REPORT_REASONS := ["harassment", "hate", "spam", "impersonation", "other"]
 const WALK_SPEED := 2.4
 const SPRINT_SPEED := 5.2
 const JUMP_VELOCITY := 4.6
+## Hop-walk ("sekerek yürüme"): one-legged hopping, slow and no sprint. Part
+## of the shared motor so prediction matches the server.
+const HOP_SPEED := 1.5
 const GRAVITY := 15.0
 const GROUND_ACCEL := 40.0
 const AIR_ACCEL := 8.0

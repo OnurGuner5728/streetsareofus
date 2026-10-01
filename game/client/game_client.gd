@@ -124,6 +124,9 @@ var group_marks := {}  # peer id -> palette index, everyone in a group
 ## rounds, round, score, phase, role, pick, opp_ready, face_until, ...}.
 var game := {}
 
+## Hop-walk mode (key C, the "Sek" touch button): slow one-legged hopping.
+var hop_on := false
+
 var _eye_height := 1.6
 var _input_seq := 0
 var _pending_inputs: Array = []
@@ -1310,6 +1313,8 @@ func _physics_process(_delta: float) -> void:
 			buttons |= PlayerMotor.BUTTON_JUMP
 		if touch.sprint:
 			buttons |= PlayerMotor.BUTTON_SPRINT
+		if touch.hop:
+			buttons |= PlayerMotor.BUTTON_HOP
 	elif _can_move():
 		mx = float(Input.is_physical_key_pressed(KEY_D)) - float(Input.is_physical_key_pressed(KEY_A))
 		my = float(Input.is_physical_key_pressed(KEY_W)) - float(Input.is_physical_key_pressed(KEY_S))
@@ -1317,6 +1322,8 @@ func _physics_process(_delta: float) -> void:
 			buttons |= PlayerMotor.BUTTON_JUMP
 		if Input.is_physical_key_pressed(KEY_SHIFT):
 			buttons |= PlayerMotor.BUTTON_SPRINT
+		if hop_on:
+			buttons |= PlayerMotor.BUTTON_HOP
 
 	_input_seq += 1
 	# Stamped with the server tick we are looking at, so trams stand in the
@@ -1548,6 +1555,7 @@ func _update_camera(render_pos: Vector3, eye: Vector3, delta: float) -> void:
 			_self_view.knocked = PlayerMotor.is_down(body)
 			_self_view.winded = bool(body.get_meta("winded", false))
 			_self_view.limp = bool(body.get_meta("limp", false))
+			_self_view.hop = _hop_active()
 			_self_view.animate(speed, delta, pitch, riding.is_empty() and absf(body.velocity.y) > 1.2 and not knocked)
 	if not third:
 		_bob_phase = fmod(_bob_phase + delta * (1.5 + speed * 2.2), TAU)
@@ -1731,6 +1739,18 @@ func _refresh_boards() -> void:
 		label.text = "\n".join(rows)
 
 
+## Whether our own inputs carry the hop-walk bit (key toggle or touch button).
+func _hop_active() -> bool:
+	return hop_on or (touch != null and touch.hop)
+
+
+func toggle_hop() -> void:
+	hop_on = not hop_on
+	if touch:
+		touch.hop = hop_on
+	_notice("Sekerek yürüme açık (kapatmak için C)." if hop_on else "Sekerek yürüme kapalı.")
+
+
 func _can_move() -> bool:
 	if hud == null or hud.is_chat_open() or hud.is_modal_open() or _map_open():
 		return false
@@ -1910,6 +1930,8 @@ func _on_key(key: Key) -> void:
 			tram_action()
 		KEY_V:
 			cycle_camera()
+		KEY_C:
+			toggle_hop()
 		KEY_F1:
 			hud.toggle_help()
 		KEY_F3:

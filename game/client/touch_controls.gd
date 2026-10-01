@@ -15,6 +15,7 @@ const FONT_SIZE := 13
 var move := Vector2.ZERO  ## x = right, y = forward, length <= 1
 var jump_held := false
 var sprint := false
+var hop := false  ## hop-walk mode (toggle)
 var enabled := true:
 	set(value):
 		if enabled and not value:
@@ -67,6 +68,7 @@ func _buttons() -> Array:
 	var list := [
 		{"id": "jump", "label": "Zıpla", "pos": Vector2(w - 62, h - 70), "r": 40.0},
 		{"id": "sprint", "label": "Koş", "pos": Vector2(w - 150, h - 44), "r": 30.0, "on": sprint},
+		{"id": "hop", "label": "Sek", "pos": Vector2(w - 300, h - 110), "r": 26.0, "on": hop},
 		{"id": "wave", "label": "El salla", "pos": Vector2(w - 150, h - 120), "r": 30.0},
 		{"id": "nod", "label": "Selam", "pos": Vector2(w - 228, h - 50), "r": 28.0},
 		{"id": "menu", "label": "Menü", "pos": Vector2(w - 40, 40), "r": 26.0},

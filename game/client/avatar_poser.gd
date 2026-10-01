@@ -58,6 +58,8 @@ var hold_arm := 0.0     # 0..1: left arm in a sling
 var bend := 0.0         # 0..1: bent forward, out of breath
 var limp := 0.0         # 0..1: favouring the left leg
 var limp_phase := 0.0   # 0..1 through the walk cycle
+var hop := 0.0          # 0..1: hopping on the left leg, the right one tucked up behind
+var hop_phase := 0.0    # 0..1 through one hop (0 = push off, 0.5 = highest point)
 
 var _neck := -1
 var _head := -1
@@ -65,6 +67,9 @@ var _chest := -1
 var _spine1 := -1
 var _spine2 := -1
 var _calf_l := -1
+var _thigh_l := -1
+var _thigh_r := -1
+var _calf_r := -1
 var _arms := {}  # "r"/"l" -> [upper, fore, hand]
 var _fingers := {}  # "r"/"l" -> [[01, 02, 03] of the index, middle, ring and pinky]
 
@@ -84,6 +89,9 @@ func _ready() -> void:
 		_spine1 = sk.find_bone("spine_01")
 		_spine2 = sk.find_bone("spine_02")
 		_calf_l = sk.find_bone("calf_l")
+		_calf_r = sk.find_bone("calf_r")
+		_thigh_l = sk.find_bone("thigh_l")
+		_thigh_r = sk.find_bone("thigh_r")
 		for side in ["r", "l"]:
 			_arms[side] = [sk.find_bone("upperarm_" + side), sk.find_bone("lowerarm_" + side), sk.find_bone("hand_" + side)]
 
@@ -100,6 +108,8 @@ func _process_modification() -> void:
 		var rest := sk.get_bone_rest(_calf_l).basis.get_rotation_quaternion()
 		sk.set_bone_pose_rotation(_calf_l, sk.get_bone_pose_rotation(_calf_l).slerp(rest, limp * 0.55))
 		_rotate_global(sk, _spine1, Basis(Vector3.BACK, sin(limp_phase * TAU) * 0.08 * limp))
+	if hop > 0.001:
+		_pose_hop(sk)
 	var pitch := -look_pitch - nod * absf(sin(nod_time * 9.0)) * 0.45 - bend * 0.3
 	if absf(pitch) > 0.001 or absf(look_yaw) > 0.001:
 		for b in [_neck, _head]:
@@ -110,6 +120,23 @@ func _process_modification() -> void:
 		_pose_arm(sk, "r", WAVE_UPPER, WAVE_FORE, sin(wave_time * 11.0) * WAVE_SWING, wave)
 	if game_blend > 0.001 and game != "":
 		_pose_game(sk)
+
+
+## Hop-walk: the left leg stays straight and carries the body, the right
+## thigh comes up a little and the shin folds back (+X about the skeleton's
+## left-right axis turns a leg that hangs along -Y towards the back); the
+## body dips on landing and lifts at the top of the hop.
+func _pose_hop(sk: Skeleton3D) -> void:
+	for b in [_thigh_l, _calf_l]:
+		if b >= 0:
+			sk.set_bone_pose_rotation(b, sk.get_bone_pose_rotation(b).slerp(sk.get_bone_rest(b).basis.get_rotation_quaternion(), hop))
+	var lift := 0.5 + 0.5 * sin(hop_phase * TAU - PI / 2.0)  # 0 at the push-off, 1 at the top
+	if _thigh_r >= 0:
+		_rotate_global(sk, _thigh_r, Basis(Vector3.RIGHT, -(0.35 + 0.2 * lift) * hop))
+	if _calf_r >= 0:
+		_rotate_global(sk, _calf_r, Basis(Vector3.RIGHT, (1.5 + 0.2 * lift) * hop))
+	if _spine1 >= 0:
+		_rotate_global(sk, _spine1, Basis(Vector3.RIGHT, 0.05 * hop))
 
 
 ## The minigame poses (see the constants): arms and fingers, blended by
