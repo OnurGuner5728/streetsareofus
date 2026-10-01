@@ -68,11 +68,13 @@ kıyısına, 1800×1800 m, 3778 bina, 886 yol, OpenStreetMap'ten; gerçek kıyı
 | **Yayalar [NPC]** | Kaldırımlarda yürüyen, ara sıra vitrin önünde duran, oyunculara yol veren yayalar. Plandaki kurala uygun olarak açıkça **NPC** olarak etiketlenir ("yapay bir figür; sohbet edilemez"), gerçek kişi sanılmaz. Hareketleri sunucu saatinin deterministik fonksiyonu: herkes aynı yayayı aynı yerde görür, ağ trafiği yok. Saate göre yoğunluk (gece seyrek) |
 | **Gerçek trafik** | Yollarda otomobil, sarı taksi, dolmuş ve kırmızı-beyaz İETT otobüsü akar. Rotalar OSM yol ağından (`primary`'den `residential`'a) şerit kenarından türetilen kapalı döngülerdir (`game/shared/traffic.gd`, `traffic_route.gd`); duvara, raya ve park etmiş arabaya yakın şeritler sürülmez, dar tek şeritli sokaklar park etmiş arabalara bırakılır. Araçlar **dizi (platoon)** halinde, yol sınıfına göre 7–12,5 m/s ile gider, kavşakta kırmızıya durur. Her aracın yeri sunucu saatinin **saf fonksiyonu**: ağ trafiği ve anlık görüntü (snapshot) alanı yok, herkes aynı arabayı aynı yerde görür. Yoğunluk İstanbul'un **gerçek yerel saatine** bağlı (gece seyrek, akşam yoğun); sunucu saat bilgisini welcome mesajıyla gönderir (`--traffic-hour=H` ile sabitlenir) |
 | **Trafik görüntüsü** | Prosedürel gövdeler (hatchback, sedan, taksi + tepe lambası, dolmuş, otobüs), cam, jant, tekerlekler dönüşü yolla orantılı. Her tür için tek MultiMesh (+ tek tekerlek MultiMesh), `--quality`'ye göre 130/180/250 m çizim mesafesi ve 65/85/100 m'den sonra kutuya LOD (nüfus sunucuyla aynı kalır, yalnızca çizilen azalır). Gece `night` global parametresiyle farlar, stop lambaları ve yola düşen ışık havuzu yanar; frende stop parlar ve kaput hafifçe eğilir. Ses: mesafe ve hıza göre sentezlenen motor uğultusu; yolda duran oyuncuya yakından, **saat tabanlı (ağsız)** kornalar |
+| **Vapurlar** | Kıyıdaki vapur iskelelerinden **Kadıköy–Eminönü**, **Kadıköy–Beşiktaş** (2 + 1 gemi, boğazın karşı yakası bölge dışında olduğu için ufka kadar gider, orada bekler, döner) ve **Kadıköy–Moda** hattı (2 gemi, kıyıyı izleyerek) işler (`game/shared/ferries.gd`). Deniz rotası kara maskesi üzerinde A* + kısaltma + köşe yuvarlama ile bir kez bulunur, tekne gövdesi hiçbir yerde karaya değmez. Yeri sunucu saatinin **saf fonksiyonu** (ağ trafiği yok): rıhtımda 60 sn bekleme, yamuk hız profili (6,2 m/s ≈ 12 knot), iki gemi sancaktan sancağa geçer |
+| **Vapur görüntüsü** | Şehir Hatları rengi tek mesh gövde: beyaz küpeşte, siyah şerit, kırmızı karina, iki ucunda köprüüstü, kırmızı-siyah baca, can sandalları, korkuluk; her gemi için tek MultiMesh örneği + köpük izi. Deniz shader'ıyla **aynı Gerstner dalgalarında** boy ve yalpa yapar (dalga yüksekliği sunucunun gerçek deniz verisinden). Yanaşmadan 20 sn önce ve kalkmadan 6 sn önce **düdük** (mesafeye göre kısılır, saat tabanlı, ağsız) |
 | **Sokak kedileri** | Park etmiş arabaların kaputunda ve banklarda uyuyan, kaldırımda gezinen kediler (herkes için aynı). Yanına git: **E** / **Sev** → mırlar |
 | **Güvercinler** | Meydan, park ve durak önlerinde yem arayan sürüler; biri yaklaşınca (koşarak daha uzaktan) havalanır, başka yere konar |
 | **Tabelalar** | OSM'deki 394 gerçek işletmenin adı (kafe, restoran, eczane "ECZANE", banka, dükkân) bulunduğu binanın sokağa bakan cephesinde; kavşaklarda mavi **İstanbul sokak levhaları** ("Bahariye Cd.", "Nail Bey Sk.") |
 | Sokak eşyası | **93 park etmiş araba** (bir kısmı sarı taksi, tramvay yollarında, kavşak ve geçitlerde park yok), bank, yaya bölgesi girişlerinde **babalar**, sokak lambaları, katener, raylar |
-| **Sesler** | Hepsi istemcide sentezlenir (indirilecek ses dosyası yok): şehir uğultusu (gece azalır), hızına göre tramvay gürültüsü, tramvay zili, ayak sesleri, martılar, serçeler, yağmur, gök gürültüsü, tekme ve konteyner çarpma sesleri, konuşma isteği sinyali, kedi mırlaması |
+| **Sesler** | Hepsi istemcide sentezlenir (indirilecek ses dosyası yok): şehir uğultusu (gece azalır), hızına göre tramvay gürültüsü, tramvay zili, ayak sesleri, martılar, serçeler, yağmur, gök gürültüsü, tekme ve konteyner çarpma sesleri, konuşma isteği sinyali, kedi mırlaması, vapur düdüğü |
 | Dokular | Yollar prosedürel shader: parke taşı, Arnavut kaldırımı, yamalı asfalt ve şerit çizgileri, kenar taşları, zebra, çim. Binalar küçük **CC0 ambientCG** dokuları kullanır (sıva, tuğla, taş, kiremit, düz çatı; 256-512 px, toplam ~0,2 MB, bkz. `LICENSES/third-party.md`); Düşük kalitede normal haritasız hafif shader |
 | Mimari | OSM etiketleri (`building:material`, `building:colour`, `roof:shape`, `roof:colour`, `building:levels`, `start_date`) hattan geçer; yoksa bina kimliğinden türetilir. Sıva/tuğla/taş/beton cepheler, pencere çerçevesi ve denizlik, kat bantları, dükkân camları, balkon, cumba, tente; **kiremit kırma/kırma-kalem çatılar** (saçak ve yağmurluk), düz çatıda su deposu, klima, anten, çanak, baca ve merdiven kulesi; **camilerde kubbe ve minare, kiliselerde çan kulesi**; gece yanan pencereler |
 | T3 modeli | Krem-bordo gövde, yuvarlak uçlar, tepe aydınlığı, ahşap çerçeveli camlar ve içeride ahşap çıtalı banklar ile tutamaklar, ön "KADIKÖY – MODA" tabelası, geceleri yanan far, hat numarası lambası, tele değen trolley direği, boji ve tekerlekler, kavrama; parça başına tek mesh, 80 m ötesinde basit kutu; çarpışma kutusu sunucununkiyle aynı |
@@ -210,7 +212,7 @@ Masaüstü istemci de bir WebSocket sunucusuna bağlanabilir: sunucu alanına
 
 ```bash
 "$GODOT" --headless --path game --import      # ilk seferde sınıf önbelleği için
-"$GODOT" --headless --path game -- --test     # 270 kontrol
+"$GODOT" --headless --path game -- --test     # 9357 kontrol
 python -m unittest discover -s world-pipeline/tests   # 26 test
 python tools/bots.py smoke                    # 2 bot: tanış, konuş, yaz, el salla, engelle, engeli kaldır, kalıcılık
 python tools/bots.py smoke --transport ws     # aynısı WebSocket üzerinden
@@ -282,13 +284,13 @@ game/                      Godot 4.7 projesi (istemci + headless sunucu)
   net/net.gd               tüm RPC yüzeyi (autoload "Net")
   shared/                  protokol, PlayerMotor (basamak, tramvay çarpışması), codec, avatar kuralları,
                            zone ve dünya kurucu, street_layout (sokak eşyası yerleşimi), prop_layout,
-                           crowd (NPC yayalar), transit (zaman tablosu), road_graph, route_planner
+                           crowd (NPC yayalar), ferries (vapurlar), transit (zaman tablosu), road_graph, route_planner
   server/                  zone sunucusu, sosyal kurallar, kalıcılık, spawn seçici,
                            prop_world (rijit cisimler), weather_service (Open-Meteo)
   client/                  oyun istemcisi, HUD, menü, avatar, uzak oyuncu, bot, dokunmatik kontroller,
                            tram_fleet, city_map (radar + harita), navigator, city_visuals, city_materials,
                            sky_controller, graphics_quality, mesh_merger, prop_view, crowd_view, critters,
-                           weather_view, city_sounds, frame_profiler
+                           weather_view, ferry_view, city_sounds, frame_profiler
   zones/<zone_id>/         zone.json, spawn_points.json, metadata, attribution, checksum
   assets/characters/        CC0 insan modelleri, saçlar, pişmiş animasyon kütüphaneleri ve gövde mesh'leri
   tools/                   bake_avatar_anims.gd (retarget + gövde verisi), pose_preview.gd
@@ -302,7 +304,7 @@ LICENSES/                  OSM (ODbL) ve üçüncü taraf bileşenler
 Geliştirme araçları: istemci `--perf` ile iki saniyede bir fps, çizim çağrısı
 ve bölüm bölüm betik süresi yazar (`--perf=Ad1,Ad2` o sahne parçalarını
 gizleyerek maliyetini ölçer); `--quality=low|medium|high`,
-`--screenshot=dosya.png` (`--look-npc`, `--look-sign`, `--tram-shot` ile
+`--screenshot=dosya.png` (`--look-npc`, `--look-sign`, `--tram-shot`, `--ferry-shot` ile
 kadraj). Bu pencereler odak almaz ve ekranın dışında durur.
 
 ### Yeni bir zone üretmek

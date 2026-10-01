@@ -22,7 +22,7 @@ func _ready() -> void:
 
 
 		test_traffic_model, test_traffic_road_rules, test_traffic_headway_and_signals, test_traffic_density,
-		test_traffic_collision,
+		test_traffic_collision, test_ferries, test_ferry_horn_and_view,
 	]
 	var only := OS.get_environment("TEST_ONLY")  # e.g. TEST_ONLY=traffic runs the tests with that in their name
 	for t in tests:
@@ -2187,3 +2187,132 @@ func test_traffic_collision() -> void:
 	check(tested >= 3, "crossings to stand on (%d)" % tested)
 	check(touched == 0, "nobody standing on a red crossing is hit or pushed (%d touches)" % touched)
 	holder.queue_free()
+
+
+# --- ferries --------------------------------------------------------------------------------------
+
+func test_ferries() -> void:
+	_kadikoy_traffic()
+	var zone: ZoneData = _traffic_zone
+	var a := Ferries.for_zone(zone)
+	var b := Ferries.for_zone(zone)
+	check(a.lines.size() >= 2, "ferry lines found a sea route (%d)" % a.lines.size())
+	check(a.ships.size() >= 3, "enough ferries (%d)" % a.ships.size())
+	check(b.ships.size() == a.ships.size(), "both instances build the same fleet")
+	var mismatches := 0
+	var land_hits := 0
+	var sailing := 0
+	var docked := 0
+	var fastest := 0.0
+	for tick in [0, 1, 37, 250, 900, 4321, 13337, 60011, 123456]:
+		var t: float = tick * Protocol.DT
+		for i in a.ships.size():
+			var sa: Ferries.Ship = a.ships[i]
+			var sb: Ferries.Ship = b.ships[i]
+			a.place(sa, t)
+			b.place(sb, t)
+			if sa.pos != sb.pos or sa.dir != sb.dir or sa.speed != sb.speed:
+				mismatches += 1
+			fastest = maxf(fastest, sa.speed)
+			if sa.speed > 1.0:
+				sailing += 1
+			if sa.docked:
+				docked += 1
+	check(mismatches == 0, "the same tick gives the same ferries (%d differ)" % mismatches)
+	check(sailing > 0 and docked > 0, "ferries both sail (%d) and lie at a berth (%d)" % [sailing, docked])
+	check(fastest <= Ferries.SPEED + 0.01, "no ferry beats its cruising speed (%.2f)" % fastest)
+	for l: Ferries.Line in a.lines:
+		# The whole route, hull ends included, stays on water inside the zone.
+		var probe := Ferries.Ship.new()
+		probe.line = l
+		var tt := 0.0
+		while tt < l.period:
+			a.place(probe, tt)
+			for off in [-Ferries.HULL_LENGTH * 0.5, 0.0, Ferries.HULL_LENGTH * 0.5]:
+				var q: Vector2 = probe.pos + probe.dir * float(off)
+				# Beyond the zone edge the mask says "land" for want of data; ignore that rim.
+				if absf(q.x) < zone.half_size() - 2.0 and absf(q.y) < zone.half_size() - 2.0 and zone.coast.is_land(q):
+					land_hits += 1
+			tt += 2.0
+		check(l.period > 2.0 * l.leg_time, "%s: the timetable leaves time at the berths" % l.name)
+		check(l.leg_time * Ferries.SPEED >= l.length * 0.9, "%s: the leg time matches the length" % l.name)
+	check(land_hits == 0, "no ferry route touches land (%d hull samples)" % land_hits)
+	# Time continuity: a ship never jumps, and the cycle repeats exactly.
+	var jumps := 0
+	var repeats := 0
+	for ship: Ferries.Ship in a.ships:
+		var t := 0.0
+		var prev := Vector2.INF
+		while t < ship.line.period * 1.02:
+			a.place(ship, t)
+			if prev != Vector2.INF and prev.distance_to(ship.pos) > Ferries.SPEED * 0.9:  # the outer side of a tight bend is quicker than the track
+				jumps += 1
+			prev = ship.pos
+			t += 0.5
+		a.place(ship, 100.0)
+		var p1 := ship.pos
+		a.place(ship, 100.0 + ship.line.period)
+		if p1.distance_to(ship.pos) > 0.01:
+			repeats += 1
+	check(jumps == 0, "ferries move smoothly (%d jumps)" % jumps)
+	check(repeats == 0, "the timetable repeats every period (%d ships off)" % repeats)
+	# A ship lies at berth A with its centre on the berth, and ships of a line keep apart.
+	var l0: Ferries.Line = a.lines[0]
+	var s0: Ferries.Ship = null
+	for s: Ferries.Ship in a.ships:
+		if s.line == l0:
+			s0 = s
+			break
+	a.place(s0, l0.period - s0.offset + 2.0)  # two seconds into the dwell at A
+	check(s0.docked and s0.speed == 0.0, "ship rests at the berth")
+	check(s0.pos.distance_to(l0.berth_a) < 0.5, "the resting ship lies at the berth (%.2f m)" % s0.pos.distance_to(l0.berth_a))
+	var close := 0
+	for line: Ferries.Line in a.lines:
+		var same: Array = []
+		for s: Ferries.Ship in a.ships:
+			if s.line == line:
+				same.append(s)
+		if same.size() < 2:
+			continue
+		var t := 0.0
+		while t < line.period:
+			a.place(same[0], t)
+			a.place(same[1], t)
+			if same[0].pos.distance_to(same[1].pos) < Ferries.HULL_BEAM + 1.0 and not (same[0].away or same[1].away):
+				close += 1
+			t += 5.0
+	check(close == 0, "ferries of a line pass without touching (%d close samples)" % close)
+
+
+func test_ferry_horn_and_view() -> void:
+	_kadikoy_traffic()
+	var f := Ferries.for_zone(_traffic_zone)
+	var l: Ferries.Line = f.lines[0]
+	var ship: Ferries.Ship = null
+	for s: Ferries.Ship in f.ships:
+		if s.line == l:
+			ship = s
+			break
+	var phases := f.horn_phases(l)
+	check(phases.size() >= 2, "a line has horn blasts (%d)" % phases.size())
+	# Walk one whole period in 0.05 s steps: every blast is heard exactly once.
+	var heard := 0
+	var t := 0.0
+	while t < l.period:
+		if f.horn_between(ship, t, t + 0.05):
+			heard += 1
+		t += 0.05
+	check(heard == phases.size(), "each horn blast sounds once per cycle (%d of %d)" % [heard, phases.size()])
+	check(not f.horn_between(ship, 0.0, 0.0), "an empty window has no horn")
+	# The view's swell is the shader's Gerstner height: calm sea is flat, rough sea is bounded.
+	check(FerryView.swell(Vector2(10, 20), 3.0, 0.0, 0.5, 1.0, 20.0) == 0.0, "no amplitude, no swell")
+	var worst := 0.0
+	for i in 200:
+		worst = maxf(worst, absf(FerryView.swell(Vector2(i * 7.3, i * 3.1), i * 0.37, 0.4, 1.1, 1.2, 24.0)))
+	check(worst > 0.1 and worst <= 0.4 * 1.67 + 0.001, "swell stays within the three wave amplitudes (%.3f)" % worst)
+	var hull := FerryView.hull_mesh()
+	var verts := (hull.surface_get_arrays(0)[Mesh.ARRAY_VERTEX] as PackedVector3Array)
+	check(verts.size() > 300 and verts.size() < 6000, "the hull mesh is a few thousand vertices at most (%d)" % verts.size())
+	var box := hull.get_aabb()
+	check(box.size.z > 36.0 and box.size.x > 8.0 and box.position.y < -1.0 and box.end.y > 10.0, "hull proportions look like a ferry (%s)" % str(box.size))
+	check(FerryView.wake_mesh().get_aabb().size.z > 60.0, "the wake trails behind the ship")

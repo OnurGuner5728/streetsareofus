@@ -33,6 +33,29 @@ func box(group: String, size: Vector3, pos: Vector3, color: Color, basis := Basi
 	add(group, m, Transform3D(basis, pos), color)
 
 
+## A flat quad a-b-c-d (any winding); `outward` says which side is the front.
+## Godot's front faces are clockwise, so the order is flipped when needed.
+func quad(group: String, a: Vector3, b: Vector3, c: Vector3, d: Vector3, color: Color, outward: Vector3) -> void:
+	var st: SurfaceTool = _groups.get(group)
+	if st == null:
+		st = SurfaceTool.new()
+		st.begin(Mesh.PRIMITIVE_TRIANGLES)
+		_groups[group] = st
+	var n := (b - a).cross(c - a)
+	if n.length_squared() < 0.000001:
+		n = (c - a).cross(d - a)
+	if n.dot(outward) > 0.0:
+		var tmp := b
+		b = d
+		d = tmp
+		n = -n
+	var normal := (-n).normalized()
+	for v in [a, b, c, a, c, d]:
+		st.set_color(color)
+		st.set_normal(normal)
+		st.add_vertex(v)
+
+
 func capsule(group: String, radius: float, height: float, pos: Vector3, color: Color, scale := Vector3.ONE, segments := 10) -> void:
 	var m := CapsuleMesh.new()
 	m.radius = radius
